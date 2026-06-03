@@ -153,11 +153,32 @@ def extract_state_from_location(loc: str):
 
 
 def parse_height_from_dims(dims: str):
+    """
+    Parse truck max usable height from dims string.
+    Format: LxWxH_inside(H_door_openingxW_door_opening)
+    e.g.  264x98x97(94x91)
+    - 97  = interior box height
+    - 91  = door opening height  ← binding constraint for loading
+    If parenthesized section present, return the LAST number inside it
+    (door opening height). Otherwise fall back to the 3rd main number.
+    """
     if not dims:
         return None
-    parts = re.split(r"\s*[xX]\s*", dims.strip())
-    if len(parts) >= 3:
-        m = re.search(r"\d+", parts[2])
+    # Look for parenthesised section, e.g. (94x91)
+    paren_m = re.search(r"\(([^)]+)\)", dims)
+    if paren_m:
+        inner = paren_m.group(1)
+        # Split on x/X and take the last number — that's the door height
+        numbers = re.findall(r"\d+", inner)
+        if numbers:
+            try:
+                return int(numbers[-1])
+            except ValueError:
+                pass
+    # Fallback: third token of main dims
+    main = re.split(r"\s*[xX]\s*", dims.split("(")[0].strip())
+    if len(main) >= 3:
+        m = re.search(r"\d+", main[2])
         if m:
             try:
                 return int(m.group())
@@ -953,11 +974,23 @@ def find_best_truck_for_pickup_with_date(
                 overweight_detail = detail_str
                 continue
 
-        truck_height = t.get("max_height_in")
+        truck_height = t.get("max_height_in")  # door opening height
         if load_height_in is not None and truck_height is not None:
-            if load_height_in > truck_height:
+            # Check whether the load is stackable — read from Notes in raw email
+            # Stackable pallets: if two identical pieces, check combined height
+            effective_height = load_height_in
+
+            # Detect stackable stacking: "Stackable: Yes" + pieces count
+            # Combined height for stacked loads is handled by caller passing
+            # load_height_in already doubled — so we just compare directly here.
+            # But also support a note like "48+48=96" meaning two pallets stacked.
+
+            if effective_height > truck_height:
                 saw_over_height    = True
-                detail_str         = f"too tall ({load_height_in}\" > {truck_height}\" truck)"
+                detail_str = (
+                    f"too tall ({effective_height}\" load > "
+                    f"{truck_height}\" door opening)"
+                )
                 per_truck_log.append((name, detail_str))
                 over_height_detail = detail_str
                 continue
@@ -1056,6 +1089,28 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     load_weight_lbs = parse_weight_lbs(weight)
     dims_raw        = _find(r"Dimensions:\s*([^\n]+)", t)
     load_height_in  = parse_load_height_from_dims(dims_raw) if dims_raw else None
+
+    # --- Stackable height adjustment ---
+    # If load is stackable AND pieces == 2, the effective height doubles.
+    # Also support notes like "48+48=96" which state the stacked height explicitly.
+    stackable_flag = _find(r"Stackable:\s*(Yes|No)", t)
+    pieces_for_height = _find(r"Pieces:\s*([0-9]+)", t)
+
+    if load_height_in is not None:
+        # Explicit stacked-height note, e.g. "48+48=96" in Notes
+        stacked_note = re.search(
+            r"\b(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)\b", t
+        )
+        if stacked_note:
+            # Use the stated combined height
+            load_height_in = int(stacked_note.group(3))
+        elif (stackable_flag or "").upper() == "YES" and pieces_for_height:
+            try:
+                piece_count = int(pieces_for_height)
+                if piece_count == 2:
+                    load_height_in = load_height_in * 2
+            except ValueError:
+                pass
     estimated_miles_from_email = extract_estimated_miles_from_email(t)
 
     best_truck, deadhead_miles, reject_reason, per_truck_log = None, None, None, []
