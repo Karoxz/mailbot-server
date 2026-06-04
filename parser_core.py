@@ -1401,7 +1401,7 @@ def _extract_state_codes_from_text(text: str) -> list:
 
 # ─── Adapter called by FastAPI ─────────────────────────────────────────
 def parse_email_for_api(request_data: dict) -> dict:
-
+    global TRUCKS, BID_TEMPLATE
     # Build local trucks list
     local_trucks = []
     for t in request_data.get('trucks', []):
@@ -1431,7 +1431,6 @@ def parse_email_for_api(request_data: dict) -> dict:
 
     # Entire swap + process + restore must be inside ONE lock acquisition
     with _PARSE_REQUEST_LOCK:
-        global TRUCKS, BID_TEMPLATE
         _saved_trucks   = TRUCKS
         _saved_template = BID_TEMPLATE
         TRUCKS          = local_trucks
