@@ -53,10 +53,10 @@ NOMINATIM_URL  = "https://nominatim.openstreetmap.org/search"
 GEOCODER_UA    = "MailBotDispatcher/1.0"
 GEO_CACHE_FILE   = "geo_cache.json"
 ROUTE_CACHE_FILE = "route_cache.json"
-_GEO_CACHE_LOCK   = threading.Lock()
-_ROUTE_CACHE_LOCK = threading.Lock()
 _GEO_CACHE_DIRTY   = False
 _ROUTE_CACHE_DIRTY = False
+_GEO_CACHE_LOCK   = threading.Lock()
+_ROUTE_CACHE_LOCK = threading.Lock()
 # Serializes access to global TRUCKS/BID_TEMPLATE during request processing
 _PARSE_REQUEST_LOCK = threading.Lock()
 ROUTE_CACHE_TTL_DAYS = 30
