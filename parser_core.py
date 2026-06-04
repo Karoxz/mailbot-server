@@ -1,11 +1,7 @@
 # =============================================================
-# mailbot_dispatcher_247.py  —  server-side module
-#
-# Removed:  Tkinter / GUI, Gmail OAuth / Google API client,
-#           Telegram bot, webbrowser, pyperclip, subprocess,
-#           PIL / ImageTk, ctypes, Windows-only code.
-# Added:    GRAPHHOPPER_URL  → localhost:8989
-#           dispatch_email() → clean FastAPI entry-point
+# parser_core.py  —  server-side module
+# Thread-safe: process_bid_email takes trucks/template as
+# parameters — zero global mutation during request handling.
 # =============================================================
 
 import os
@@ -34,40 +30,42 @@ from requests.adapters import HTTPAdapter
 # CONFIGURATION
 # =============================================================
 
-# GraphHopper runs on the same server — point directly to localhost
-GRAPHHOPPER_URL  = "http://127.0.0.1:8989/route"
+GRAPHHOPPER_URL           = "http://127.0.0.1:8989/route"
 GRAPHHOPPER_MILE_FACTOR   = 1.03
 GRAPHHOPPER_CORRECTION    = 1.04
 DEADHEAD_UNDER_600_OFFSET = -7
 
 OSRM_BASE = "http://router.project-osrm.org"
 
-ORS_API_KEY  = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjZiYTM2ZGYzZTI2YjQ3MGViYjBkNzAwOTgzODM3MjA1IiwiaCI6Im11cm11cjY0In0="
-ORS_URL      = "https://api.openrouteservice.org/v2/directions/driving-car"
+ORS_API_KEY     = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjZiYTM2ZGYzZTI2YjQ3MGViYjBkNzAwOTgzODM3MjA1IiwiaCI6Im11cm11cjY0In0="
+ORS_URL         = "https://api.openrouteservice.org/v2/directions/driving-car"
 _ORS_DISABLED   = False
 _ORS_FAIL_COUNT = 0
 _ORS_LOCK       = threading.Lock()
 
-PHOTON_URL     = "https://photon.komoot.io/api/"
-NOMINATIM_URL  = "https://nominatim.openstreetmap.org/search"
-GEOCODER_UA    = "MailBotDispatcher/1.0"
+PHOTON_URL    = "https://photon.komoot.io/api/"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+GEOCODER_UA   = "MailBotDispatcher/1.0"
+
 GEO_CACHE_FILE   = "geo_cache.json"
 ROUTE_CACHE_FILE = "route_cache.json"
-_GEO_CACHE_DIRTY   = False
-_ROUTE_CACHE_DIRTY = False
 _GEO_CACHE_LOCK   = threading.Lock()
 _ROUTE_CACHE_LOCK = threading.Lock()
-# Serializes access to global TRUCKS/BID_TEMPLATE during request processing
-_PARSE_REQUEST_LOCK = threading.Lock()
+_GEO_CACHE_DIRTY   = False
+_ROUTE_CACHE_DIRTY = False
+
 ROUTE_CACHE_TTL_DAYS = 30
 
-FRESH_WINDOW      = "2d"
-STOP_EVENT        = threading.Event()
-TRUCKS            = []
-LOAD_STORE        = {}
-LOAD_STORE_LOCK   = threading.Lock()
-BID_TEMPLATE_LOCK = threading.Lock()
+FRESH_WINDOW    = "2d"
+STOP_EVENT      = threading.Event()
 
+# LOAD_STORE is only written once per request (after processing),
+# never read during processing — safe without a request lock.
+LOAD_STORE      = {}
+LOAD_STORE_LOCK = threading.Lock()
+
+# Default template — read-only after startup, never mutated per-request
+BID_TEMPLATE_LOCK = threading.Lock()
 BID_TEMPLATE = """Rate: $
 Dims: {truck_dimensions}
 MC# 1616501
@@ -89,8 +87,10 @@ _http_retry = Retry(
 )
 session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
+
+
 def _cache_flush_worker():
-    """Flush caches to disk every 30s only when dirty — avoids per-hit I/O."""
+    """Flush caches to disk every 30s only when dirty."""
     global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
     while not STOP_EVENT.is_set():
         time.sleep(30)
@@ -104,6 +104,7 @@ def _cache_flush_worker():
                 _ROUTE_CACHE_DIRTY = False
 
 threading.Thread(target=_cache_flush_worker, daemon=True).start()
+
 
 # =============================================================
 # US STATE / REGION CONSTANTS
@@ -172,27 +173,19 @@ def extract_state_from_location(loc: str):
 def parse_height_from_dims(dims: str):
     """
     Parse truck max usable height from dims string.
-    Format: LxWxH_inside(H_door_openingxW_door_opening)
-    e.g.  264x98x97(94x91)
-    - 97  = interior box height
-    - 91  = door opening height  ← binding constraint for loading
-    If parenthesized section present, return the LAST number inside it
-    (door opening height). Otherwise fall back to the 3rd main number.
+    Format: LxWxH(H_door x W_door)  e.g. 264x98x97(94x91)
+    Returns door opening height if present, else interior height.
     """
     if not dims:
         return None
-    # Look for parenthesised section, e.g. (94x91)
     paren_m = re.search(r"\(([^)]+)\)", dims)
     if paren_m:
-        inner = paren_m.group(1)
-        # Split on x/X and take the last number — that's the door height
-        numbers = re.findall(r"\d+", inner)
+        numbers = re.findall(r"\d+", paren_m.group(1))
         if numbers:
             try:
                 return int(numbers[-1])
             except ValueError:
                 pass
-    # Fallback: third token of main dims
     main = re.split(r"\s*[xX]\s*", dims.split("(")[0].strip())
     if len(main) >= 3:
         m = re.search(r"\d+", main[2])
@@ -258,11 +251,6 @@ def _in_us(lat: float, lon: float) -> bool:
 
 
 def is_location_in_us(location: str) -> bool:
-    """
-    Returns True if the location geocodes to a US coordinate.
-    Returns True (pass-through) if geocoding fails — so we don't drop
-    loads just because a geocoder is temporarily unavailable.
-    """
     if not location or not location.strip():
         return True
     coords = photon_geocode(location.strip())
@@ -272,7 +260,6 @@ def is_location_in_us(location: str) -> bool:
 
 
 def build_google_maps_route_url(pickup: str, delivery: str) -> str:
-    """Builds a Google Maps directions URL from pickup to delivery."""
     if not pickup or not delivery:
         return ""
     return (
@@ -329,7 +316,6 @@ def _geocode_nominatim(place: str, place_clean: str):
                 except (KeyError, ValueError):
                     continue
                 if _in_us(lat, lon):
-                    print(f"Nominatim: '{place_clean}' -> {lat:.4f},{lon:.4f}")
                     return [lat, lon]
             return None
         except requests.exceptions.Timeout:
@@ -358,7 +344,6 @@ def _geocode_photon(place: str, place_clean: str):
                 lat, lon = float(coords[1]), float(coords[0])
                 country = (feat.get("properties", {}).get("country", "") or "").upper()
                 if _in_us(lat, lon) or country in ("US", "USA", "UNITED STATES"):
-                    print(f"Photon: '{place_clean}' -> {lat:.4f},{lon:.4f}")
                     return [lat, lon]
             return None
         except requests.exceptions.Timeout:
@@ -377,7 +362,6 @@ def photon_geocode(place: str):
         return cached
 
     place_clean = _normalize_address(place.strip())
-
     result_holder = [None]
     found_event   = threading.Event()
 
@@ -404,12 +388,12 @@ def photon_geocode(place: str):
 
     out = result_holder[0]
     if out:
+        global _GEO_CACHE_DIRTY
         with _GEO_CACHE_LOCK:
             GEO_CACHE[key] = out
-            global _GEO_CACHE_DIRTY
             _GEO_CACHE_DIRTY = True
     else:
-        print(f"Geocoding failed entirely for '{place_clean}'")
+        print(f"Geocoding failed for '{place_clean}'")
     return out
 
 
@@ -429,14 +413,15 @@ def _ors_route(origin_latlon, dest_latlon):
     try:
         r = session.post(ORS_URL,
                          json={"coordinates": [[lon1, lat1], [lon2, lat2]], "units": "mi"},
-                         headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+                         headers={"Authorization": ORS_API_KEY,
+                                  "Content-Type": "application/json"},
                          timeout=12)
         if r.status_code in (403, 429):
             with _ORS_LOCK:
                 _ORS_FAIL_COUNT += 1
                 if _ORS_FAIL_COUNT >= 3:
                     _ORS_DISABLED = True
-                    print("⛔ ORS disabled for this session.")
+                    print("ORS disabled for this session.")
             return None
         if r.status_code != 200:
             print(f"ORS HTTP {r.status_code}: {r.text[:200]}")
@@ -444,7 +429,8 @@ def _ors_route(origin_latlon, dest_latlon):
         with _ORS_LOCK:
             _ORS_FAIL_COUNT = 0
         summary = r.json()["routes"][0]["summary"]
-        return {"miles": round(summary["distance"]), "minutes": round(summary["duration"] / 60)}
+        return {"miles": round(summary["distance"]),
+                "minutes": round(summary["duration"] / 60)}
     except requests.exceptions.Timeout:
         print("ORS timeout")
         return None
@@ -454,7 +440,8 @@ def _ors_route(origin_latlon, dest_latlon):
 
 
 _GH_PORT_CACHE = {"up": None, "checked_at": 0}
-_GH_PORT_TTL   = 10  # seconds
+_GH_PORT_TTL   = 10
+
 
 def is_port_open(host="127.0.0.1", port=8989):
     now = time.time()
@@ -462,7 +449,7 @@ def is_port_open(host="127.0.0.1", port=8989):
         return _GH_PORT_CACHE["up"]
     try:
         with socket.create_connection((host, port), timeout=2):
-            _GH_PORT_CACHE.update({"up": True,  "checked_at": now})
+            _GH_PORT_CACHE.update({"up": True, "checked_at": now})
             return True
     except OSError:
         _GH_PORT_CACHE.update({"up": False, "checked_at": now})
@@ -536,9 +523,8 @@ def compute_route(origin_latlon, dest_latlon):
         cached = ROUTE_CACHE.get(cache_key)
 
     if cached:
-        cached_ts     = cached.get("ts", 0)
+        age_secs      = now - cached.get("ts", 0)
         cached_source = cached.get("source", "unknown")
-        age_secs      = now - cached_ts
         gh_running    = is_port_open()
 
         if gh_running and cached_source != "gh" and age_secs > 3600:
@@ -616,12 +602,14 @@ def extract_vehicle_required(t):
     if vr:
         return vr
     return _find(
-        r"Vehicle\s*required.*?(LARGE STRAIGHT|SMALL STRAIGHT|CARGO VAN|SPRINTER|BOX TRUCK|STRAIGHT TRUCK)", t
+        r"Vehicle\s*required.*?"
+        r"(LARGE STRAIGHT|SMALL STRAIGHT|CARGO VAN|SPRINTER|BOX TRUCK|STRAIGHT TRUCK)",
+        t
     )
 
 
 def _bounded_section_window(text: str, label_regex: str,
-                             stop_regexes=None, window: int = 350) -> str | None:
+                             stop_regexes=None, window: int = 350):
     m = re.search(label_regex, text, re.IGNORECASE)
     if not m:
         return None
@@ -635,10 +623,6 @@ def _bounded_section_window(text: str, label_regex: str,
     return chunk
 
 
-def find_window_after_label(text, label_regex, window=350):
-    return _bounded_section_window(text, label_regex, window=window)
-
-
 def extract_datetime_from_window(win):
     return _find(
         r"([0-9]{1,2}/[0-9]{1,2}/(?:[0-9]{4}|[0-9]{2})"
@@ -649,7 +633,7 @@ def extract_datetime_from_window(win):
 
 def extract_location_after_label(text, label_regex):
     US_STATES   = _US_STATES_SET
-    FAKE_STATES = {"XX","ZZ","YY","AA","BB","QQ"}
+    FAKE_STATES = {"XX", "ZZ", "YY", "AA", "BB", "QQ"}
     m = re.search(label_regex, text, re.IGNORECASE)
     if not m:
         return None
@@ -673,14 +657,21 @@ def extract_location_after_label(text, label_regex):
         m2 = re.search(r"\b([A-Z]{2})\s+(\d{5})\b", line)
         if m2 and m2.group(1) in US_STATES:
             return f"{m2.group(1)} {m2.group(2)}"
-        m2 = re.search(r"\b(\d{5})\s*[-–]?\s*([A-Za-z][A-Za-z .'\-]{1,30},\s*[A-Z]{2})\b", line)
+        m2 = re.search(
+            r"\b(\d{5})\s*[-–]?\s*([A-Za-z][A-Za-z .'\-]{1,30},\s*[A-Z]{2})\b", line)
         if m2:
             state = re.search(r",\s*([A-Z]{2})", m2.group(2))
             if state and state.group(1) in US_STATES:
                 return f"{m2.group(2).strip()} {m2.group(1)}"
-        states_found = [(m3.group(), m3.start()) for m3 in re.finditer(r"\b([A-Z]{2})\b", line)
-                        if m3.group() in US_STATES and m3.group() not in FAKE_STATES]
-        zips_found   = [(m3.group(), m3.start()) for m3 in re.finditer(r"\b(\d{5})\b", line)]
+        states_found = [
+            (m3.group(), m3.start())
+            for m3 in re.finditer(r"\b([A-Z]{2})\b", line)
+            if m3.group() in US_STATES and m3.group() not in FAKE_STATES
+        ]
+        zips_found = [
+            (m3.group(), m3.start())
+            for m3 in re.finditer(r"\b(\d{5})\b", line)
+        ]
         best_pair = None
         for state, spos in states_found:
             for zip_code, zpos in zips_found:
@@ -848,9 +839,7 @@ def parse_truck_definitions(text):
         states_raw   = parts[5] if len(parts) > 5 else ""
         zip_loc      = parts[6] if len(parts) > 6 else ""
         date         = parts[7].upper() if len(parts) > 7 else ""
-
         truck_states = expand_states(states_raw) if states_raw.strip() else None
-
         trucks.append({
             "vehicle":         vehicle.upper(),
             "zip":             zip_loc,
@@ -885,22 +874,24 @@ def validate_truck_definitions(text):
         if parse_weight_lbs(parts[3]) is None:
             errors.append(f"Line {i}: cannot parse payload '{parts[3]}' as a number")
         if len(parts) > 5 and parts[5].strip():
-            expanded = expand_states(parts[5])
-            if not expanded:
+            if not expand_states(parts[5]):
                 errors.append(
                     f"Line {i}: cannot expand '{parts[5]}' — "
-                    f"use state codes (OH,PA) or region names (East Coast, Midwest, West Coast)"
+                    f"use state codes (OH,PA) or region names "
+                    f"(East Coast, Midwest, West Coast)"
                 )
         if len(parts) > 7 and parts[7].strip():
             if not normalize_mmddyyyy(parts[7]):
-                errors.append(f"Line {i}: date '{parts[7]}' must be MM/DD/YYYY or MM/DD/YY")
+                errors.append(
+                    f"Line {i}: date '{parts[7]}' must be MM/DD/YYYY or MM/DD/YY")
     return errors
 
 
 def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
                          delivery, delivery_dt, google_deadhead=None,
                          driver_name="", truck_type="", truck_dims="",
-                         deadhead_eta_minutes=None, truck_equipment=""):
+                         deadhead_eta_minutes=None, truck_equipment="",
+                         bid_template=None):
     eta_str = fmt_hours_minutes(deadhead_eta_minutes) if deadhead_eta_minutes else ""
     data = dict(
         order=order or "", broker_name=broker or "",
@@ -911,19 +902,22 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         truck_dimensions=truck_dims, deadhead_eta_str=eta_str,
         truck_equipment=truck_equipment or "",
     )
-    with BID_TEMPLATE_LOCK:
-        template = BID_TEMPLATE
+    # Use passed template, fall back to global default
+    if bid_template is None:
+        with BID_TEMPLATE_LOCK:
+            bid_template = BID_TEMPLATE
     try:
-        return template.format(**data)
+        return bid_template.format(**data)
     except KeyError as e:
         print(f"BID_TEMPLATE missing key: {e}")
-        return template
+        return bid_template
 
 
 def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
                          delivery_loc, delivery_dt, google_deadhead=None,
                          driver_name="", truck_type="", truck_dimensions="",
-                         deadhead_eta_minutes=None, truck_equipment=""):
+                         deadhead_eta_minutes=None, truck_equipment="",
+                         bid_template=None):
     return build_bid_email_body(
         order=order, broker="", vehicle=vehicle_required,
         pickup=pickup_loc, pickup_dt=pickup_dt,
@@ -932,6 +926,7 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
         truck_type=truck_type, truck_dims=truck_dimensions,
         deadhead_eta_minutes=deadhead_eta_minutes,
         truck_equipment=truck_equipment,
+        bid_template=bid_template,
     )
 
 
@@ -947,7 +942,7 @@ def _vehicle_matches(truck_veh: str, required: str) -> bool:
 
 def _fmt_truck_detail(per_truck_log: list) -> str:
     if not per_truck_log:
-        return "\n  (no trucks were evaluated — check truck list / pickup location)"
+        return "\n  (no trucks — check truck list / pickup location)"
     return "\n" + "\n".join(f"  {n}: {r}" for n, r in per_truck_log)
 
 
@@ -957,8 +952,8 @@ def find_best_truck_for_pickup_with_date(
         load_weight_lbs=None,
         load_height_in=None,
         delivery_loc=None):
-    best, best_miles = None, None
-    per_truck_log    = []
+    best, best_miles   = None, None
+    per_truck_log      = []
     saw_vehicle_match  = False
     saw_overweight     = False
     saw_over_height    = False
@@ -972,7 +967,8 @@ def find_best_truck_for_pickup_with_date(
         name = t.get("driver_name") or t["vehicle"]
 
         if not _vehicle_matches(t["vehicle"], vehicle_required):
-            per_truck_log.append((name, f"vehicle mismatch ({t['vehicle']} ≠ {vehicle_required})"))
+            per_truck_log.append(
+                (name, f"vehicle mismatch ({t['vehicle']} ≠ {vehicle_required})"))
             continue
         saw_vehicle_match = True
 
@@ -980,14 +976,16 @@ def find_best_truck_for_pickup_with_date(
             truck_date_label = t.get("pickup_date") or "any"
             email_date_label = (extract_pickup_date_only(pickup_dt)
                                 or ("ASAP" if has_pickup_asap(raw_text) else "unknown"))
-            per_truck_log.append((name, f"date mismatch (truck={truck_date_label}, email={email_date_label})"))
+            per_truck_log.append(
+                (name, f"date mismatch (truck={truck_date_label}, email={email_date_label})"))
             continue
 
         truck_states = t.get("allowed_states")
         if truck_states and delivery_state:
             if delivery_state not in truck_states:
                 saw_state_block    = True
-                detail_str         = f"state blocked ({delivery_state} not in {','.join(sorted(truck_states))})"
+                detail_str         = (f"state blocked ({delivery_state} not in "
+                                      f"{','.join(sorted(truck_states))})")
                 per_truck_log.append((name, detail_str))
                 state_block_detail = f"{name} → {detail_str}"
                 continue
@@ -996,28 +994,18 @@ def find_best_truck_for_pickup_with_date(
         if load_weight_lbs is not None and truck_payload is not None:
             if load_weight_lbs > truck_payload:
                 saw_overweight    = True
-                detail_str        = f"overweight ({load_weight_lbs:,} lb > {truck_payload:,} lb cap)"
+                detail_str        = (f"overweight ({load_weight_lbs:,} lb > "
+                                     f"{truck_payload:,} lb cap)")
                 per_truck_log.append((name, detail_str))
                 overweight_detail = detail_str
                 continue
 
-        truck_height = t.get("max_height_in")  # door opening height
+        truck_height = t.get("max_height_in")
         if load_height_in is not None and truck_height is not None:
-            # Check whether the load is stackable — read from Notes in raw email
-            # Stackable pallets: if two identical pieces, check combined height
-            effective_height = load_height_in
-
-            # Detect stackable stacking: "Stackable: Yes" + pieces count
-            # Combined height for stacked loads is handled by caller passing
-            # load_height_in already doubled — so we just compare directly here.
-            # But also support a note like "48+48=96" meaning two pallets stacked.
-
-            if effective_height > truck_height:
+            if load_height_in > truck_height:
                 saw_over_height    = True
-                detail_str = (
-                    f"too tall ({effective_height}\" load > "
-                    f"{truck_height}\" door opening)"
-                )
+                detail_str         = (f"too tall ({load_height_in}\" load > "
+                                      f"{truck_height}\" door opening)")
                 per_truck_log.append((name, detail_str))
                 over_height_detail = detail_str
                 continue
@@ -1046,11 +1034,14 @@ def find_best_truck_for_pickup_with_date(
 
 def format_email_time_from_internal_date(internal_date_ms):
     dt_utc = datetime.fromtimestamp(internal_date_ms / 1000, tz=timezone.utc)
-    return dt_utc.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return dt_utc.astimezone(
+        ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 # =============================================================
 # MAIN EMAIL PROCESSOR
+# Thread-safe: trucks and bid_template are parameters, not globals.
+# Multiple requests can run fully in parallel with zero contention.
 # =============================================================
 
 _DELIVERY_STOP_PATS = [
@@ -1068,53 +1059,67 @@ _PICKUP_STOP_PATS = [
 
 def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                       max_radius_miles, original_msg_full,
+                      trucks=None,
+                      bid_template=None,
                       allowed_delivery_states=None):
+    """
+    Fully thread-safe — all state passed as parameters.
+    trucks: list of truck dicts (built by caller from request data)
+    bid_template: string template for bid body
+    """
+    # Use passed trucks/template — never touch globals during processing
+    local_trucks   = trucks if trucks is not None else []
+    local_template = bid_template
+    if local_template is None:
+        with BID_TEMPLATE_LOCK:
+            local_template = BID_TEMPLATE
+
     t = raw_text.replace("\r\n", "\n")
     order = _find(r"Bid on Order\s*#\s*([0-9]+)", t) or f"L{internal_date_ms // 1000}"
 
     vehicle_required = extract_vehicle_required(t)
     if not vehicle_required:
         return None, "NO VEHICLE", order, None
-    if allowed_vehicles and not any(v in vehicle_required.upper() for v in allowed_vehicles):
+    if allowed_vehicles and not any(v in vehicle_required.upper()
+                                    for v in allowed_vehicles):
         return None, f"FILTERED {vehicle_required}", order, None
 
     _PU_STRICT  = r"(?m)^\s*Pick[\s\-]*[Uu]p\s*:?\s*$"
     _DEL_STRICT = r"(?m)^\s*Delivery\s*:?\s*$"
-    _pu_label  = _PU_STRICT  if re.search(_PU_STRICT,  t) else r"Pick\s*-?\s*Up"
-    _del_label = _DEL_STRICT if re.search(_DEL_STRICT, t) else r"Delivery"
+    _pu_label   = _PU_STRICT  if re.search(_PU_STRICT,  t) else r"Pick\s*-?\s*Up"
+    _del_label  = _DEL_STRICT if re.search(_DEL_STRICT, t) else r"Delivery"
 
     pick_win = _bounded_section_window(t, _pu_label,
-                                       stop_regexes=_DELIVERY_STOP_PATS,
-                                       window=400)
+                                       stop_regexes=_DELIVERY_STOP_PATS, window=400)
     del_win  = _bounded_section_window(t, _del_label,
-                                       stop_regexes=_PICKUP_STOP_PATS,
-                                       window=400)
+                                       stop_regexes=_PICKUP_STOP_PATS,   window=400)
 
     pickup_loc   = extract_location_after_label(t, _pu_label)
     delivery_loc = extract_location_after_label(t, _del_label)
 
     pickup_asap   = has_pickup_asap(pick_win or "")
-    delivery_asap = has_pickup_asap(del_win or "")
+    delivery_asap = has_pickup_asap(del_win  or "")
 
-    pickup_dt   = None if pickup_asap else extract_datetime_from_window(pick_win)
+    pickup_dt   = None if pickup_asap  else extract_datetime_from_window(pick_win)
     delivery_dt = None if delivery_asap else extract_datetime_from_window(del_win)
 
     if _is_placeholder_location(pickup_loc) or _is_placeholder_location(delivery_loc):
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
-    # Geocode both locations in parallel to warm cache — also validates US
+    # Geocode pickup + delivery in parallel (thread-safe — only reads/writes cache)
     _pu_coords = [None]
     _dl_coords = [None]
 
     def _geo_pu():
         _pu_coords[0] = photon_geocode(pickup_loc) if pickup_loc else None
+
     def _geo_dl():
         _dl_coords[0] = photon_geocode(delivery_loc) if delivery_loc else None
 
     _t1 = threading.Thread(target=_geo_pu, daemon=True)
     _t2 = threading.Thread(target=_geo_dl, daemon=True)
     _t1.start(); _t2.start()
-    _t1.join(); _t2.join()
+    _t1.join();  _t2.join()
 
     if pickup_loc and _pu_coords[0] and not _in_us(*_pu_coords[0]):
         return None, f"NON-US PICKUP ({pickup_loc})", order, None
@@ -1131,39 +1136,34 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     dims_raw        = _find(r"Dimensions:\s*([^\n]+)", t)
     load_height_in  = parse_load_height_from_dims(dims_raw) if dims_raw else None
 
-    # --- Stackable height adjustment ---
-    # If load is stackable AND pieces == 2, the effective height doubles.
-    # Also support notes like "48+48=96" which state the stacked height explicitly.
-    stackable_flag = _find(r"Stackable:\s*(Yes|No)", t)
+    # Stackable height adjustment
+    stackable_flag    = _find(r"Stackable:\s*(Yes|No)", t)
     pieces_for_height = _find(r"Pieces:\s*([0-9]+)", t)
-
     if load_height_in is not None:
-        # Explicit stacked-height note, e.g. "48+48=96" in Notes
-        stacked_note = re.search(
-            r"\b(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)\b", t
-        )
+        stacked_note = re.search(r"\b(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)\b", t)
         if stacked_note:
-            # Use the stated combined height
             load_height_in = int(stacked_note.group(3))
         elif (stackable_flag or "").upper() == "YES" and pieces_for_height:
             try:
-                piece_count = int(pieces_for_height)
-                if piece_count == 2:
+                if int(pieces_for_height) == 2:
                     load_height_in = load_height_in * 2
             except ValueError:
                 pass
+
     estimated_miles_from_email = extract_estimated_miles_from_email(t)
 
     best_truck, deadhead_miles, reject_reason, per_truck_log = None, None, None, []
     deadhead_eta = None
 
-    if TRUCKS:
+    if local_trucks:
         if not pickup_loc:
-            return None, "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead to any truck)", order, None
+            return (None,
+                    "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead)",
+                    order, None)
 
         best_truck, deadhead_miles, reject_reason, per_truck_log = \
             find_best_truck_for_pickup_with_date(
-                TRUCKS, vehicle_required, pickup_loc, pickup_dt, t,
+                local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
                 load_weight_lbs, load_height_in, delivery_loc=delivery_loc
             )
 
@@ -1180,15 +1180,15 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         get_distance(pickup_loc, delivery_loc)
 
     if deadhead_miles:
-        raw_minutes  = (deadhead_miles / 45) * 60
-        deadhead_eta = {"miles": deadhead_miles, "minutes": int(raw_minutes)}
+        deadhead_eta = {"miles": deadhead_miles,
+                        "minutes": int((deadhead_miles / 45) * 60)}
 
     total_miles = None
     if estimated_miles_from_email is not None and deadhead_miles is not None:
         total_miles = estimated_miles_from_email + deadhead_miles
 
     pickup_direct  = has_pickup_direct(pick_win or "") and not pickup_dt
-    deliver_direct = has_deliver_direct(del_win or "")
+    deliver_direct = has_deliver_direct(del_win  or "")
 
     lines = [
         f"draft : {order or 'Unknown'}",
@@ -1198,8 +1198,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     ]
 
     if pickup_asap:
-        lines.append(f"Pick-up date (EST): ASAP / {pickup_dt}" if pickup_dt
-                     else "Pick-up date (EST): ASAP")
+        lines.append(f"Pick-up date (EST): ASAP / {pickup_dt}"
+                     if pickup_dt else "Pick-up date (EST): ASAP")
     elif pickup_direct:
         lines.append("Pick-up date (EST): DIRECT")
     else:
@@ -1278,11 +1278,13 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             if broker_addr:
                 body = build_bid_email_body(
                     order, broker_name or "", vehicle_required,
-                    pickup_loc, pickup_dt, delivery_loc, delivery_dt, deadhead_miles,
+                    pickup_loc, pickup_dt, delivery_loc, delivery_dt,
+                    deadhead_miles,
                     best_truck["driver_name"] if best_truck else "",
                     best_truck["vehicle"]     if best_truck else vehicle_required,
                     best_truck["dimensions"]  if best_truck else "",
                     truck_equipment=best_truck.get("equipment", "") if best_truck else "",
+                    bid_template=local_template,
                 )
                 bid_url = (
                     "https://mail.google.com/mail/?view=cm&fs=1&tf=1"
@@ -1312,7 +1314,9 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "truck_type":           best_truck.get("vehicle")     if best_truck else vehicle_required,
                 "truck_dimensions":     best_truck.get("dimensions")  if best_truck else "",
                 "truck_equipment":      best_truck.get("equipment", "") if best_truck else "",
-                "route_url":            build_google_maps_route_url(pickup_loc or "", delivery_loc or ""),
+                "route_url":            build_google_maps_route_url(
+                    pickup_loc or "", delivery_loc or ""),
+                "bid_template":         local_template,
             }
 
     return "\n".join(lines), vehicle_required, order, bid_url
@@ -1373,9 +1377,9 @@ FREIGHT_MARKERS = [
 ]
 
 _SYSIDS = frozenset({
-    "INBOX","UNREAD","SENT","IMPORTANT","STARRED","TRASH","SPAM","DRAFT",
-    "CATEGORY_FORUMS","CATEGORY_UPDATES","CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL","CATEGORY_PERSONAL",
+    "INBOX", "UNREAD", "SENT", "IMPORTANT", "STARRED", "TRASH", "SPAM", "DRAFT",
+    "CATEGORY_FORUMS", "CATEGORY_UPDATES", "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL", "CATEGORY_PERSONAL",
 })
 
 
@@ -1385,7 +1389,6 @@ def _has_custom_labels(label_ids):
 
 
 def _extract_state_codes_from_text(text: str) -> list:
-    """Extracts all US state codes found in subject or snippet."""
     found = []
     seen  = set()
     for token in re.findall(r"\b([A-Z]{2})\b", text.upper()):
@@ -1397,12 +1400,19 @@ def _extract_state_codes_from_text(text: str) -> list:
 
 # =============================================================
 # FASTAPI ENTRY-POINT
+# Thread-safe: builds local_trucks from request, passes directly
+# to process_bid_email as a parameter. Zero global mutation.
+# Fully concurrent — no locks held during processing.
 # =============================================================
 
-# ─── Adapter called by FastAPI ─────────────────────────────────────────
 def parse_email_for_api(request_data: dict) -> dict:
-    global TRUCKS, BID_TEMPLATE
-    # Build local trucks list
+    """
+    Fully thread-safe FastAPI entry point.
+    Builds trucks locally from request data and passes them as
+    a parameter to process_bid_email — no global state is mutated
+    during request processing, so all workers run in parallel.
+    """
+    # Build local trucks list — never touches global TRUCKS
     local_trucks = []
     for t in request_data.get('trucks', []):
         local_trucks.append({
@@ -1417,35 +1427,30 @@ def parse_email_for_api(request_data: dict) -> dict:
             'equipment':       t.get('equipment', ''),
         })
 
-    # Pre-warm geocode cache BEFORE acquiring lock — this is slow and thread-safe
+    # Pre-warm geocode cache for truck ZIPs — parallel, no locks held
     def _warm(zip_loc):
         if zip_loc:
             photon_geocode(zip_loc)
-    with ThreadPoolExecutor(max_workers=min(8, len(local_trucks) or 1)) as ex:
-        ex.map(_warm, [t["zip"] for t in local_trucks])
 
-    local_bid_template = request_data.get('bid_template', BID_TEMPLATE)
+    if local_trucks:
+        with ThreadPoolExecutor(max_workers=min(8, len(local_trucks))) as ex:
+            ex.map(_warm, [t["zip"] for t in local_trucks])
+
+    local_bid_template = request_data.get('bid_template') or BID_TEMPLATE
 
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
 
-    # Entire swap + process + restore must be inside ONE lock acquisition
-    with _PARSE_REQUEST_LOCK:
-        _saved_trucks   = TRUCKS
-        _saved_template = BID_TEMPLATE
-        TRUCKS          = local_trucks
-        BID_TEMPLATE    = local_bid_template
-        try:
-            formatted, info, order, bid_url = process_bid_email(
-                raw_text           = request_data['email_body'],
-                allowed_vehicles   = request_data['allowed_vehicles'],
-                internal_date_ms   = request_data['internal_date_ms'],
-                max_radius_miles   = request_data['max_radius_miles'],
-                original_msg_full  = dummy_msg,
-            )
-        finally:
-            TRUCKS       = _saved_trucks
-            BID_TEMPLATE = _saved_template
+    # process_bid_email is now fully stateless — runs with no locks
+    formatted, info, order, bid_url = process_bid_email(
+        raw_text           = request_data['email_body'],
+        allowed_vehicles   = request_data['allowed_vehicles'],
+        internal_date_ms   = request_data['internal_date_ms'],
+        max_radius_miles   = request_data['max_radius_miles'],
+        original_msg_full  = dummy_msg,
+        trucks             = local_trucks,
+        bid_template       = local_bid_template,
+    )
 
     result = {
         'success':      formatted is not None,
