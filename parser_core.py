@@ -24,7 +24,9 @@ import queue as _queue
 import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-
+# At the top of parser_core.py, add a separate GH session with NO retries
+_gh_session = requests.Session()
+_gh_session.mount("http://", HTTPAdapter(max_retries=0))  # no retries for GH
 
 # =============================================================
 # CONFIGURATION
@@ -440,7 +442,7 @@ def _ors_route(origin_latlon, dest_latlon):
 
 
 _GH_PORT_CACHE = {"up": None, "checked_at": 0}
-_GH_PORT_TTL   = 10
+_GH_PORT_TTL   = 3
 
 
 def is_port_open(host="127.0.0.1", port=8989):
@@ -462,13 +464,13 @@ def _graphhopper_route(origin_latlon, dest_latlon):
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
     try:
-        r = session.get(GRAPHHOPPER_URL, params={
+        r = _gh_session.get(GRAPHHOPPER_URL, params={
             "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
             "profile":      "car",
             "locale":       "en",
             "calc_points":  "false",
             "instructions": "false",
-        }, timeout=10)
+        }, timeout=5)   # ← 5s not 10s
         if r.status_code != 200:
             return None
         data = r.json()
@@ -481,9 +483,12 @@ def _graphhopper_route(origin_latlon, dest_latlon):
             miles += DEADHEAD_UNDER_600_OFFSET
         return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        # Mark GH as down immediately so next requests skip it
+        _GH_PORT_CACHE.update({"up": False, "checked_at": time.time()})
         return None
     except Exception as e:
         print(f"GraphHopper exception: {e}")
+        _GH_PORT_CACHE.update({"up": False, "checked_at": time.time()})
         return None
 
 
