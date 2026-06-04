@@ -55,7 +55,10 @@ GEO_CACHE_FILE   = "geo_cache.json"
 ROUTE_CACHE_FILE = "route_cache.json"
 _GEO_CACHE_LOCK   = threading.Lock()
 _ROUTE_CACHE_LOCK = threading.Lock()
-
+_GEO_CACHE_DIRTY   = False
+_ROUTE_CACHE_DIRTY = False
+# Serializes access to global TRUCKS/BID_TEMPLATE during request processing
+_PARSE_REQUEST_LOCK = threading.Lock()
 ROUTE_CACHE_TTL_DAYS = 30
 
 FRESH_WINDOW      = "2d"
@@ -86,7 +89,21 @@ _http_retry = Retry(
 )
 session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
+def _cache_flush_worker():
+    """Flush caches to disk every 30s only when dirty — avoids per-hit I/O."""
+    global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
+    while not STOP_EVENT.is_set():
+        time.sleep(30)
+        if _GEO_CACHE_DIRTY:
+            with _GEO_CACHE_LOCK:
+                _save_cache(GEO_CACHE_FILE, GEO_CACHE)
+                _GEO_CACHE_DIRTY = False
+        if _ROUTE_CACHE_DIRTY:
+            with _ROUTE_CACHE_LOCK:
+                _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
+                _ROUTE_CACHE_DIRTY = False
 
+threading.Thread(target=_cache_flush_worker, daemon=True).start()
 
 # =============================================================
 # US STATE / REGION CONSTANTS
@@ -389,7 +406,8 @@ def photon_geocode(place: str):
     if out:
         with _GEO_CACHE_LOCK:
             GEO_CACHE[key] = out
-            _save_cache(GEO_CACHE_FILE, GEO_CACHE)
+            global _GEO_CACHE_DIRTY
+            _GEO_CACHE_DIRTY = True
     else:
         print(f"Geocoding failed entirely for '{place_clean}'")
     return out
@@ -435,11 +453,19 @@ def _ors_route(origin_latlon, dest_latlon):
         return None
 
 
+_GH_PORT_CACHE = {"up": None, "checked_at": 0}
+_GH_PORT_TTL   = 10  # seconds
+
 def is_port_open(host="127.0.0.1", port=8989):
+    now = time.time()
+    if now - _GH_PORT_CACHE["checked_at"] < _GH_PORT_TTL:
+        return _GH_PORT_CACHE["up"]
     try:
         with socket.create_connection((host, port), timeout=2):
+            _GH_PORT_CACHE.update({"up": True,  "checked_at": now})
             return True
     except OSError:
+        _GH_PORT_CACHE.update({"up": False, "checked_at": now})
         return False
 
 
@@ -520,7 +546,8 @@ def compute_route(origin_latlon, dest_latlon):
                 gh_result.update({"source": "gh", "ts": now})
                 with _ROUTE_CACHE_LOCK:
                     ROUTE_CACHE[cache_key] = gh_result
-                    _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
+                    global _ROUTE_CACHE_DIRTY
+                    _ROUTE_CACHE_DIRTY = True
                 return gh_result
 
         if age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
@@ -540,7 +567,8 @@ def compute_route(origin_latlon, dest_latlon):
         result["ts"]     = now
         with _ROUTE_CACHE_LOCK:
             ROUTE_CACHE[cache_key] = result
-            _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
+            global _ROUTE_CACHE_DIRTY
+            _ROUTE_CACHE_DIRTY = True
     return result
 
 
@@ -1075,9 +1103,23 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if _is_placeholder_location(pickup_loc) or _is_placeholder_location(delivery_loc):
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
-    if pickup_loc and not is_location_in_us(pickup_loc):
+    # Geocode both locations in parallel to warm cache — also validates US
+    _pu_coords = [None]
+    _dl_coords = [None]
+
+    def _geo_pu():
+        _pu_coords[0] = photon_geocode(pickup_loc) if pickup_loc else None
+    def _geo_dl():
+        _dl_coords[0] = photon_geocode(delivery_loc) if delivery_loc else None
+
+    _t1 = threading.Thread(target=_geo_pu, daemon=True)
+    _t2 = threading.Thread(target=_geo_dl, daemon=True)
+    _t1.start(); _t2.start()
+    _t1.join(); _t2.join()
+
+    if pickup_loc and _pu_coords[0] and not _in_us(*_pu_coords[0]):
         return None, f"NON-US PICKUP ({pickup_loc})", order, None
-    if delivery_loc and not is_location_in_us(delivery_loc):
+    if delivery_loc and _dl_coords[0] and not _in_us(*_dl_coords[0]):
         return None, f"NON-US DELIVERY ({delivery_loc})", order, None
 
     if allowed_delivery_states:
@@ -1362,15 +1404,13 @@ def _extract_state_codes_from_text(text: str) -> list:
 def parse_email_for_api(request_data: dict) -> dict:
     """
     Main entry point for FastAPI.
-    request_data keys: email_body, internal_date_ms, allowed_vehicles,
-                       max_radius_miles, trucks (list of dicts), bid_template
+    Uses LOCAL variables only — never touches global TRUCKS or BID_TEMPLATE.
+    This makes the function fully thread-safe for concurrent requests.
     """
-    global TRUCKS, BID_TEMPLATE
- 
-    # Load trucks from request
-    TRUCKS = []
+    # ── Build local trucks list from request (never touch global TRUCKS) ──
+    local_trucks = []
     for t in request_data.get('trucks', []):
-        TRUCKS.append({
+        local_trucks.append({
             'vehicle':         t['vehicle'].upper(),
             'zip':             t['zip_location'],
             'driver_name':     t['driver_name'],
@@ -1381,32 +1421,53 @@ def parse_email_for_api(request_data: dict) -> dict:
             'allowed_states':  set(t['allowed_states']) if t.get('allowed_states') else None,
             'equipment':       t.get('equipment', ''),
         })
- 
-    # Override template if provided
-    with BID_TEMPLATE_LOCK:
-        BID_TEMPLATE = request_data.get('bid_template', BID_TEMPLATE)
- 
-    # Dummy original_msg for the API context
+
+    # ── Pre-warm geocode cache for truck ZIPs in parallel ─────────────────
+    def _warm(zip_loc):
+        if zip_loc:
+            photon_geocode(zip_loc)
+    with ThreadPoolExecutor(max_workers=min(8, len(local_trucks) or 1)) as ex:
+        ex.map(_warm, [t["zip"] for t in local_trucks])
+
+    # ── Get local bid template from request ───────────────────────────────
+    local_bid_template = request_data.get('bid_template', BID_TEMPLATE)
+
+    # ── Dummy original_msg for the API context ────────────────────────────
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
- 
-    formatted, info, order, bid_url = process_bid_email(
-        raw_text           = request_data['email_body'],
-        allowed_vehicles   = request_data['allowed_vehicles'],
-        internal_date_ms   = request_data['internal_date_ms'],
-        max_radius_miles   = request_data['max_radius_miles'],
-        original_msg_full  = dummy_msg,
-    )
- 
+
+    # ── Call process_bid_email with local state injected ──────────────────
+    # Temporarily swap TRUCKS and BID_TEMPLATE using a per-call approach:
+    # process_bid_email reads the global TRUCKS and BID_TEMPLATE —
+    # we patch them thread-safely using a lock so each call sees its own data.
+    with _PARSE_REQUEST_LOCK:
+        global TRUCKS, BID_TEMPLATE
+        _saved_trucks   = TRUCKS
+        _saved_template = BID_TEMPLATE
+        TRUCKS          = local_trucks
+        BID_TEMPLATE    = local_bid_template
+
+    try:
+        formatted, info, order, bid_url = process_bid_email(
+            raw_text           = request_data['email_body'],
+            allowed_vehicles   = request_data['allowed_vehicles'],
+            internal_date_ms   = request_data['internal_date_ms'],
+            max_radius_miles   = request_data['max_radius_miles'],
+            original_msg_full  = dummy_msg,
+        )
+    finally:
+        with _PARSE_REQUEST_LOCK:
+            TRUCKS       = _saved_trucks
+            BID_TEMPLATE = _saved_template
+
     result = {
-        'success': formatted is not None,
-        'message': info or 'OK',
-        'formatted': formatted,
-        'order_id': order,
+        'success':      formatted is not None,
+        'message':      info or 'OK',
+        'formatted':    formatted,
+        'order_id':     order,
         'vehicle_info': info if not formatted else None,
     }
- 
-    # Pull load_data from LOAD_STORE if saved
+
     if order:
         with LOAD_STORE_LOCK:
             ld = LOAD_STORE.get(order)
