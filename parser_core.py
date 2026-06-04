@@ -1402,12 +1402,8 @@ def _extract_state_codes_from_text(text: str) -> list:
 
 # ─── Adapter called by FastAPI ─────────────────────────────────────────
 def parse_email_for_api(request_data: dict) -> dict:
-    """
-    Main entry point for FastAPI.
-    Uses LOCAL variables only — never touches global TRUCKS or BID_TEMPLATE.
-    This makes the function fully thread-safe for concurrent requests.
-    """
-    # ── Build local trucks list from request (never touch global TRUCKS) ──
+
+    # Build local trucks list
     local_trucks = []
     for t in request_data.get('trucks', []):
         local_trucks.append({
@@ -1422,41 +1418,34 @@ def parse_email_for_api(request_data: dict) -> dict:
             'equipment':       t.get('equipment', ''),
         })
 
-    # ── Pre-warm geocode cache for truck ZIPs in parallel ─────────────────
+    # Pre-warm geocode cache BEFORE acquiring lock — this is slow and thread-safe
     def _warm(zip_loc):
         if zip_loc:
             photon_geocode(zip_loc)
     with ThreadPoolExecutor(max_workers=min(8, len(local_trucks) or 1)) as ex:
         ex.map(_warm, [t["zip"] for t in local_trucks])
 
-    # ── Get local bid template from request ───────────────────────────────
     local_bid_template = request_data.get('bid_template', BID_TEMPLATE)
 
-    # ── Dummy original_msg for the API context ────────────────────────────
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
 
-    # ── Call process_bid_email with local state injected ──────────────────
-    # Temporarily swap TRUCKS and BID_TEMPLATE using a per-call approach:
-    # process_bid_email reads the global TRUCKS and BID_TEMPLATE —
-    # we patch them thread-safely using a lock so each call sees its own data.
+    # Entire swap + process + restore must be inside ONE lock acquisition
     with _PARSE_REQUEST_LOCK:
         global TRUCKS, BID_TEMPLATE
         _saved_trucks   = TRUCKS
         _saved_template = BID_TEMPLATE
         TRUCKS          = local_trucks
         BID_TEMPLATE    = local_bid_template
-
-    try:
-        formatted, info, order, bid_url = process_bid_email(
-            raw_text           = request_data['email_body'],
-            allowed_vehicles   = request_data['allowed_vehicles'],
-            internal_date_ms   = request_data['internal_date_ms'],
-            max_radius_miles   = request_data['max_radius_miles'],
-            original_msg_full  = dummy_msg,
-        )
-    finally:
-        with _PARSE_REQUEST_LOCK:
+        try:
+            formatted, info, order, bid_url = process_bid_email(
+                raw_text           = request_data['email_body'],
+                allowed_vehicles   = request_data['allowed_vehicles'],
+                internal_date_ms   = request_data['internal_date_ms'],
+                max_radius_miles   = request_data['max_radius_miles'],
+                original_msg_full  = dummy_msg,
+            )
+        finally:
             TRUCKS       = _saved_trucks
             BID_TEMPLATE = _saved_template
 
