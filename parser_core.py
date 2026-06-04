@@ -527,6 +527,7 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
 
 
 def compute_route(origin_latlon, dest_latlon):
+    global _ROUTE_CACHE_DIRTY
     cache_key = (f"{origin_latlon[0]:.5f},{origin_latlon[1]:.5f}"
                  f"|{dest_latlon[0]:.5f},{dest_latlon[1]:.5f}")
     now = time.time()
@@ -546,7 +547,6 @@ def compute_route(origin_latlon, dest_latlon):
                 gh_result.update({"source": "gh", "ts": now})
                 with _ROUTE_CACHE_LOCK:
                     ROUTE_CACHE[cache_key] = gh_result
-                    global _ROUTE_CACHE_DIRTY
                     _ROUTE_CACHE_DIRTY = True
                 return gh_result
 
@@ -567,7 +567,6 @@ def compute_route(origin_latlon, dest_latlon):
         result["ts"]     = now
         with _ROUTE_CACHE_LOCK:
             ROUTE_CACHE[cache_key] = result
-            global _ROUTE_CACHE_DIRTY
             _ROUTE_CACHE_DIRTY = True
     return result
 
