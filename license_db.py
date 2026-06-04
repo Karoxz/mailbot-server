@@ -2,8 +2,11 @@ import sqlite3
 import os
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get('LICENSE_DB', 'licenses.db')
+import os
 
+# Forces the script to always find its files right where the code sits
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "licenses.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
