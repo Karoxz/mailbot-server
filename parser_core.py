@@ -31,7 +31,9 @@ _gh_session.mount("http://", HTTPAdapter(max_retries=0))  # no retries for GH
 # =============================================================
 # CONFIGURATION
 # =============================================================
-
+# Add this near the top with other globals
+_GH_FAILED_UNTIL = 0.0   # timestamp — skip GH until this time passes
+_GH_BACKOFF_SECS = 30    # after a timeout, skip GH for 30 seconds
 GRAPHHOPPER_URL           = "http://127.0.0.1:8989/route"
 GRAPHHOPPER_MILE_FACTOR   = 1.03
 GRAPHHOPPER_CORRECTION    = 1.04
@@ -483,7 +485,8 @@ def _graphhopper_route(origin_latlon, dest_latlon):
             miles += DEADHEAD_UNDER_600_OFFSET
         return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Mark GH as down immediately so next requests skip it
+        global _GH_FAILED_UNTIL
+        _GH_FAILED_UNTIL = time.time() + _GH_BACKOFF_SECS
         _GH_PORT_CACHE.update({"up": False, "checked_at": time.time()})
         return None
     except Exception as e:
@@ -520,8 +523,17 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
 
 def compute_route(origin_latlon, dest_latlon):
     global _ROUTE_CACHE_DIRTY
+
+    # Skip GH if it recently timed out — go straight to OSRM
+    if time.time() < _GH_FAILED_UNTIL:
+        result = _osrm_route_fallback(origin_latlon, dest_latlon)
+        if result:
+            result.update({"source": "osrm", "ts": time.time()})
+        return result
+
     cache_key = (f"{origin_latlon[0]:.5f},{origin_latlon[1]:.5f}"
                  f"|{dest_latlon[0]:.5f},{dest_latlon[1]:.5f}")
+    # ... rest of function unchanged
     now = time.time()
 
     with _ROUTE_CACHE_LOCK:
