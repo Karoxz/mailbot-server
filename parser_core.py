@@ -25,7 +25,15 @@ import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
+import math
 
+def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
+    R = 3958.8
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi  = math.radians(lat2 - lat1)
+    dlam  = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
+    return R * 2 * math.asin(math.sqrt(a))
 # =============================================================
 # CONFIGURATION
 # =============================================================
@@ -87,7 +95,8 @@ _http_retry = Retry(
 )
 session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
-
+_gh_session = requests.Session()
+_gh_session.mount("http://", HTTPAdapter(max_retries=0))
 
 def _cache_flush_worker():
     """Flush caches to disk every 30s only when dirty."""
@@ -462,13 +471,13 @@ def _graphhopper_route(origin_latlon, dest_latlon):
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
     try:
-        r = session.get(GRAPHHOPPER_URL, params={
+        r = _gh_session.get(GRAPHHOPPER_URL, params={
             "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
             "profile":      "car",
             "locale":       "en",
             "calc_points":  "false",
             "instructions": "false",
-        }, timeout=10)
+        }, timeout=5)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -951,7 +960,8 @@ def find_best_truck_for_pickup_with_date(
         pickup_dt, raw_text,
         load_weight_lbs=None,
         load_height_in=None,
-        delivery_loc=None):
+        delivery_loc=None,
+        max_radius_miles=500):
     best, best_miles   = None, None
     per_truck_log      = []
     saw_vehicle_match  = False
@@ -1010,9 +1020,18 @@ def find_best_truck_for_pickup_with_date(
                 over_height_detail = detail_str
                 continue
 
+        # AFTER — haversine pre-filter skips routing for obvious misses
+        truck_coords  = photon_geocode(t["zip"])
+        pickup_coords = photon_geocode(pickup_loc)
+        if truck_coords and pickup_coords:
+            sl = _haversine_miles(truck_coords[0], truck_coords[1],
+                                   pickup_coords[0], pickup_coords[1])
+            if sl > max_radius_miles * 1.4:
+                per_truck_log.append((name, f"too far ({int(sl)} mi)"))
+                continue
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist:
-            per_truck_log.append((name, "geocoding/routing failed"))
+            per_truck_log.append((name, f"routing failed ({pickup_loc})"))
             continue
 
         per_truck_log.append((name, f"✓ {dist['miles']} mi deadhead"))
@@ -1164,7 +1183,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         best_truck, deadhead_miles, reject_reason, per_truck_log = \
             find_best_truck_for_pickup_with_date(
                 local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
-                load_weight_lbs, load_height_in, delivery_loc=delivery_loc
+                load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
+                max_radius_miles=max_radius_miles
             )
 
         if not best_truck:
