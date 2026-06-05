@@ -32,6 +32,8 @@ _gh_session.mount("http://", HTTPAdapter(max_retries=0))  # no retries for GH
 # CONFIGURATION
 # =============================================================
 # Add this near the top with other globals
+# Add near top of parser_core.py with other globals
+_NOMINATIM_SEM = threading.Semaphore(1)  # max 1 concurrent Nominatim request
 _GH_FAILED_UNTIL = 0.0   # timestamp — skip GH until this time passes
 _GH_BACKOFF_SECS = 30    # after a timeout, skip GH for 30 seconds
 GRAPHHOPPER_URL           = "http://127.0.0.1:8989/route"
@@ -299,35 +301,37 @@ def _geocode_nominatim(place: str, place_clean: str):
     for attempt in range(1, 3):
         if STOP_EVENT.is_set():
             return None
-        try:
-            if _is_zip(place.strip()):
-                params = {"postalcode": place.strip(), "countrycodes": "us",
-                          "format": "json", "limit": 1}
-            else:
-                q = place_clean
-                if not re.search(r"\bUSA?\b", q, re.I):
-                    q += ", USA"
-                params = {"q": q, "countrycodes": "us", "format": "json",
-                          "addressdetails": 1, "limit": 5}
-            r = session.get(NOMINATIM_URL, params=params,
-                            headers={"User-Agent": GEOCODER_UA}, timeout=5)
-            if r.status_code != 200:
-                time.sleep(1)
-                continue
-            for item in r.json():
-                try:
-                    lat, lon = float(item["lat"]), float(item["lon"])
-                except (KeyError, ValueError):
+        with _NOMINATIM_SEM:   # ← add this
+            try:
+                # ... existing code unchanged
+                if _is_zip(place.strip()):
+                    params = {"postalcode": place.strip(), "countrycodes": "us",
+                            "format": "json", "limit": 1}
+                else:
+                    q = place_clean
+                    if not re.search(r"\bUSA?\b", q, re.I):
+                        q += ", USA"
+                    params = {"q": q, "countrycodes": "us", "format": "json",
+                            "addressdetails": 1, "limit": 5}
+                r = session.get(NOMINATIM_URL, params=params,
+                                headers={"User-Agent": GEOCODER_UA}, timeout=5)
+                if r.status_code != 200:
+                    time.sleep(1)
                     continue
-                if _in_us(lat, lon):
-                    return [lat, lon]
-            return None
-        except requests.exceptions.Timeout:
-            time.sleep(1)
-        except Exception as e:
-            print(f"Nominatim exception '{place_clean}' attempt {attempt}: {e}")
-            time.sleep(1)
-    return None
+                for item in r.json():
+                    try:
+                        lat, lon = float(item["lat"]), float(item["lon"])
+                    except (KeyError, ValueError):
+                        continue
+                    if _in_us(lat, lon):
+                        return [lat, lon]
+                return None
+            except requests.exceptions.Timeout:
+                time.sleep(1)
+            except Exception as e:
+                print(f"Nominatim exception '{place_clean}' attempt {attempt}: {e}")
+                time.sleep(1)
+        return None
 
 
 def _geocode_photon(place: str, place_clean: str):
@@ -524,16 +528,12 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
 def compute_route(origin_latlon, dest_latlon):
     global _ROUTE_CACHE_DIRTY
 
-    # Skip GH if it recently timed out — go straight to OSRM
+    # Skip GH if it recently timed out
     if time.time() < _GH_FAILED_UNTIL:
-        result = _osrm_route_fallback(origin_latlon, dest_latlon)
-        if result:
-            result.update({"source": "osrm", "ts": time.time()})
-        return result
+        return None   # ← return None instead of calling slow public OSRM
 
     cache_key = (f"{origin_latlon[0]:.5f},{origin_latlon[1]:.5f}"
                  f"|{dest_latlon[0]:.5f},{dest_latlon[1]:.5f}")
-    # ... rest of function unchanged
     now = time.time()
 
     with _ROUTE_CACHE_LOCK:
@@ -542,9 +542,8 @@ def compute_route(origin_latlon, dest_latlon):
     if cached:
         age_secs      = now - cached.get("ts", 0)
         cached_source = cached.get("source", "unknown")
-        gh_running    = is_port_open()
 
-        if gh_running and cached_source != "gh" and age_secs > 3600:
+        if is_port_open() and cached_source != "gh" and age_secs > 3600:
             gh_result = _graphhopper_route(origin_latlon, dest_latlon)
             if gh_result:
                 gh_result.update({"source": "gh", "ts": now})
@@ -556,21 +555,16 @@ def compute_route(origin_latlon, dest_latlon):
         if age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
             return cached
 
+    # Try GraphHopper only — no public OSRM fallback
     result = _graphhopper_route(origin_latlon, dest_latlon)
-    source = "gh"
-    if not result:
-        result = _ors_route(origin_latlon, dest_latlon)
-        source = "ors"
-    if not result:
-        result = _osrm_route_fallback(origin_latlon, dest_latlon)
-        source = "osrm"
 
     if result:
-        result["source"] = source
+        result["source"] = "gh"
         result["ts"]     = now
         with _ROUTE_CACHE_LOCK:
             ROUTE_CACHE[cache_key] = result
             _ROUTE_CACHE_DIRTY = True
+
     return result
 
 
