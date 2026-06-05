@@ -1132,11 +1132,9 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     def _geo_dl():
         _dl_coords[0] = photon_geocode(delivery_loc) if delivery_loc else None
-
-    _t1 = threading.Thread(target=_geo_pu, daemon=True)
-    _t2 = threading.Thread(target=_geo_dl, daemon=True)
-    _t1.start(); _t2.start()
-    _t1.join();  _t2.join()
+    # Locations already geocoded in parse_email_for_api — just read cache
+    _pu_coords  = [photon_geocode(pickup_loc)   if pickup_loc   else None]
+    _dl_coords  = [photon_geocode(delivery_loc) if delivery_loc else None]
 
     if pickup_loc and _pu_coords[0] and not _in_us(*_pu_coords[0]):
         return None, f"NON-US PICKUP ({pickup_loc})", order, None
@@ -1423,13 +1421,7 @@ def _extract_state_codes_from_text(text: str) -> list:
 # =============================================================
 
 def parse_email_for_api(request_data: dict) -> dict:
-    """
-    Fully thread-safe FastAPI entry point.
-    Builds trucks locally from request data and passes them as
-    a parameter to process_bid_email — no global state is mutated
-    during request processing, so all workers run in parallel.
-    """
-    # Build local trucks list — never touches global TRUCKS
+
     local_trucks = []
     for t in request_data.get('trucks', []):
         local_trucks.append({
@@ -1444,23 +1436,40 @@ def parse_email_for_api(request_data: dict) -> dict:
             'equipment':       t.get('equipment', ''),
         })
 
-    # Pre-warm geocode cache for truck ZIPs — parallel, no locks held
-    def _warm(zip_loc):
-        if zip_loc:
-            photon_geocode(zip_loc)
-
-    if local_trucks:
-        with ThreadPoolExecutor(max_workers=min(8, len(local_trucks))) as ex:
-            ex.map(_warm, [t["zip"] for t in local_trucks])
-
     local_bid_template = request_data.get('bid_template') or BID_TEMPLATE
+
+    # ── Pre-extract locations from email for parallel geocoding ───────────
+    raw_text = request_data.get('email_body', '')
+
+    # Quick regex pull of pickup/delivery locations from email
+    # so we can geocode them in parallel with truck ZIPs
+    _PU_STRICT  = r"(?m)^\s*Pick[\s\-]*[Uu]p\s*:?\s*$"
+    _DEL_STRICT = r"(?m)^\s*Delivery\s*:?\s*$"
+    _pu_label   = _PU_STRICT  if re.search(_PU_STRICT,  raw_text) else r"Pick\s*-?\s*Up"
+    _del_label  = _DEL_STRICT if re.search(_DEL_STRICT, raw_text) else r"Delivery"
+    pickup_loc_hint   = extract_location_after_label(raw_text, _pu_label)
+    delivery_loc_hint = extract_location_after_label(raw_text, _del_label)
+
+    # Geocode everything in parallel — truck ZIPs + pickup + delivery
+    all_locations = [t["zip"] for t in local_trucks if t.get("zip")]
+    if pickup_loc_hint:
+        all_locations.append(pickup_loc_hint)
+    if delivery_loc_hint:
+        all_locations.append(delivery_loc_hint)
+
+    def _warm(loc):
+        if loc and loc.strip():
+            photon_geocode(loc)
+
+    if all_locations:
+        with ThreadPoolExecutor(max_workers=min(10, len(all_locations))) as ex:
+            list(ex.map(_warm, all_locations))
 
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
 
-    # process_bid_email is now fully stateless — runs with no locks
     formatted, info, order, bid_url = process_bid_email(
-        raw_text           = request_data['email_body'],
+        raw_text           = raw_text,
         allowed_vehicles   = request_data['allowed_vehicles'],
         internal_date_ms   = request_data['internal_date_ms'],
         max_radius_miles   = request_data['max_radius_miles'],
