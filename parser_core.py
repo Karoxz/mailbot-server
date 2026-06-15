@@ -75,8 +75,9 @@ LOAD_STORE_LOCK = threading.Lock()
 # Default template — read-only after startup, never mutated per-request
 BID_TEMPLATE_LOCK = threading.Lock()
 BID_TEMPLATE = """Rate: $
+{vehicle_type}
 Dims: {truck_dimensions}
-MC# 1616501
+MC#
 
 Truck is {google_deadhead} miles out
 {truck_equipment}
@@ -910,7 +911,6 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         driver_name=driver_name, truck_type=truck_type,
         truck_dimensions=truck_dims, deadhead_eta_str=eta_str,
         truck_equipment=truck_equipment or "",
-        # New variables:
         vehicle_type=truck_type or vehicle or "",
         pickup_date_only=(pickup_dt or "").split()[0] if pickup_dt else "",
         delivery_date_only=(delivery_dt or "").split()[0] if delivery_dt else "",
@@ -1309,7 +1309,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     best_truck["vehicle"]     if best_truck else vehicle_required,
                     best_truck["dimensions"]  if best_truck else "",
                     truck_equipment=best_truck.get("equipment", "") if best_truck else "",
-                    bid_template=local_template,
+                    bid_template=local_template
                 )
                 bid_url = (
                     "https://mail.google.com/mail/?view=cm&fs=1&tf=1"
