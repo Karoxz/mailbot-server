@@ -910,6 +910,11 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         driver_name=driver_name, truck_type=truck_type,
         truck_dimensions=truck_dims, deadhead_eta_str=eta_str,
         truck_equipment=truck_equipment or "",
+        # New variables:
+        vehicle_type=truck_type or vehicle or "",
+        pickup_date_only=(pickup_dt or "").split()[0] if pickup_dt else "",
+        delivery_date_only=(delivery_dt or "").split()[0] if delivery_dt else "",
+        deadhead_miles=str(google_deadhead) if google_deadhead is not None else "",
     )
     # Use passed template, fall back to global default
     if bid_template is None:
