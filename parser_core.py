@@ -1571,33 +1571,5 @@ def parse_email_for_api(request_data: dict) -> dict:
                 result['route_url'] = ld.get('route_url', '')
                 result['load_data'] = {k: v for k, v in ld.items()
                                        if k != 'original_msg_full'}
-    # After the existing process_bid_email call and result building:
-    if result.get("load_data") and local_trucks:
-        raw_text = request_data.get("email_body", "")
-        ld = result["load_data"]
-
-        # Parse weight/height from email to pass correct filters
-        # (avoids re-routing trucks already rejected by weight/height)
-        import re as _re
-        _weight_raw = _re.search(
-            r"Weight:\s*([0-9,.\s]+(?:lb|lbs|pounds)?)",
-            raw_text, _re.IGNORECASE)
-        _dims_raw = _re.search(
-            r"Dimensions:\s*([^\n]+)", raw_text, _re.IGNORECASE)
-
-        all_trucks = find_all_trucks_for_pickup(
-            local_trucks,
-            ld.get("vehicle_required", ""),
-            ld.get("pickup_loc", ""),
-            ld.get("pickup_dt"),
-            raw_text,
-            load_weight_lbs=parse_weight_lbs(
-                _weight_raw.group(1) if _weight_raw else None),
-            load_height_in=parse_load_height_from_dims(
-                _dims_raw.group(1) if _dims_raw else None),
-            max_radius_miles=request_data["max_radius_miles"],
-            delivery_loc=ld.get("delivery_loc"),
-        )
-        result["load_data"]["all_trucks"] = all_trucks
 
     return result
