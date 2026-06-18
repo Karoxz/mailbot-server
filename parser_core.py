@@ -98,6 +98,7 @@ session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
+_GH_SEMAPHORE = threading.Semaphore(2)  # max 2 concurrent GH requests
 
 def _cache_flush_worker():
     """Flush caches to disk every 30s only when dirty."""
@@ -471,30 +472,31 @@ def _graphhopper_route(origin_latlon, dest_latlon):
         return None
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
-    try:
-        r = _gh_session.get(GRAPHHOPPER_URL, params={
-            "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
-            "profile":      "car",
-            "locale":       "en",
-            "calc_points":  "false",
-            "instructions": "false",
-        }, timeout=5)
-        if r.status_code != 200:
+    with _GH_SEMAPHORE:
+        try:
+            r = _gh_session.get(GRAPHHOPPER_URL, params={
+                "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
+                "profile":      "car",
+                "locale":       "en",
+                "calc_points":  "false",
+                "instructions": "false",
+            }, timeout=5)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            if "paths" not in data or not data["paths"]:
+                return None
+            path = data["paths"][0]
+            base_miles = (path["distance"] / 1609.344) * GRAPHHOPPER_MILE_FACTOR
+            miles = round(base_miles * GRAPHHOPPER_CORRECTION)
+            if miles < 600:
+                miles += DEADHEAD_UNDER_600_OFFSET
+            return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             return None
-        data = r.json()
-        if "paths" not in data or not data["paths"]:
+        except Exception as e:
+            print(f"GraphHopper exception: {e}")
             return None
-        path = data["paths"][0]
-        base_miles = (path["distance"] / 1609.344) * GRAPHHOPPER_MILE_FACTOR
-        miles = round(base_miles * GRAPHHOPPER_CORRECTION)
-        if miles < 600:
-            miles += DEADHEAD_UNDER_600_OFFSET
-        return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        return None
-    except Exception as e:
-        print(f"GraphHopper exception: {e}")
-        return None
 
 
 def _osrm_route_fallback(origin_latlon, dest_latlon):
