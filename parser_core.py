@@ -1245,21 +1245,37 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead)",
                     order, None)
 
-        best_truck, deadhead_miles, reject_reason, per_truck_log = \
-            find_best_truck_for_pickup_with_date(
-                local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
-                load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
-                max_radius_miles=max_radius_miles
-            )
+        # Find ALL matching trucks in one pass — sorted by distance
+        # Best truck is simply the first (closest) result
+        all_matches = find_all_trucks_for_pickup(
+            local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
+            load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
+            max_radius_miles=max_radius_miles
+        )
 
-        if not best_truck:
+        if not all_matches:
+            # Re-run with logging to get reject reason
+            _, _, reject_reason, per_truck_log = \
+                find_best_truck_for_pickup_with_date(
+                    local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
+                    load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
+                    max_radius_miles=max_radius_miles
+                )
             return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
-        if deadhead_miles and deadhead_miles > max_radius_miles:
-            return (None,
-                    f"DEADHEAD TOO FAR {deadhead_miles} mi (max {max_radius_miles})"
-                    + _fmt_truck_detail(per_truck_log),
-                    order, None)
+        # Best = closest matching truck
+        best_match   = all_matches[0]
+        deadhead_miles = best_match["google_deadhead"]
+        deadhead_eta   = {"miles": deadhead_miles,
+                          "minutes": best_match["deadhead_eta_minutes"]}
+
+        # Reconstruct best_truck dict for downstream use
+        best_truck = {
+            "driver_name": best_match["driver_name"],
+            "vehicle":     best_match["truck_type"],
+            "dimensions":  best_match["truck_dimensions"],
+            "equipment":   best_match["truck_equipment"],
+        }
 
     if pickup_loc and delivery_loc:
         get_distance(pickup_loc, delivery_loc)
@@ -1402,6 +1418,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "route_url":            build_google_maps_route_url(
                     pickup_loc or "", delivery_loc or ""),
                 "bid_template":         local_template,
+                "all_trucks": all_matches,
             }
 
     return "\n".join(lines), vehicle_required, order, bid_url
