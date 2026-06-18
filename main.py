@@ -86,7 +86,6 @@ async def build_bid(req: dict):
             truck_dimensions = load_data.get("truck_dimensions"),
             deadhead_eta_minutes = load_data.get("deadhead_eta_minutes"),
             truck_equipment  = load_data.get("truck_equipment", ""),
-            bid_template     = load_data.get("bid_template"),   # ← ADD THIS
         )
         return {"bid_text": bid_text}
     except Exception as e:
