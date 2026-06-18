@@ -763,6 +763,66 @@ def extract_estimated_miles_from_email(text: str):
 # DATE UTILITIES
 # =============================================================
 
+def find_all_trucks_for_pickup(
+        trucks, vehicle_required, pickup_loc,
+        pickup_dt, raw_text,
+        load_weight_lbs=None,
+        load_height_in=None,
+        delivery_loc=None,
+        max_radius_miles=500):
+    """
+    Returns list of all qualifying trucks sorted by deadhead distance.
+    Each entry: {"driver_name", "truck_type", "truck_dimensions",
+                 "truck_equipment", "google_deadhead", "deadhead_eta_minutes"}
+    """
+    matches      = []
+    delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
+
+    for t in trucks:
+        if not _vehicle_matches(t["vehicle"], vehicle_required):
+            continue
+        if not truck_date_matches(t, pickup_dt, raw_text):
+            continue
+
+        truck_states = t.get("allowed_states")
+        if truck_states and delivery_state:
+            if delivery_state not in truck_states:
+                continue
+
+        truck_payload = t.get("max_payload_lbs")
+        if load_weight_lbs is not None and truck_payload is not None:
+            if load_weight_lbs > truck_payload:
+                continue
+
+        truck_height = t.get("max_height_in")
+        if load_height_in is not None and truck_height is not None:
+            if load_height_in > truck_height:
+                continue
+
+        truck_coords  = photon_geocode(t["zip"])
+        pickup_coords = photon_geocode(pickup_loc)
+        if truck_coords and pickup_coords:
+            sl = _haversine_miles(truck_coords[0], truck_coords[1],
+                                   pickup_coords[0], pickup_coords[1])
+            if sl > max_radius_miles * 1.4:
+                continue
+
+        dist = get_distance_from_zip(t["zip"], pickup_loc)
+        if not dist or dist["miles"] > max_radius_miles:
+            continue
+
+        matches.append({
+            "driver_name":          t.get("driver_name", ""),
+            "truck_type":           t.get("vehicle", ""),
+            "truck_dimensions":     t.get("dimensions", ""),
+            "truck_equipment":      t.get("equipment", ""),
+            "google_deadhead":      dist["miles"],
+            "deadhead_eta_minutes": dist["minutes"],
+        })
+
+    matches.sort(key=lambda x: x["google_deadhead"])
+    return matches
+
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
         try:
@@ -1492,4 +1552,20 @@ def parse_email_for_api(request_data: dict) -> dict:
                 result['route_url'] = ld.get('route_url', '')
                 result['load_data'] = {k: v for k, v in ld.items()
                                        if k != 'original_msg_full'}
+    # After the existing process_bid_email call and result building:
+    if result.get("load_data") and local_trucks:
+        raw_text = request_data.get("email_body", "")
+        # Re-extract fields needed for matching
+        ld = result["load_data"]
+        all_trucks = find_all_trucks_for_pickup(
+            local_trucks,
+            ld.get("vehicle_required", ""),
+            ld.get("pickup_loc", ""),
+            ld.get("pickup_dt"),
+            raw_text,
+            max_radius_miles=request_data["max_radius_miles"],
+            delivery_loc=ld.get("delivery_loc"),
+        )
+        result["load_data"]["all_trucks"] = all_trucks
+
     return result
