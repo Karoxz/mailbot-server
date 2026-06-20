@@ -98,6 +98,7 @@ session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
+_GH_SEMAPHORE = threading.Semaphore(2)  # max 2 concurrent GH requests
 
 def _cache_flush_worker():
     """Flush caches to disk every 30s only when dirty."""
@@ -471,30 +472,31 @@ def _graphhopper_route(origin_latlon, dest_latlon):
         return None
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
-    try:
-        r = _gh_session.get(GRAPHHOPPER_URL, params={
-            "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
-            "profile":      "car",
-            "locale":       "en",
-            "calc_points":  "false",
-            "instructions": "false",
-        }, timeout=5)
-        if r.status_code != 200:
+    with _GH_SEMAPHORE:
+        try:
+            r = _gh_session.get(GRAPHHOPPER_URL, params={
+                "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
+                "profile":      "car",
+                "locale":       "en",
+                "calc_points":  "false",
+                "instructions": "false",
+            }, timeout=5)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            if "paths" not in data or not data["paths"]:
+                return None
+            path = data["paths"][0]
+            base_miles = (path["distance"] / 1609.344) * GRAPHHOPPER_MILE_FACTOR
+            miles = round(base_miles * GRAPHHOPPER_CORRECTION)
+            if miles < 600:
+                miles += DEADHEAD_UNDER_600_OFFSET
+            return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             return None
-        data = r.json()
-        if "paths" not in data or not data["paths"]:
+        except Exception as e:
+            print(f"GraphHopper exception: {e}")
             return None
-        path = data["paths"][0]
-        base_miles = (path["distance"] / 1609.344) * GRAPHHOPPER_MILE_FACTOR
-        miles = round(base_miles * GRAPHHOPPER_CORRECTION)
-        if miles < 600:
-            miles += DEADHEAD_UNDER_600_OFFSET
-        return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        return None
-    except Exception as e:
-        print(f"GraphHopper exception: {e}")
-        return None
 
 
 def _osrm_route_fallback(origin_latlon, dest_latlon):
@@ -762,6 +764,66 @@ def extract_estimated_miles_from_email(text: str):
 # =============================================================
 # DATE UTILITIES
 # =============================================================
+
+def find_all_trucks_for_pickup(
+        trucks, vehicle_required, pickup_loc,
+        pickup_dt, raw_text,
+        load_weight_lbs=None,
+        load_height_in=None,
+        delivery_loc=None,
+        max_radius_miles=500):
+    """
+    Returns list of all qualifying trucks sorted by deadhead distance.
+    Each entry: {"driver_name", "truck_type", "truck_dimensions",
+                 "truck_equipment", "google_deadhead", "deadhead_eta_minutes"}
+    """
+    matches      = []
+    delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
+
+    for t in trucks:
+        if not _vehicle_matches(t["vehicle"], vehicle_required):
+            continue
+        if not truck_date_matches(t, pickup_dt, raw_text):
+            continue
+
+        truck_states = t.get("allowed_states")
+        if truck_states and delivery_state:
+            if delivery_state not in truck_states:
+                continue
+
+        truck_payload = t.get("max_payload_lbs")
+        if load_weight_lbs is not None and truck_payload is not None:
+            if load_weight_lbs > truck_payload:
+                continue
+
+        truck_height = t.get("max_height_in")
+        if load_height_in is not None and truck_height is not None:
+            if load_height_in > truck_height:
+                continue
+
+        truck_coords  = photon_geocode(t["zip"])
+        pickup_coords = photon_geocode(pickup_loc)
+        if truck_coords and pickup_coords:
+            sl = _haversine_miles(truck_coords[0], truck_coords[1],
+                                   pickup_coords[0], pickup_coords[1])
+            if sl > max_radius_miles * 1.4:
+                continue
+
+        dist = get_distance_from_zip(t["zip"], pickup_loc)
+        if not dist or dist["miles"] > max_radius_miles:
+            continue
+
+        matches.append({
+            "driver_name":          t.get("driver_name", ""),
+            "truck_type":           t.get("vehicle", ""),
+            "truck_dimensions":     t.get("dimensions", ""),
+            "truck_equipment":      t.get("equipment", ""),
+            "google_deadhead":      dist["miles"],
+            "deadhead_eta_minutes": dist["minutes"],
+        })
+
+    matches.sort(key=lambda x: x["google_deadhead"])
+    return matches
 
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
@@ -1185,21 +1247,37 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead)",
                     order, None)
 
-        best_truck, deadhead_miles, reject_reason, per_truck_log = \
-            find_best_truck_for_pickup_with_date(
-                local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
-                load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
-                max_radius_miles=max_radius_miles
-            )
+        # Find ALL matching trucks in one pass — sorted by distance
+        # Best truck is simply the first (closest) result
+        all_matches = find_all_trucks_for_pickup(
+            local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
+            load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
+            max_radius_miles=max_radius_miles
+        )
 
-        if not best_truck:
+        if not all_matches:
+            # Re-run with logging to get reject reason
+            _, _, reject_reason, per_truck_log = \
+                find_best_truck_for_pickup_with_date(
+                    local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
+                    load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
+                    max_radius_miles=max_radius_miles
+                )
             return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
-        if deadhead_miles and deadhead_miles > max_radius_miles:
-            return (None,
-                    f"DEADHEAD TOO FAR {deadhead_miles} mi (max {max_radius_miles})"
-                    + _fmt_truck_detail(per_truck_log),
-                    order, None)
+        # Best = closest matching truck
+        best_match   = all_matches[0]
+        deadhead_miles = best_match["google_deadhead"]
+        deadhead_eta   = {"miles": deadhead_miles,
+                          "minutes": best_match["deadhead_eta_minutes"]}
+
+        # Reconstruct best_truck dict for downstream use
+        best_truck = {
+            "driver_name": best_match["driver_name"],
+            "vehicle":     best_match["truck_type"],
+            "dimensions":  best_match["truck_dimensions"],
+            "equipment":   best_match["truck_equipment"],
+        }
 
     if pickup_loc and delivery_loc:
         get_distance(pickup_loc, delivery_loc)
@@ -1342,6 +1420,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "route_url":            build_google_maps_route_url(
                     pickup_loc or "", delivery_loc or ""),
                 "bid_template":         local_template,
+                "all_trucks": all_matches,
             }
 
     return "\n".join(lines), vehicle_required, order, bid_url
@@ -1492,4 +1571,5 @@ def parse_email_for_api(request_data: dict) -> dict:
                 result['route_url'] = ld.get('route_url', '')
                 result['load_data'] = {k: v for k, v in ld.items()
                                        if k != 'original_msg_full'}
+
     return result
