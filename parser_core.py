@@ -1257,12 +1257,14 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
         if not all_matches:
             # Re-run with logging to get reject reason
-            _, _, reject_reason, per_truck_log = \
+            _best, _, reject_reason, per_truck_log = \
                 find_best_truck_for_pickup_with_date(
                     local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
                     load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
                     max_radius_miles=max_radius_miles
                 )
+            if reject_reason is None:
+                reject_reason = "NO TRUCK MATCH"
             return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
         # Best = closest matching truck
