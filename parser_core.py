@@ -98,7 +98,7 @@ session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
-_GH_SEMAPHORE = threading.Semaphore(2)  # max 2 concurrent GH requests
+_GH_SEMAPHORE = threading.Semaphore(1)  # max 2 concurrent GH requests
 
 def _cache_flush_worker():
     """Flush caches to disk every 30s only when dirty."""
