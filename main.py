@@ -57,6 +57,7 @@ async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
             notification = json.loads(decoded)
             history_id = str(notification.get("historyId", ""))
             import time as _time
+            print(f"WEBHOOK_HIT t={_time.time():.3f}", flush=True)  # ← ADD THIS
             logger.info(f"PUSH_IN historyId={history_id} t={_time.time():.3f}")
             with _push_lock:
                 _push_queue.append((history_id, _time.time()))
