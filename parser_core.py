@@ -18,7 +18,7 @@ from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait, FIRST_COMPLETED
 import queue as _queue
 
 import requests
@@ -34,6 +34,7 @@ def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
     dlam  = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.asin(math.sqrt(a))
+
 # =============================================================
 # CONFIGURATION
 # =============================================================
@@ -67,12 +68,9 @@ ROUTE_CACHE_TTL_DAYS = 30
 FRESH_WINDOW    = "2d"
 STOP_EVENT      = threading.Event()
 
-# LOAD_STORE is only written once per request (after processing),
-# never read during processing — safe without a request lock.
 LOAD_STORE      = {}
 LOAD_STORE_LOCK = threading.Lock()
 
-# Default template — read-only after startup, never mutated per-request
 BID_TEMPLATE_LOCK = threading.Lock()
 BID_TEMPLATE = """Rate: $
 {vehicle_type}
@@ -98,10 +96,9 @@ session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
-_GH_SEMAPHORE = threading.Semaphore(1)  # max 2 concurrent GH requests
+_GH_SEMAPHORE = threading.Semaphore(1)
 
 def _cache_flush_worker():
-    """Flush caches to disk every 30s only when dirty."""
     global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
     while not STOP_EVENT.is_set():
         time.sleep(30)
@@ -182,11 +179,6 @@ def extract_state_from_location(loc: str):
 
 
 def parse_height_from_dims(dims: str):
-    """
-    Parse truck max usable height from dims string.
-    Format: LxWxH(H_door x W_door)  e.g. 264x98x97(94x91)
-    Returns door opening height if present, else interior height.
-    """
     if not dims:
         return None
     paren_m = re.search(r"\(([^)]+)\)", dims)
@@ -409,7 +401,7 @@ def photon_geocode(place: str):
 
 
 # =============================================================
-# ROUTING
+# ROUTING  — FIX: reduced timeouts + parallel fallback race
 # =============================================================
 
 def _ors_route(origin_latlon, dest_latlon):
@@ -426,7 +418,7 @@ def _ors_route(origin_latlon, dest_latlon):
                          json={"coordinates": [[lon1, lat1], [lon2, lat2]], "units": "mi"},
                          headers={"Authorization": ORS_API_KEY,
                                   "Content-Type": "application/json"},
-                         timeout=12)
+                         timeout=6)  # FIX: was 12s — halved
         if r.status_code in (403, 429):
             with _ORS_LOCK:
                 _ORS_FAIL_COUNT += 1
@@ -480,7 +472,7 @@ def _graphhopper_route(origin_latlon, dest_latlon):
                 "locale":       "en",
                 "calc_points":  "false",
                 "instructions": "false",
-            }, timeout=5)
+            }, timeout=4)  # FIX: was 5s
             if r.status_code != 200:
                 return None
             data = r.json()
@@ -515,17 +507,22 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
             if osrm_code in PERMANENT_CODES or r.status_code in (400, 422):
                 return None
             if r.status_code != 200 or osrm_code != "Ok" or not data.get("routes"):
-                time.sleep(2)
+                time.sleep(0.5)  # FIX: was 2s — massively reduced
                 continue
             route = data["routes"][0]
             return {"miles": round(route["distance"] / 1609.344),
                     "minutes": round(route["duration"] / 60)}
         except Exception:
-            time.sleep(2)
+            time.sleep(0.5)  # FIX: was 2s
     return None
 
 
 def compute_route(origin_latlon, dest_latlon):
+    """
+    FIX: When GraphHopper is unavailable, race ORS and OSRM in parallel
+    and return whichever responds first. Previously serial: ORS(6s) then OSRM(3s+0.5s).
+    Now parallel: max(ORS, OSRM) instead of sum.
+    """
     global _ROUTE_CACHE_DIRTY
     cache_key = (f"{origin_latlon[0]:.5f},{origin_latlon[1]:.5f}"
                  f"|{dest_latlon[0]:.5f},{dest_latlon[1]:.5f}")
@@ -551,14 +548,13 @@ def compute_route(origin_latlon, dest_latlon):
         if age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
             return cached
 
+    # Try GraphHopper first — local and fast
     result = _graphhopper_route(origin_latlon, dest_latlon)
     source = "gh"
+
     if not result:
-        result = _ors_route(origin_latlon, dest_latlon)
-        source = "ors"
-    if not result:
-        result = _osrm_route_fallback(origin_latlon, dest_latlon)
-        source = "osrm"
+        # FIX: Race ORS and OSRM in parallel — return the winner
+        result, source = _parallel_fallback_route(origin_latlon, dest_latlon)
 
     if result:
         result["source"] = source
@@ -567,6 +563,42 @@ def compute_route(origin_latlon, dest_latlon):
             ROUTE_CACHE[cache_key] = result
             _ROUTE_CACHE_DIRTY = True
     return result
+
+
+def _parallel_fallback_route(origin_latlon, dest_latlon):
+    """
+    Race ORS and OSRM concurrently. Return the first successful result.
+    This replaces the serial ORS→OSRM chain and cuts worst-case latency
+    from ~9s (6s ORS timeout + 3s OSRM) to ~6s (max of both, not sum).
+    When ORS is disabled, OSRM responds alone in ~3s.
+    """
+    result_holder = [None]
+    source_holder = [""]
+    done_event    = threading.Event()
+
+    def _try_ors():
+        r = _ors_route(origin_latlon, dest_latlon)
+        if r and not done_event.is_set():
+            result_holder[0] = r
+            source_holder[0] = "ors"
+            done_event.set()
+
+    def _try_osrm():
+        r = _osrm_route_fallback(origin_latlon, dest_latlon)
+        if r and not done_event.is_set():
+            result_holder[0] = r
+            source_holder[0] = "osrm"
+            done_event.set()
+
+    t_ors  = threading.Thread(target=_try_ors,  daemon=True)
+    t_osrm = threading.Thread(target=_try_osrm, daemon=True)
+    t_ors.start()
+    t_osrm.start()
+
+    # Wait up to 7s for either to succeed
+    done_event.wait(timeout=7)
+
+    return result_holder[0], source_holder[0]
 
 
 def get_distance(orig: str, dest: str):
@@ -773,57 +805,71 @@ def find_all_trucks_for_pickup(
         delivery_loc=None,
         max_radius_miles=500):
     """
-    Returns list of all qualifying trucks sorted by deadhead distance.
-    Each entry: {"driver_name", "truck_type", "truck_dimensions",
-                 "truck_equipment", "google_deadhead", "deadhead_eta_minutes"}
+    FIX: Parallelize route computation across all candidate trucks.
+    Previously serial (one route call per truck sequentially).
+    Now uses ThreadPoolExecutor — all routes computed concurrently.
     """
-    matches      = []
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
+    pickup_coords  = photon_geocode(pickup_loc) if pickup_loc else None
 
+    # Phase 1: filter candidates without routing (fast, no network)
+    candidates = []
     for t in trucks:
         if not _vehicle_matches(t["vehicle"], vehicle_required):
             continue
         if not truck_date_matches(t, pickup_dt, raw_text):
             continue
-
         truck_states = t.get("allowed_states")
         if truck_states and delivery_state:
             if delivery_state not in truck_states:
                 continue
-
         truck_payload = t.get("max_payload_lbs")
         if load_weight_lbs is not None and truck_payload is not None:
             if load_weight_lbs > truck_payload:
                 continue
-
         truck_height = t.get("max_height_in")
         if load_height_in is not None and truck_height is not None:
             if load_height_in > truck_height:
                 continue
-
-        truck_coords  = photon_geocode(t["zip"])
-        pickup_coords = photon_geocode(pickup_loc)
+        # Haversine pre-filter — skip obvious misses before routing
+        truck_coords = photon_geocode(t["zip"])
         if truck_coords and pickup_coords:
             sl = _haversine_miles(truck_coords[0], truck_coords[1],
                                    pickup_coords[0], pickup_coords[1])
             if sl > max_radius_miles * 1.4:
                 continue
+        candidates.append(t)
 
+    if not candidates:
+        return []
+
+    # Phase 2: compute routes in parallel for all candidates
+    matches = []
+    lock    = threading.Lock()
+
+    def _route_truck(t):
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist or dist["miles"] > max_radius_miles:
-            continue
+            return
+        with lock:
+            matches.append({
+                "driver_name":          t.get("driver_name", ""),
+                "truck_type":           t.get("vehicle", ""),
+                "truck_dimensions":     t.get("dimensions", ""),
+                "truck_equipment":      t.get("equipment", ""),
+                "google_deadhead":      dist["miles"],
+                "deadhead_eta_minutes": dist["minutes"],
+            })
 
-        matches.append({
-            "driver_name":          t.get("driver_name", ""),
-            "truck_type":           t.get("vehicle", ""),
-            "truck_dimensions":     t.get("dimensions", ""),
-            "truck_equipment":      t.get("equipment", ""),
-            "google_deadhead":      dist["miles"],
-            "deadhead_eta_minutes": dist["minutes"],
-        })
+    max_workers = min(len(candidates), 8)
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="route") as ex:
+        futures = [ex.submit(_route_truck, t) for t in candidates]
+        # Wait for all with a generous timeout
+        futures_wait(futures, timeout=15)
 
     matches.sort(key=lambda x: x["google_deadhead"])
     return matches
+
 
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
@@ -978,7 +1024,6 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         delivery_date_only=(delivery_dt or "").split()[0] if delivery_dt else "",
         deadhead_miles=str(google_deadhead) if google_deadhead is not None else "",
     )
-    # Use passed template, fall back to global default
     if bid_template is None:
         with BID_TEMPLATE_LOCK:
             bid_template = BID_TEMPLATE
@@ -1029,6 +1074,7 @@ def find_best_truck_for_pickup_with_date(
         load_height_in=None,
         delivery_loc=None,
         max_radius_miles=500):
+    """Used only for rejection reason logging — serial is fine here."""
     best, best_miles   = None, None
     per_truck_log      = []
     saw_vehicle_match  = False
@@ -1087,7 +1133,6 @@ def find_best_truck_for_pickup_with_date(
                 over_height_detail = detail_str
                 continue
 
-        # AFTER — haversine pre-filter skips routing for obvious misses
         truck_coords  = photon_geocode(t["zip"])
         pickup_coords = photon_geocode(pickup_loc)
         if truck_coords and pickup_coords:
@@ -1126,8 +1171,6 @@ def format_email_time_from_internal_date(internal_date_ms):
 
 # =============================================================
 # MAIN EMAIL PROCESSOR
-# Thread-safe: trucks and bid_template are parameters, not globals.
-# Multiple requests can run fully in parallel with zero contention.
 # =============================================================
 
 _DELIVERY_STOP_PATS = [
@@ -1148,19 +1191,12 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                       trucks=None,
                       bid_template=None,
                       allowed_delivery_states=None):
-    """
-    Fully thread-safe — all state passed as parameters.
-    trucks: list of truck dicts (built by caller from request data)
-    bid_template: string template for bid body
-    """
-    # Use passed trucks/template — never touch globals during processing
-    
     local_trucks   = trucks if trucks is not None else []
     local_template = bid_template
     if local_template is None:
         with BID_TEMPLATE_LOCK:
             local_template = BID_TEMPLATE
-    # ↓ PASTE HERE
+
     _PE0 = time.perf_counter()
     t = raw_text.replace("\r\n", "\n")
     order = _find(r"Bid on Order\s*#\s*([0-9]+)", t) or f"L{internal_date_ms // 1000}"
@@ -1194,7 +1230,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if _is_placeholder_location(pickup_loc) or _is_placeholder_location(delivery_loc):
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
-    # Geocode pickup + delivery in parallel (thread-safe — only reads/writes cache)
+    # Geocode pickup + delivery in parallel
     _pu_coords = [None]
     _dl_coords = [None]
 
@@ -1226,7 +1262,6 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     dims_raw        = _find(r"Dimensions:\s*([^\n]+)", t)
     load_height_in  = parse_load_height_from_dims(dims_raw) if dims_raw else None
 
-    # Stackable height adjustment
     stackable_flag    = _find(r"Stackable:\s*(Yes|No)", t)
     pieces_for_height = _find(r"Pieces:\s*([0-9]+)", t)
     if load_height_in is not None:
@@ -1244,6 +1279,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     best_truck, deadhead_miles, reject_reason, per_truck_log = None, None, None, []
     deadhead_eta = None
+    all_matches  = []
 
     if local_trucks:
         if not pickup_loc:
@@ -1251,8 +1287,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead)",
                     order, None)
 
-        # Find ALL matching trucks in one pass — sorted by distance
-        # Best truck is simply the first (closest) result
+        # find_all_trucks_for_pickup now runs routes in parallel
         all_matches = find_all_trucks_for_pickup(
             local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
             load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
@@ -1262,7 +1297,6 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         print(f"[TIMING]   find_all_trucks: {_PE2-_PE1:.3f}s", flush=True)
 
         if not all_matches:
-            # Re-run with logging to get reject reason
             _best, _, reject_reason, per_truck_log = \
                 find_best_truck_for_pickup_with_date(
                     local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
@@ -1273,22 +1307,19 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 reject_reason = "NO TRUCK MATCH"
             return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
-        # Best = closest matching truck
         best_match   = all_matches[0]
         deadhead_miles = best_match["google_deadhead"]
         deadhead_eta   = {"miles": deadhead_miles,
                           "minutes": best_match["deadhead_eta_minutes"]}
 
-        # Reconstruct best_truck dict for downstream use
         best_truck = {
             "driver_name": best_match["driver_name"],
             "vehicle":     best_match["truck_type"],
             "dimensions":  best_match["truck_dimensions"],
             "equipment":   best_match["truck_equipment"],
         }
-
-    # if pickup_loc and delivery_loc:
-    #     get_distance(pickup_loc, delivery_loc)
+    else:
+        _PE2 = time.perf_counter()
 
     if deadhead_miles:
         deadhead_eta = {"miles": deadhead_miles,
@@ -1428,12 +1459,13 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "route_url":            build_google_maps_route_url(
                     pickup_loc or "", delivery_loc or ""),
                 "bid_template":         local_template,
-                "all_trucks": all_matches,
+                "all_trucks":           all_matches,
             }
-    # ↓ PASTE HERE (before the return)
+
     _PE3 = time.perf_counter()
     print(f"[TIMING]   formatting+store: {_PE3-_PE2:.3f}s", flush=True)
-    
+    print(f"[TIMING]   TOTAL process_bid_email: {_PE3-_PE0:.3f}s", flush=True)
+
     return "\n".join(lines), vehicle_required, order, bid_url
 
 
@@ -1515,19 +1547,9 @@ def _extract_state_codes_from_text(text: str) -> list:
 
 # =============================================================
 # FASTAPI ENTRY-POINT
-# Thread-safe: builds local_trucks from request, passes directly
-# to process_bid_email as a parameter. Zero global mutation.
-# Fully concurrent — no locks held during processing.
 # =============================================================
 
 def parse_email_for_api(request_data: dict) -> dict:
-    """
-    Fully thread-safe FastAPI entry point.
-    Builds trucks locally from request data and passes them as
-    a parameter to process_bid_email — no global state is mutated
-    during request processing, so all workers run in parallel.
-    """
-    # Build local trucks list — never touches global TRUCKS
     T0 = time.perf_counter()
     local_trucks = []
     for t in request_data.get('trucks', []):
@@ -1544,7 +1566,8 @@ def parse_email_for_api(request_data: dict) -> dict:
         })
     T1 = time.perf_counter()
     print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)
-    # Pre-warm geocode cache for truck ZIPs — parallel, no locks held
+
+    # Pre-warm geocode cache for truck ZIPs — parallel
     def _warm(zip_loc):
         if zip_loc:
             photon_geocode(zip_loc)
@@ -1554,12 +1577,12 @@ def parse_email_for_api(request_data: dict) -> dict:
             ex.map(_warm, [t["zip"] for t in local_trucks])
     T2 = time.perf_counter()
     print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
+
     local_bid_template = request_data.get('bid_template') or BID_TEMPLATE
 
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
 
-    # process_bid_email is now fully stateless — runs with no locks
     formatted, info, order, bid_url = process_bid_email(
         raw_text           = request_data['email_body'],
         allowed_vehicles   = request_data['allowed_vehicles'],
