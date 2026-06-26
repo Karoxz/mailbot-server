@@ -78,7 +78,12 @@ async def poll_push(request: Request):
         for history_id, pushed_at in items:
             lag = _time.time() - pushed_at
             logger.info(f"PUSH_OUT historyId={history_id} lag={lag:.3f}s")
-    return {"history_ids": [h for h, t in items]}
+    # Return only the LATEST historyId — client just needs "new mail arrived"
+    # and will walk history from its own cursor forward
+    if items:
+        latest = max(items, key=lambda x: int(x[0]))
+        return {"history_ids": [latest[0]]}
+    return {"history_ids": []}
 @app.post("/api/activate")
 async def activate(req: ActivateRequest):
     result = activate_license(req.license_key, req.machine_id, req.machine_name)
