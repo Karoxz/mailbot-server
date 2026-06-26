@@ -1287,8 +1287,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             "equipment":   best_match["truck_equipment"],
         }
 
-    if pickup_loc and delivery_loc:
-        get_distance(pickup_loc, delivery_loc)
+    # if pickup_loc and delivery_loc:
+    #     get_distance(pickup_loc, delivery_loc)
 
     if deadhead_miles:
         deadhead_eta = {"miles": deadhead_miles,
