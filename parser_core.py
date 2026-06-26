@@ -317,7 +317,7 @@ def _geocode_nominatim(place: str, place_clean: str):
                 params = {"q": q, "countrycodes": "us", "format": "json",
                           "addressdetails": 1, "limit": 5}
             r = session.get(NOMINATIM_URL, params=params,
-                            headers={"User-Agent": GEOCODER_UA}, timeout=5)
+                            headers={"User-Agent": GEOCODER_UA}, timeout=3)
             if r.status_code != 200:
                 time.sleep(1)
                 continue
@@ -344,7 +344,7 @@ def _geocode_photon(place: str, place_clean: str):
             return None
         try:
             r = session.get(PHOTON_URL, params={"q": place_us, "limit": 5, "lang": "en"},
-                            headers={"User-Agent": GEOCODER_UA}, timeout=5)
+                            headers={"User-Agent": GEOCODER_UA}, timeout=3)
             if r.status_code != 200:
                 time.sleep(1)
                 continue
@@ -395,7 +395,7 @@ def photon_geocode(place: str):
     t_pho = threading.Thread(target=_try_photon,    daemon=True)
     t_nom.start()
     t_pho.start()
-    found_event.wait(timeout=12)
+    found_event.wait(timeout=4)
 
     out = result_holder[0]
     if out:
@@ -506,7 +506,7 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
     url = f"{OSRM_BASE}/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
     for _ in range(2):
         try:
-            r = session.get(url, params={"overview": "false"}, timeout=10)
+            r = session.get(url, params={"overview": "false"}, timeout=3)
             try:
                 data = r.json()
             except ValueError:
