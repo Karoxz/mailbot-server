@@ -48,7 +48,7 @@ OSRM_BASE = "http://router.project-osrm.org"
 
 ORS_API_KEY     = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjZiYTM2ZGYzZTI2YjQ3MGViYjBkNzAwOTgzODM3MjA1IiwiaCI6Im11cm11cjY0In0="
 ORS_URL         = "https://api.openrouteservice.org/v2/directions/driving-car"
-_ORS_DISABLED   = False
+_ORS_DISABLED   = True
 _ORS_FAIL_COUNT = 0
 _ORS_LOCK       = threading.Lock()
 
