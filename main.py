@@ -42,49 +42,43 @@ async def health():
     return {"status": "ok"}
 @app.post("/webhook/gmail")
 async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Receives Gmail push notifications via Pub/Sub."""
     try:
         body = await request.json()
-        # Pub/Sub wraps the message in an envelope
         message = body.get("message", {})
         if not message:
             return {"status": "ok"}
-        
-        # Decode the notification data
         import base64 as _b64
         data = message.get("data", "")
         if data:
             decoded = _b64.b64decode(data).decode("utf-8")
             notification = json.loads(decoded)
-            email_address = notification.get("emailAddress", "")
             history_id = str(notification.get("historyId", ""))
-            logger.info(f"Push notification: email={email_address} historyId={history_id}")
-            
-            # Store latest historyId for the client to pick up
+            import time as _time
+            logger.info(f"PUSH_IN historyId={history_id} t={_time.time():.3f}")
             with _push_lock:
-                _push_queue.append(history_id)
-        
+                _push_queue.append((history_id, _time.time()))
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return {"status": "ok"}  # Always return 200 or Pub/Sub will retry
-
-_push_queue = []
-_push_lock = threading.Lock()
+        return {"status": "ok"}
 
 @app.get("/webhook/poll")
 async def poll_push(request: Request):
-    """Client polls this to get latest historyIds from push notifications."""
     check = validate_license(
         request.headers.get("X-License-Key", ""),
         request.headers.get("X-Machine-Id", "")
     )
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
+    import time as _time
     with _push_lock:
         items = list(_push_queue)
         _push_queue.clear()
-    return {"history_ids": items}
+    if items:
+        for history_id, pushed_at in items:
+            lag = _time.time() - pushed_at
+            logger.info(f"PUSH_OUT historyId={history_id} lag={lag:.3f}s")
+    return {"history_ids": [h for h, t in items]}
 @app.post("/api/activate")
 async def activate(req: ActivateRequest):
     result = activate_license(req.license_key, req.machine_id, req.machine_name)
