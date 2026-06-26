@@ -10,6 +10,9 @@ import threading
 import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
+import collections
+_push_queue: collections.deque = collections.deque()
+_push_lock = threading.Lock()
 
 # ── Load .env file manually (works without python-dotenv) ─────────────────
 def _load_env_file(path=".env"):
