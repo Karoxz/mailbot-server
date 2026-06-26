@@ -309,9 +309,9 @@ def _geocode_nominatim(place: str, place_clean: str):
                 params = {"q": q, "countrycodes": "us", "format": "json",
                           "addressdetails": 1, "limit": 5}
             r = session.get(NOMINATIM_URL, params=params,
-                            headers={"User-Agent": GEOCODER_UA}, timeout=3)
+                            headers={"User-Agent": GEOCODER_UA}, timeout=2)
             if r.status_code != 200:
-                time.sleep(1)
+                time.sleep(0.3)
                 continue
             for item in r.json():
                 try:
@@ -375,7 +375,7 @@ def photon_geocode(place: str):
             found_event.set()
 
     def _try_photon():
-        time.sleep(0.25)
+        time.sleep(0.1)
         if found_event.is_set():
             return
         r = _geocode_photon(place, place_clean)
@@ -387,7 +387,7 @@ def photon_geocode(place: str):
     t_pho = threading.Thread(target=_try_photon,    daemon=True)
     t_nom.start()
     t_pho.start()
-    found_event.wait(timeout=4)
+    found_event.wait(timeout=3)
 
     out = result_holder[0]
     if out:
@@ -418,7 +418,7 @@ def _ors_route(origin_latlon, dest_latlon):
                          json={"coordinates": [[lon1, lat1], [lon2, lat2]], "units": "mi"},
                          headers={"Authorization": ORS_API_KEY,
                                   "Content-Type": "application/json"},
-                         timeout=6)  # FIX: was 12s — halved
+                         timeout=3)  # FIX: was 12s — halved
         if r.status_code in (403, 429):
             with _ORS_LOCK:
                 _ORS_FAIL_COUNT += 1
@@ -443,7 +443,7 @@ def _ors_route(origin_latlon, dest_latlon):
 
 
 _GH_PORT_CACHE = {"up": None, "checked_at": 0}
-_GH_PORT_TTL   = 10
+_GH_PORT_TTL   = 30
 
 
 def is_port_open(host="127.0.0.1", port=8989):
@@ -507,13 +507,13 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
             if osrm_code in PERMANENT_CODES or r.status_code in (400, 422):
                 return None
             if r.status_code != 200 or osrm_code != "Ok" or not data.get("routes"):
-                time.sleep(0.5)  # FIX: was 2s — massively reduced
+                time.sleep(0.1)  # FIX: was 2s — massively reduced
                 continue
             route = data["routes"][0]
             return {"miles": round(route["distance"] / 1609.344),
                     "minutes": round(route["duration"] / 60)}
         except Exception:
-            time.sleep(0.5)  # FIX: was 2s
+            time.sleep(0.1)  # FIX: was 2s
     return None
 
 
@@ -524,8 +524,11 @@ def compute_route(origin_latlon, dest_latlon):
     Now parallel: max(ORS, OSRM) instead of sum.
     """
     global _ROUTE_CACHE_DIRTY
-    cache_key = (f"{origin_latlon[0]:.5f},{origin_latlon[1]:.5f}"
-                 f"|{dest_latlon[0]:.5f},{dest_latlon[1]:.5f}")
+    # In compute_route(), change cache key precision from 5 to 3 decimal places:
+    # 5 decimal places = ~1.1m precision (overkill for routing cache)
+    # 3 decimal places = ~111m precision (plenty for route deduplication)
+    cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
+                f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
     now = time.time()
 
     with _ROUTE_CACHE_LOCK:
@@ -596,7 +599,7 @@ def _parallel_fallback_route(origin_latlon, dest_latlon):
     t_osrm.start()
 
     # Wait up to 7s for either to succeed
-    done_event.wait(timeout=7)
+    done_event.wait(timeout=4)
 
     return result_holder[0], source_holder[0]
 
@@ -1568,13 +1571,21 @@ def parse_email_for_api(request_data: dict) -> dict:
     print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)
 
     # Pre-warm geocode cache for truck ZIPs — parallel
+    # In parse_email_for_api, replace the warmup block:
     def _warm(zip_loc):
+        key = (zip_loc or "").strip().upper()
+        with _GEO_CACHE_LOCK:
+            if key in GEO_CACHE:
+                return   # already cached — skip entirely
         if zip_loc:
             photon_geocode(zip_loc)
 
     if local_trucks:
-        with ThreadPoolExecutor(max_workers=min(8, len(local_trucks))) as ex:
-            ex.map(_warm, [t["zip"] for t in local_trucks])
+        uncached = [t["zip"] for t in local_trucks 
+                    if (t["zip"] or "").strip().upper() not in GEO_CACHE]
+        if uncached:
+            with ThreadPoolExecutor(max_workers=min(4, len(uncached))) as ex:
+                list(ex.map(_warm, uncached))   # list() to surface exceptions
     T2 = time.perf_counter()
     print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
 
