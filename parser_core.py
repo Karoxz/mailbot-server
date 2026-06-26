@@ -1154,12 +1154,14 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     bid_template: string template for bid body
     """
     # Use passed trucks/template — never touch globals during processing
+    
     local_trucks   = trucks if trucks is not None else []
     local_template = bid_template
     if local_template is None:
         with BID_TEMPLATE_LOCK:
             local_template = BID_TEMPLATE
-
+    # ↓ PASTE HERE
+    _PE0 = time.perf_counter()
     t = raw_text.replace("\r\n", "\n")
     order = _find(r"Bid on Order\s*#\s*([0-9]+)", t) or f"L{internal_date_ms // 1000}"
 
@@ -1206,6 +1208,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     _t2 = threading.Thread(target=_geo_dl, daemon=True)
     _t1.start(); _t2.start()
     _t1.join();  _t2.join()
+    _PE1 = time.perf_counter()
+    print(f"[TIMING]   geo pickup+delivery: {_PE1-_PE0:.3f}s", flush=True)
 
     if pickup_loc and _pu_coords[0] and not _in_us(*_pu_coords[0]):
         return None, f"NON-US PICKUP ({pickup_loc})", order, None
@@ -1254,6 +1258,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
             max_radius_miles=max_radius_miles
         )
+        _PE2 = time.perf_counter()
+        print(f"[TIMING]   find_all_trucks: {_PE2-_PE1:.3f}s", flush=True)
 
         if not all_matches:
             # Re-run with logging to get reject reason
@@ -1424,7 +1430,10 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "bid_template":         local_template,
                 "all_trucks": all_matches,
             }
-
+    # ↓ PASTE HERE (before the return)
+    _PE3 = time.perf_counter()
+    print(f"[TIMING]   formatting+store: {_PE3-_PE2:.3f}s", flush=True)
+    
     return "\n".join(lines), vehicle_required, order, bid_url
 
 
@@ -1519,6 +1528,7 @@ def parse_email_for_api(request_data: dict) -> dict:
     during request processing, so all workers run in parallel.
     """
     # Build local trucks list — never touches global TRUCKS
+    T0 = time.perf_counter()
     local_trucks = []
     for t in request_data.get('trucks', []):
         local_trucks.append({
@@ -1532,7 +1542,8 @@ def parse_email_for_api(request_data: dict) -> dict:
             'allowed_states':  set(t['allowed_states']) if t.get('allowed_states') else None,
             'equipment':       t.get('equipment', ''),
         })
-
+    T1 = time.perf_counter()
+    print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)
     # Pre-warm geocode cache for truck ZIPs — parallel, no locks held
     def _warm(zip_loc):
         if zip_loc:
@@ -1541,7 +1552,8 @@ def parse_email_for_api(request_data: dict) -> dict:
     if local_trucks:
         with ThreadPoolExecutor(max_workers=min(8, len(local_trucks))) as ex:
             ex.map(_warm, [t["zip"] for t in local_trucks])
-
+    T2 = time.perf_counter()
+    print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
     local_bid_template = request_data.get('bid_template') or BID_TEMPLATE
 
     dummy_msg = {'payload': {'headers': [], 'parts': []},
@@ -1557,6 +1569,9 @@ def parse_email_for_api(request_data: dict) -> dict:
         trucks             = local_trucks,
         bid_template       = local_bid_template,
     )
+    T3 = time.perf_counter()
+    print(f"[TIMING] process_bid_email: {T3-T2:.3f}s", flush=True)
+    print(f"[TIMING] TOTAL: {T3-T0:.3f}s", flush=True)
 
     result = {
         'success':      formatted is not None,
