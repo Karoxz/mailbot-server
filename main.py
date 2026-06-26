@@ -5,7 +5,9 @@ from fastapi import FastAPI, HTTPException
 from models import ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest
 from license_db import init_db, validate_license, activate_license, heartbeat
 from parser_core import parse_email_for_api
-
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+import threading
+import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
 
@@ -38,7 +40,51 @@ app = FastAPI(title="MailBot API", lifespan=lifespan, docs_url=None, redoc_url=N
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+@app.post("/webhook/gmail")
+async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Receives Gmail push notifications via Pub/Sub."""
+    try:
+        body = await request.json()
+        # Pub/Sub wraps the message in an envelope
+        message = body.get("message", {})
+        if not message:
+            return {"status": "ok"}
+        
+        # Decode the notification data
+        import base64 as _b64
+        data = message.get("data", "")
+        if data:
+            decoded = _b64.b64decode(data).decode("utf-8")
+            notification = json.loads(decoded)
+            email_address = notification.get("emailAddress", "")
+            history_id = str(notification.get("historyId", ""))
+            logger.info(f"Push notification: email={email_address} historyId={history_id}")
+            
+            # Store latest historyId for the client to pick up
+            with _push_lock:
+                _push_queue.append(history_id)
+        
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"status": "ok"}  # Always return 200 or Pub/Sub will retry
 
+_push_queue = []
+_push_lock = threading.Lock()
+
+@app.get("/webhook/poll")
+async def poll_push(request: Request):
+    """Client polls this to get latest historyIds from push notifications."""
+    check = validate_license(
+        request.headers.get("X-License-Key", ""),
+        request.headers.get("X-Machine-Id", "")
+    )
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    with _push_lock:
+        items = list(_push_queue)
+        _push_queue.clear()
+    return {"history_ids": items}
 @app.post("/api/activate")
 async def activate(req: ActivateRequest):
     result = activate_license(req.license_key, req.machine_id, req.machine_name)
