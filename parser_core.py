@@ -954,23 +954,29 @@ def parse_truck_definitions(text):
             continue
         vehicle      = parts[0]
         driver       = parts[1]
-        dims         = parts[2]
-        payload_text = parts[3]
-        equipment    = parts[4] if len(parts) > 4 else ""
-        states_raw   = parts[5] if len(parts) > 5 else ""
-        zip_loc      = parts[6] if len(parts) > 6 else ""
-        date         = parts[7].upper() if len(parts) > 7 else ""
+        chat_id_s    = parts[2] if len(parts) > 2 else ""
+        dims         = parts[3] if len(parts) > 3 else ""
+        payload_text = parts[4] if len(parts) > 4 else ""
+        equipment    = parts[5] if len(parts) > 5 else ""
+        states_raw   = parts[6] if len(parts) > 6 else ""
+        zip_loc      = parts[7] if len(parts) > 7 else ""
+        date         = parts[8].upper() if len(parts) > 8 else ""
         truck_states = expand_states(states_raw) if states_raw.strip() else None
+        try:
+            chat_id = int(chat_id_s) if chat_id_s.strip() else None
+        except ValueError:
+            chat_id = None
         trucks.append({
-            "vehicle":         vehicle.upper(),
-            "zip":             zip_loc,
-            "driver_name":     driver,
-            "dimensions":      dims,
-            "max_payload_lbs": parse_weight_lbs(payload_text),
-            "max_height_in":   parse_height_from_dims(dims),
-            "pickup_date":     date,
-            "allowed_states":  truck_states,
-            "equipment":       equipment,
+            "vehicle":          vehicle.upper(),
+            "zip":              zip_loc,
+            "driver_name":      driver,
+            "dimensions":       dims,
+            "max_payload_lbs":  parse_weight_lbs(payload_text),
+            "max_height_in":    parse_height_from_dims(dims),
+            "pickup_date":      date,
+            "allowed_states":   truck_states,
+            "equipment":        equipment,
+            "telegram_chat_id": chat_id,
         })
     return trucks
 
