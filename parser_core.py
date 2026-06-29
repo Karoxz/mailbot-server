@@ -990,7 +990,7 @@ def validate_truck_definitions(text):
         parts = [p.strip() for p in line.split(":")]
         if len(parts) < 4:
             errors.append(
-                f"Line {i}: need VEHICLE:DRIVER:DIMS:PAYLOAD "
+                f"Line {i}: need VEHICLE:DRIVER:CHAT_ID:DIMS:PAYLOAD "
                 f"(got {len(parts)} field{'s' if len(parts) != 1 else ''})"
             )
             continue
@@ -998,19 +998,27 @@ def validate_truck_definitions(text):
             errors.append(f"Line {i}: vehicle type is empty")
         if not parts[1]:
             errors.append(f"Line {i}: driver name is empty")
-        if parse_weight_lbs(parts[3]) is None:
-            errors.append(f"Line {i}: cannot parse payload '{parts[3]}' as a number")
-        if len(parts) > 5 and parts[5].strip():
-            if not expand_states(parts[5]):
+        if parts[2].strip() and not parts[2].strip().lstrip("-").isdigit():
+            errors.append(f"Line {i}: chat ID '{parts[2]}' must be a number or blank")
+        if len(parts) > 4 and parse_weight_lbs(parts[4]) is None:
+            errors.append(f"Line {i}: cannot parse payload '{parts[4]}' as a number")
+        if len(parts) > 6 and parts[6].strip():
+            if not expand_states(parts[6]):
                 errors.append(
-                    f"Line {i}: cannot expand '{parts[5]}' — "
-                    f"use state codes (OH,PA) or region names "
-                    f"(East Coast, Midwest, West Coast)"
+                    f"Line {i}: cannot expand '{parts[6]}' — "
+                    f"use state codes (OH,PA) or region names (East Coast, Midwest, West Coast)"
                 )
-        if len(parts) > 7 and parts[7].strip():
-            if not normalize_mmddyyyy(parts[7]):
-                errors.append(
-                    f"Line {i}: date '{parts[7]}' must be MM/DD/YYYY or MM/DD/YY")
+        if len(parts) > 8 and parts[8].strip():
+            valid = False
+            for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                try:
+                    datetime.strptime(parts[8].strip(), fmt)
+                    valid = True
+                    break
+                except ValueError:
+                    pass
+            if not valid:
+                errors.append(f"Line {i}: date '{parts[8]}' must be MM/DD/YYYY or MM/DD/YY")
     return errors
 
 
