@@ -851,9 +851,8 @@ def find_all_trucks_for_pickup(
         delivery_loc=None,
         max_radius_miles=500):
     """
-    FIX: Parallelize route computation across all candidate trucks.
-    Previously serial (one route call per truck sequentially).
-    Now uses ThreadPoolExecutor — all routes computed concurrently.
+    Parallelize route computation across all candidate trucks.
+    Uses ThreadPoolExecutor — all routes computed concurrently.
     """
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
     pickup_coords  = photon_geocode(pickup_loc) if pickup_loc else None
@@ -908,6 +907,17 @@ def find_all_trucks_for_pickup(
                 "google_deadhead":      dist["miles"],
                 "deadhead_eta_minutes": dist["minutes"],
             })
+
+    max_workers = min(len(candidates), 8)
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="route") as ex:
+        futures = [ex.submit(_route_truck, t) for t in candidates]
+        # Wait for all with a generous timeout — bumped from 15s to 25s to
+        # tolerate cold-cache geocode/route calls (first request after a
+        # geo_cache.json / route_cache.json wipe is much slower).
+        futures_wait(futures, timeout=25)
+
+    matches.sort(key=lambda x: x["google_deadhead"])
+    return matches
 
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
@@ -1349,15 +1359,31 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         print(f"[TIMING]   find_all_trucks: {_PE2-_PE1:.3f}s", flush=True)
 
         if not all_matches:
-            _best, _, reject_reason, per_truck_log = \
+            _best, _best_miles, reject_reason, per_truck_log = \
                 find_best_truck_for_pickup_with_date(
                     local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
                     load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
                     max_radius_miles=max_radius_miles
                 )
-            if reject_reason is None:
-                reject_reason = "NO TRUCK MATCH"
-            return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
+            if _best:
+                # Parallel matcher timed out/missed it (cold cache, slow geocode,
+                # etc.) but the serial fallback found a valid truck — use it
+                # instead of discarding a good load.
+                print(f"[MATCH] Parallel matcher found 0 candidates but serial "
+                      f"fallback recovered {_best.get('driver_name')} at "
+                      f"{_best_miles}mi — using it.", flush=True)
+                all_matches = [{
+                    "driver_name":          _best.get("driver_name", ""),
+                    "truck_type":           _best.get("vehicle", ""),
+                    "truck_dimensions":     _best.get("dimensions", ""),
+                    "truck_equipment":      _best.get("equipment", ""),
+                    "google_deadhead":      _best_miles,
+                    "deadhead_eta_minutes": int((_best_miles / 45) * 60) if _best_miles else None,
+                }]
+            else:
+                if reject_reason is None:
+                    reject_reason = "NO TRUCK MATCH"
+                return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
         best_match   = all_matches[0]
         deadhead_miles = best_match["google_deadhead"]
