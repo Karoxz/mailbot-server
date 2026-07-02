@@ -96,7 +96,7 @@ session.mount("https://", HTTPAdapter(max_retries=_http_retry))
 session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
-_GH_SEMAPHORE = threading.Semaphore(1)
+_GH_SEMAPHORE = threading.Semaphore(6)
 
 def _cache_flush_worker():
     global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
