@@ -103,7 +103,7 @@ async def hb(req: HeartbeatRequest):
     return {"valid": True}
 
 @app.post("/api/parse", response_model=ParseResponse)
-async def parse(req: ParseRequest):
+def parse(req: ParseRequest):          # ← removed "async"
     check = validate_license(req.license_key, req.machine_id)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
@@ -115,7 +115,7 @@ async def parse(req: ParseRequest):
         raise HTTPException(status_code=500, detail="Internal parsing error")
 
 @app.post("/api/build_bid")
-async def build_bid(req: dict):
+def build_bid(req: dict):              # ← removed "async"
     check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
@@ -135,7 +135,7 @@ async def build_bid(req: dict):
             truck_dimensions = load_data.get("truck_dimensions"),
             deadhead_eta_minutes = load_data.get("deadhead_eta_minutes"),
             truck_equipment  = load_data.get("truck_equipment", ""),
-            bid_template     = load_data.get("bid_template"),   # ← ADD THIS
+            bid_template     = load_data.get("bid_template"),
         )
         return {"bid_text": bid_text}
     except Exception as e:
