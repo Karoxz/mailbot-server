@@ -472,18 +472,25 @@ def _graphhopper_route(origin_latlon, dest_latlon):
                 "locale":       "en",
                 "calc_points":  "false",
                 "instructions": "false",
-            }, timeout=4)  # FIX: was 5s
+            }, timeout=4)
             if r.status_code != 200:
                 return None
             data = r.json()
             if "paths" not in data or not data["paths"]:
                 return None
             path = data["paths"][0]
-            base_miles = (path["distance"] / 1609.344) * GRAPHHOPPER_MILE_FACTOR
+            raw_miles  = path["distance"] / 1609.344
+            base_miles = raw_miles * GRAPHHOPPER_MILE_FACTOR
             miles = round(base_miles * GRAPHHOPPER_CORRECTION)
+            offset_applied = 0
             if miles < 600:
-                miles += DEADHEAD_UNDER_600_OFFSET
-            return {"miles": max(0, miles), "minutes": round(path["time"] / 60000)}
+                offset_applied = DEADHEAD_UNDER_600_OFFSET
+                miles += offset_applied
+            final_miles = max(0, miles)
+            print(f"[GH] {lat1:.3f},{lon1:.3f} -> {lat2:.3f},{lon2:.3f}  "
+                  f"raw={raw_miles:.1f}mi  after_factor={base_miles:.1f}mi  "
+                  f"offset={offset_applied}  final={final_miles}mi", flush=True)
+            return {"miles": final_miles, "minutes": round(path["time"] / 60000)}
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             return None
         except Exception as e:
@@ -518,15 +525,7 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
 
 
 def compute_route(origin_latlon, dest_latlon):
-    """
-    FIX: When GraphHopper is unavailable, race ORS and OSRM in parallel
-    and return whichever responds first. Previously serial: ORS(6s) then OSRM(3s+0.5s).
-    Now parallel: max(ORS, OSRM) instead of sum.
-    """
     global _ROUTE_CACHE_DIRTY
-    # In compute_route(), change cache key precision from 5 to 3 decimal places:
-    # 5 decimal places = ~1.1m precision (overkill for routing cache)
-    # 3 decimal places = ~111m precision (plenty for route deduplication)
     cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
                 f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
     now = time.time()
@@ -546,25 +545,29 @@ def compute_route(origin_latlon, dest_latlon):
                 with _ROUTE_CACHE_LOCK:
                     ROUTE_CACHE[cache_key] = gh_result
                     _ROUTE_CACHE_DIRTY = True
+                print(f"[ROUTE] {cache_key} source=gh(refresh) miles={gh_result['miles']}", flush=True)
                 return gh_result
 
         if age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
+            print(f"[ROUTE] {cache_key} source={cached_source}(cached, age={age_secs/3600:.1f}h) "
+                  f"miles={cached.get('miles')}", flush=True)
             return cached
 
-    # Try GraphHopper first — local and fast
     result = _graphhopper_route(origin_latlon, dest_latlon)
     source = "gh"
 
     if not result:
-        # FIX: Race ORS and OSRM in parallel — return the winner
         result, source = _parallel_fallback_route(origin_latlon, dest_latlon)
 
     if result:
         result["source"] = source
         result["ts"]     = now
+        print(f"[ROUTE] {cache_key} source={source}(fresh) miles={result['miles']}", flush=True)
         with _ROUTE_CACHE_LOCK:
             ROUTE_CACHE[cache_key] = result
             _ROUTE_CACHE_DIRTY = True
+    else:
+        print(f"[ROUTE] {cache_key} ALL ENGINES FAILED", flush=True)
     return result
 
 
@@ -854,6 +857,8 @@ def find_all_trucks_for_pickup(
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist or dist["miles"] > max_radius_miles:
             return
+        print(f"[TRUCK-ROUTE] {t.get('driver_name','?')} zip={t['zip']} -> pickup={pickup_loc}  "
+            f"source={dist.get('source','?')}  miles={dist['miles']}", flush=True)
         with lock:
             matches.append({
                 "driver_name":          t.get("driver_name", ""),
@@ -863,16 +868,6 @@ def find_all_trucks_for_pickup(
                 "google_deadhead":      dist["miles"],
                 "deadhead_eta_minutes": dist["minutes"],
             })
-
-    max_workers = min(len(candidates), 8)
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="route") as ex:
-        futures = [ex.submit(_route_truck, t) for t in candidates]
-        # Wait for all with a generous timeout
-        futures_wait(futures, timeout=15)
-
-    matches.sort(key=lambda x: x["google_deadhead"])
-    return matches
-
 
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
