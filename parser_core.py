@@ -579,6 +579,10 @@ def compute_route(origin_latlon, dest_latlon):
         cached_source = cached.get("source", "unknown")
         gh_running    = is_port_open()
 
+        # ← ADD THIS: never trust a cached failure — treat as a miss
+        if cached_source == "failed" or cached.get("miles") is None:
+            cached = None
+
         if gh_running and cached_source != "gh" and age_secs > 3600:
             gh_result = _graphhopper_route(origin_latlon, dest_latlon)
             if gh_result:
