@@ -1126,7 +1126,9 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
 def _vehicle_matches(truck_veh: str, required: str) -> bool:
     t = truck_veh.upper().strip()
     r = (required or "").upper().strip()
-    return t == r or t in r or r in t
+    if t == r:
+        return True
+    return bool(re.search(rf"\b{re.escape(t)}\b", r)) or bool(re.search(rf"\b{re.escape(r)}\b", t))
 
 
 def _fmt_truck_detail(per_truck_log: list) -> str:
@@ -1212,6 +1214,10 @@ def find_best_truck_for_pickup_with_date(
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist:
             per_truck_log.append((name, f"routing failed ({pickup_loc})"))
+            continue
+        if dist["miles"] > max_radius_miles:
+            per_truck_log.append(
+                (name, f"too far ({dist['miles']} mi > {max_radius_miles} mi cap)"))
             continue
 
         per_truck_log.append((name, f"✓ {dist['miles']} mi deadhead"))
