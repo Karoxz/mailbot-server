@@ -33,6 +33,26 @@
 #   6. EXTRA LOGGING — every accept/reject decision for radius and
 #      vehicle type is now printed, so behavior can be verified
 #      directly from journalctl instead of guessed at.
+#
+# THIS PATCH — additional bug fixes (see inline "FIX #7/#8/#9"):
+#   7. _vehicle_matches: the FIX #4 word-boundary regex did NOT actually
+#      stop "VAN" from matching "SPRINTER VAN" (VAN is a whole word
+#      inside that phrase, so \bVAN\b still matched it). Replaced with
+#      a word-sequence prefix comparison that actually enforces the
+#      documented behavior while still allowing legitimate partial
+#      matches like "LARGE STRAIGHT" matching "LARGE STRAIGHT TRUCK".
+#   8. truck_date_matches: the ASAP/"today" comparison used naive
+#      datetime.now() (server-local time, typically UTC on a Linux
+#      box) instead of America/New_York like the rest of the app.
+#      This silently broke ASAP matching for "today"-dated trucks in
+#      the evening once the server's calendar date rolled over ahead
+#      of Eastern time.
+#   9. process_bid_email: the "stacked pieces" height-override regex
+#      (`\d+\s*\+\s*\d+\s*=\s*\d+`) searched the ENTIRE raw email body
+#      instead of just the dimensions/pieces area, so any unrelated
+#      "X+Y=Z" text elsewhere in the email could silently overwrite
+#      load_height_in and corrupt the truck door-height check. Now
+#      scoped to a window right after the Dimensions/Pieces label.
 # =============================================================
 
 import os
@@ -1048,7 +1068,12 @@ def truck_date_matches(truck, pickup_dt, raw_text):
     norm = normalize_mmddyyyy(truck_date)
     if not norm:
         return False
-    today            = datetime.now().strftime("%m/%d/%Y")
+    # FIX #8: use the same timezone as the rest of the app (Eastern),
+    # not naive server-local time. If the server runs in UTC (typical
+    # for a Linux host), datetime.now() rolls over to "tomorrow" around
+    # 7-8pm Eastern, which silently broke ASAP matching for trucks
+    # dated "today" in the evening.
+    today            = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y")
     pickup_date_only = extract_pickup_date_only(pickup_dt)
     if pickup_date_only:
         return pickup_date_only == norm
@@ -1192,17 +1217,32 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
 
 def _vehicle_matches(truck_veh: str, required: str) -> bool:
     """
-    FIX #4: whole-word match instead of raw substring containment.
-    Previously "VAN" would match "SPRINTER VAN" via naive `in` checks.
-    Now each side must appear as a whole word/phrase within the other.
+    FIX #7 (replaces the old FIX #4): word-boundary substring matching
+    did NOT actually stop a truck typed as "VAN" from matching a load
+    requiring "SPRINTER VAN" — "VAN" is a whole word inside that phrase,
+    so \\bVAN\\b still matched it there. That defeated the entire point
+    of the original fix.
+
+    Now we compare word SEQUENCES and only allow a match when the
+    shorter side's words are a *prefix* of the longer side's words:
+      - "LARGE STRAIGHT"  vs "LARGE STRAIGHT TRUCK"  -> match (prefix)
+      - "VAN"             vs "SPRINTER VAN"          -> NO match
+        ("SPRINTER" != "VAN", so "VAN" is not a prefix of the longer
+        phrase — this is the exact case the old fix was supposed to,
+        but didn't, block)
+      - "CARGO VAN"       vs "CARGO VAN"              -> match (equal)
     """
-    t = truck_veh.upper().strip()
-    r = (required or "").upper().strip()
-    if not t or not r:
+    t_words = truck_veh.upper().split()
+    r_words = (required or "").upper().split()
+    if not t_words or not r_words:
         return False
-    if t == r:
+    if t_words == r_words:
         return True
-    return bool(re.search(rf"\b{re.escape(t)}\b", r)) or bool(re.search(rf"\b{re.escape(r)}\b", t))
+    if len(t_words) <= len(r_words):
+        shorter, longer = t_words, r_words
+    else:
+        shorter, longer = r_words, t_words
+    return longer[:len(shorter)] == shorter
 
 
 def _fmt_truck_detail(per_truck_log: list) -> str:
@@ -1428,7 +1468,16 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     stackable_flag    = _find(r"Stackable:\s*(Yes|No)", t)
     pieces_for_height = _find(r"Pieces:\s*([0-9]+)", t)
     if load_height_in is not None:
-        stacked_note = re.search(r"\b(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)\b", t)
+        # FIX #9: scope the "stacked pieces" override to the dims/pieces
+        # area instead of searching the WHOLE email body. Searching all
+        # of `t` risked matching an unrelated "X+Y=Z" elsewhere in the
+        # email (rate math, counts, etc.) and silently corrupting
+        # load_height_in, which feeds directly into the truck
+        # door-height cap check.
+        _dims_area = _bounded_section_window(
+            t, r"(?:Dimensions|Pieces)\s*:", window=150
+        ) or dims_raw or ""
+        stacked_note = re.search(r"\b(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)\b", _dims_area)
         if stacked_note:
             load_height_in = int(stacked_note.group(3))
         elif (stackable_flag or "").upper() == "YES" and pieces_for_height:
