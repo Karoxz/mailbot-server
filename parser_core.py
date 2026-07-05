@@ -83,7 +83,9 @@ Truck is {google_deadhead} miles out
 ETA to PU: {deadhead_eta_str}
 
 ALL BIDS ARE VALID 15 MIN"""
-
+_geo_session = requests.Session()
+_geo_session.mount("https://", HTTPAdapter(max_retries=0))
+_geo_session.mount("http://", HTTPAdapter(max_retries=0))
 session = requests.Session()
 _http_retry = Retry(
     total=4,
@@ -308,7 +310,7 @@ def _geocode_nominatim(place: str, place_clean: str):
                     q += ", USA"
                 params = {"q": q, "countrycodes": "us", "format": "json",
                           "addressdetails": 1, "limit": 5}
-            r = session.get(NOMINATIM_URL, params=params,
+            r = _geo_session.get(NOMINATIM_URL, params=params,
                             headers={"User-Agent": GEOCODER_UA}, timeout=2)
             if r.status_code != 200:
                 time.sleep(0.3)
@@ -335,7 +337,7 @@ def _geocode_photon(place: str, place_clean: str):
         if STOP_EVENT.is_set():
             return None
         try:
-            r = session.get(PHOTON_URL, params={"q": place_us, "limit": 5, "lang": "en"},
+            r = _geo_session.get(PHOTON_URL, params={"q": place_us, "limit": 5, "lang": "en"},
                             headers={"User-Agent": GEOCODER_UA}, timeout=3)
             if r.status_code != 200:
                 time.sleep(1)
@@ -1309,7 +1311,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     _t1 = threading.Thread(target=_geo_pu, daemon=True)
     _t2 = threading.Thread(target=_geo_dl, daemon=True)
     _t1.start(); _t2.start()
-    _t1.join();  _t2.join()
+    _t1.join(timeout=8)
+    _t2.join(timeout=8)
     _PE1 = time.perf_counter()
     print(f"[TIMING]   geo pickup+delivery: {_PE1-_PE0:.3f}s", flush=True)
 
