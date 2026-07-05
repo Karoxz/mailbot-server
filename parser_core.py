@@ -913,12 +913,12 @@ def find_all_trucks_for_pickup(
             })
 
     max_workers = min(len(candidates), 8)
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="route") as ex:
+    ex = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="route")
+    try:
         futures = [ex.submit(_route_truck, t) for t in candidates]
-        # Wait for all with a generous timeout — bumped from 15s to 25s to
-        # tolerate cold-cache geocode/route calls (first request after a
-        # geo_cache.json / route_cache.json wipe is much slower).
         futures_wait(futures, timeout=25)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
     matches.sort(key=lambda x: x["google_deadhead"])
     return matches
