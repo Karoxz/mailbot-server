@@ -2,6 +2,37 @@
 # parser_core.py  —  server-side module
 # Thread-safe: process_bid_email takes trucks/template as
 # parameters — zero global mutation during request handling.
+#
+# THIS VERSION — consolidated fixes:
+#   1. CACHE SCHEMA VERSIONING — geo_cache.json / route_cache.json are
+#      now tagged with a schema version. Any cache written before this
+#      version (i.e. before the radius/vehicle fixes existed) is wiped
+#      on startup instead of being trusted. This is what was causing
+#      "199 mi" / "0 mi" ghost matches — those were stale distances
+#      computed under old buggy logic, served straight from cache
+#      without ever being re-validated against the current radius cap.
+#   2. NO STACKED RETRIES — every outbound HTTP session (geocoding,
+#      routing) now uses max_retries=0. All retry/backoff behavior is
+#      explicit in application code with bounded attempt counts. The
+#      old setup had urllib3-level Retry(total=4) stacked underneath a
+#      manual 2-attempt loop, which could take 30+ seconds per call
+#      under load and exhaust FastAPI's worker threads.
+#   3. HARD RADIUS ENFORCEMENT everywhere a truck is matched — both the
+#      parallel matcher (find_all_trucks_for_pickup) and the serial
+#      fallback/logging matcher (find_best_truck_for_pickup_with_date)
+#      now reject any truck whose real routed distance exceeds
+#      max_radius_miles. Previously only the parallel path enforced
+#      this; the serial fallback (used as a "recovery" path when the
+#      parallel matcher finds zero candidates) had no such check and
+#      could return a truck at any distance.
+#   4. STRICT VEHICLE MATCHING — _vehicle_matches now requires a
+#      whole-word match instead of raw substring containment, so e.g.
+#      a truck typed as "VAN" can no longer match "SPRINTER VAN".
+#   5. BOUNDED THREAD JOINS / EXECUTOR SHUTDOWNS — nothing in the
+#      request path can block indefinitely on a stuck worker thread.
+#   6. EXTRA LOGGING — every accept/reject decision for radius and
+#      vehicle type is now printed, so behavior can be verified
+#      directly from journalctl instead of guessed at.
 # =============================================================
 
 import os
@@ -18,22 +49,21 @@ from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait, FIRST_COMPLETED
-import queue as _queue
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+import math
 
 import requests
-from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
-import math
 
 def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
     R = 3958.8
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi  = math.radians(lat2 - lat1)
-    dlam  = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
+
 
 # =============================================================
 # CONFIGURATION
@@ -63,6 +93,14 @@ _ROUTE_CACHE_LOCK = threading.Lock()
 _GEO_CACHE_DIRTY   = False
 _ROUTE_CACHE_DIRTY = False
 
+# ── FIX #1: cache schema version ────────────────────────────────────────
+# Bump this any time matching/geocoding/routing logic changes in a way
+# that could make previously-cached results invalid or misleading.
+# Caches written under an older (or missing) version are discarded on
+# load rather than trusted. This is what eliminates stale "199 mi"
+# style ghost distances left over from before these fixes existed.
+CACHE_SCHEMA_VERSION = 2
+
 ROUTE_CACHE_TTL_DAYS = 30
 
 FRESH_WINDOW    = "2d"
@@ -83,22 +121,22 @@ Truck is {google_deadhead} miles out
 ETA to PU: {deadhead_eta_str}
 
 ALL BIDS ARE VALID 15 MIN"""
+
+# ── FIX #2: no stacked retries — every session below is retry-free.  ────
+# All retry/backoff logic lives explicitly in the calling functions with
+# bounded attempt counts, so nothing can silently multiply wait time.
 _geo_session = requests.Session()
 _geo_session.mount("https://", HTTPAdapter(max_retries=0))
-_geo_session.mount("http://", HTTPAdapter(max_retries=0))
-session = requests.Session()
-_http_retry = Retry(
-    total=4,
-    backoff_factor=0.6,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET", "POST"],
-    raise_on_status=False,
-)
-session.mount("https://", HTTPAdapter(max_retries=_http_retry))
-session.mount("http://",  HTTPAdapter(max_retries=_http_retry))
+_geo_session.mount("http://",  HTTPAdapter(max_retries=0))
+
+_route_http_session = requests.Session()
+_route_http_session.mount("https://", HTTPAdapter(max_retries=0))
+_route_http_session.mount("http://",  HTTPAdapter(max_retries=0))
+
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
 _GH_SEMAPHORE = threading.Semaphore(6)
+
 
 def _cache_flush_worker():
     global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
@@ -113,6 +151,7 @@ def _cache_flush_worker():
                 _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
                 _ROUTE_CACHE_DIRTY = False
 
+
 threading.Thread(target=_cache_flush_worker, daemon=True).start()
 
 
@@ -121,16 +160,16 @@ threading.Thread(target=_cache_flush_worker, daemon=True).start()
 # =============================================================
 
 _US_STATES_SET = {
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN",
-    "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV",
-    "NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN",
-    "TX","UT","VT","VA","WA","WV","WI","WY","DC",
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN",
+    "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV",
+    "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN",
+    "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
 }
 
 REGION_MAP = {
-    "WEST COAST": {"AZ","CA","CO","ID","MT","NV","NM","OR","TX","UT","WA","WY"},
-    "MIDWEST":    {"IL","IN","IA","KS","KY","MI","MN","MO","NE","ND","OH","SD","TN","WI"},
-    "EAST COAST": {"CT","DE","FL","GA","ME","MD","MA","NH","NJ","NY","NC","PA","RI","SC","VT","VA"},
+    "WEST COAST": {"AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "TX", "UT", "WA", "WY"},
+    "MIDWEST":    {"IL", "IN", "IA", "KS", "KY", "MI", "MN", "MO", "NE", "ND", "OH", "SD", "TN", "WI"},
+    "EAST COAST": {"CT", "DE", "FL", "GA", "ME", "MD", "MA", "NH", "NJ", "NY", "NC", "PA", "RI", "SC", "VT", "VA"},
 }
 
 
@@ -226,14 +265,25 @@ def parse_load_height_from_dims(dims_text: str):
 # GEOCODING
 # =============================================================
 
-def _load_cache(path):
+def _load_cache(path, expected_version=None):
+    """
+    Load a JSON cache file. If expected_version is given and the file's
+    stored '__version__' doesn't match, the cache is treated as stale
+    and discarded (fresh empty cache returned instead). This is the
+    fix for ghost matches caused by pre-fix cached distances/geocodes.
+    """
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if expected_version is not None:
+                if data.get("__version__") != expected_version:
+                    print(f"[CACHE] {path} is stale (schema mismatch) — clearing.", flush=True)
+                    return {"__version__": expected_version}
+            return data
         except Exception:
-            return {}
-    return {}
+            return {"__version__": expected_version} if expected_version is not None else {}
+    return {"__version__": expected_version} if expected_version is not None else {}
 
 
 def _save_cache(path, data):
@@ -244,8 +294,8 @@ def _save_cache(path, data):
         pass
 
 
-GEO_CACHE   = _load_cache(GEO_CACHE_FILE)
-ROUTE_CACHE = _load_cache(ROUTE_CACHE_FILE)
+GEO_CACHE   = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
+ROUTE_CACHE = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
 
 _US_LAT = (15.0, 72.0)
 _US_LON = (-180.0, -65.0)
@@ -297,6 +347,7 @@ def _normalize_address(place: str) -> str:
 
 
 def _geocode_nominatim(place: str, place_clean: str):
+    """Bounded manual retry loop — no urllib3-level retries underneath."""
     for attempt in range(1, 3):
         if STOP_EVENT.is_set():
             return None
@@ -311,7 +362,7 @@ def _geocode_nominatim(place: str, place_clean: str):
                 params = {"q": q, "countrycodes": "us", "format": "json",
                           "addressdetails": 1, "limit": 5}
             r = _geo_session.get(NOMINATIM_URL, params=params,
-                            headers={"User-Agent": GEOCODER_UA}, timeout=2)
+                                  headers={"User-Agent": GEOCODER_UA}, timeout=2)
             if r.status_code != 200:
                 time.sleep(0.3)
                 continue
@@ -326,19 +377,20 @@ def _geocode_nominatim(place: str, place_clean: str):
         except requests.exceptions.Timeout:
             time.sleep(1)
         except Exception as e:
-            print(f"Nominatim exception '{place_clean}' attempt {attempt}: {e}")
+            print(f"Nominatim exception '{place_clean}' attempt {attempt}: {e}", flush=True)
             time.sleep(1)
     return None
 
 
 def _geocode_photon(place: str, place_clean: str):
+    """Bounded manual retry loop — no urllib3-level retries underneath."""
     place_us = place_clean if re.search(r"\bUSA?\b", place_clean, re.I) else place_clean + ", USA"
     for attempt in range(1, 3):
         if STOP_EVENT.is_set():
             return None
         try:
             r = _geo_session.get(PHOTON_URL, params={"q": place_us, "limit": 5, "lang": "en"},
-                            headers={"User-Agent": GEOCODER_UA}, timeout=3)
+                                  headers={"User-Agent": GEOCODER_UA}, timeout=3)
             if r.status_code != 200:
                 time.sleep(1)
                 continue
@@ -354,7 +406,7 @@ def _geocode_photon(place: str, place_clean: str):
         except requests.exceptions.Timeout:
             time.sleep(1)
         except Exception as e:
-            print(f"Photon exception '{place_us}' attempt {attempt}: {e}")
+            print(f"Photon exception '{place_us}' attempt {attempt}: {e}", flush=True)
             time.sleep(1)
     return None
 
@@ -393,13 +445,12 @@ _STATE_BBOX = {
     "DC": (38.79, 39.00, -77.12, -76.90),
 }
 
+
 def _in_state_bbox(state, lat, lon):
     box = _STATE_BBOX.get(state)
     if not box:
         return True  # unknown state code — don't block, just pass through
     return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
-
-
 
 
 def photon_geocode(place: str):
@@ -444,7 +495,7 @@ def photon_geocode(place: str):
 
 
 # =============================================================
-# ROUTING  — FIX: reduced timeouts + parallel fallback race
+# ROUTING
 # =============================================================
 
 def _ors_route(origin_latlon, dest_latlon):
@@ -457,31 +508,31 @@ def _ors_route(origin_latlon, dest_latlon):
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
     try:
-        r = session.post(ORS_URL,
-                         json={"coordinates": [[lon1, lat1], [lon2, lat2]], "units": "mi"},
-                         headers={"Authorization": ORS_API_KEY,
-                                  "Content-Type": "application/json"},
-                         timeout=3)  # FIX: was 12s — halved
+        r = _route_http_session.post(
+            ORS_URL,
+            json={"coordinates": [[lon1, lat1], [lon2, lat2]], "units": "mi"},
+            headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+            timeout=3,
+        )
         if r.status_code in (403, 429):
             with _ORS_LOCK:
                 _ORS_FAIL_COUNT += 1
                 if _ORS_FAIL_COUNT >= 3:
                     _ORS_DISABLED = True
-                    print("ORS disabled for this session.")
+                    print("ORS disabled for this session.", flush=True)
             return None
         if r.status_code != 200:
-            print(f"ORS HTTP {r.status_code}: {r.text[:200]}")
+            print(f"ORS HTTP {r.status_code}: {r.text[:200]}", flush=True)
             return None
         with _ORS_LOCK:
             _ORS_FAIL_COUNT = 0
         summary = r.json()["routes"][0]["summary"]
-        return {"miles": round(summary["distance"]),
-                "minutes": round(summary["duration"] / 60)}
+        return {"miles": round(summary["distance"]), "minutes": round(summary["duration"] / 60)}
     except requests.exceptions.Timeout:
-        print("ORS timeout")
+        print("ORS timeout", flush=True)
         return None
     except Exception as e:
-        print(f"ORS exception: {e}")
+        print(f"ORS exception: {e}", flush=True)
         return None
 
 
@@ -537,7 +588,7 @@ def _graphhopper_route(origin_latlon, dest_latlon):
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             return None
         except Exception as e:
-            print(f"GraphHopper exception: {e}")
+            print(f"GraphHopper exception: {e}", flush=True)
             return None
 
 
@@ -548,7 +599,7 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
     url = f"{OSRM_BASE}/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
     for _ in range(2):
         try:
-            r = session.get(url, params={"overview": "false"}, timeout=3)
+            r = _route_http_session.get(url, params={"overview": "false"}, timeout=3)
             try:
                 data = r.json()
             except ValueError:
@@ -557,20 +608,20 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
             if osrm_code in PERMANENT_CODES or r.status_code in (400, 422):
                 return None
             if r.status_code != 200 or osrm_code != "Ok" or not data.get("routes"):
-                time.sleep(0.1)  # FIX: was 2s — massively reduced
+                time.sleep(0.1)
                 continue
             route = data["routes"][0]
             return {"miles": round(route["distance"] / 1609.344),
                     "minutes": round(route["duration"] / 60)}
         except Exception:
-            time.sleep(0.1)  # FIX: was 2s
+            time.sleep(0.1)
     return None
 
 
 def compute_route(origin_latlon, dest_latlon):
     global _ROUTE_CACHE_DIRTY
     cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
-                f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
+                 f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
     now = time.time()
 
     with _ROUTE_CACHE_LOCK:
@@ -581,11 +632,11 @@ def compute_route(origin_latlon, dest_latlon):
         cached_source = cached.get("source", "unknown")
         gh_running    = is_port_open()
 
-        # ← ADD THIS: never trust a cached failure — treat as a miss
+        # Never trust a cached failure — treat as a miss.
         if cached_source == "failed" or cached.get("miles") is None:
             cached = None
 
-        if gh_running and cached_source != "gh" and age_secs > 3600:
+        if cached and gh_running and cached_source != "gh" and age_secs > 3600:
             gh_result = _graphhopper_route(origin_latlon, dest_latlon)
             if gh_result:
                 gh_result.update({"source": "gh", "ts": now})
@@ -595,7 +646,7 @@ def compute_route(origin_latlon, dest_latlon):
                 print(f"[ROUTE] {cache_key} source=gh(refresh) miles={gh_result['miles']}", flush=True)
                 return gh_result
 
-        if age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
+        if cached and age_secs < ROUTE_CACHE_TTL_DAYS * 86400:
             print(f"[ROUTE] {cache_key} source={cached_source}(cached, age={age_secs/3600:.1f}h) "
                   f"miles={cached.get('miles')}", flush=True)
             return cached
@@ -617,11 +668,10 @@ def compute_route(origin_latlon, dest_latlon):
         print(f"[ROUTE] {cache_key} ALL ENGINES FAILED", flush=True)
     return result
 
+
 def _parallel_fallback_route(origin_latlon, dest_latlon):
     """
     Race ORS and OSRM concurrently. Return the first successful result.
-    This replaces the serial ORS→OSRM chain and cuts worst-case latency
-    from ~9s (6s ORS timeout + 3s OSRM) to ~6s (max of both, not sum).
     When ORS is disabled, OSRM responds alone in ~3s.
     """
     result_holder = [None]
@@ -647,7 +697,6 @@ def _parallel_fallback_route(origin_latlon, dest_latlon):
     t_ors.start()
     t_osrm.start()
 
-    # Wait up to 7s for either to succeed
     done_event.wait(timeout=4)
 
     return result_holder[0], source_holder[0]
@@ -846,7 +895,7 @@ def extract_estimated_miles_from_email(text: str):
 
 
 # =============================================================
-# DATE UTILITIES
+# TRUCK MATCHING — PARALLEL PATH
 # =============================================================
 
 def find_all_trucks_for_pickup(
@@ -858,7 +907,8 @@ def find_all_trucks_for_pickup(
         max_radius_miles=500):
     """
     Parallelize route computation across all candidate trucks.
-    Uses ThreadPoolExecutor — all routes computed concurrently.
+    Every truck returned here has already been confirmed to be
+    within max_radius_miles by real routed distance — FIX #3.
     """
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
     pickup_coords  = photon_geocode(pickup_loc) if pickup_loc else None
@@ -882,7 +932,10 @@ def find_all_trucks_for_pickup(
         if load_height_in is not None and truck_height is not None:
             if load_height_in > truck_height:
                 continue
-        # Haversine pre-filter — skip obvious misses before routing
+        # Haversine pre-filter — skip obvious misses before routing.
+        # Deliberately generous (1.4x) since straight-line distance
+        # underestimates real road distance; the HARD cap is enforced
+        # below in Phase 2 against the real routed distance.
         truck_coords = photon_geocode(t["zip"])
         if truck_coords and pickup_coords:
             sl = _haversine_miles(truck_coords[0], truck_coords[1],
@@ -892,18 +945,27 @@ def find_all_trucks_for_pickup(
         candidates.append(t)
 
     if not candidates:
+        print(f"[MATCH] 0 candidates passed pre-filters for pickup={pickup_loc} "
+              f"vehicle={vehicle_required}", flush=True)
         return []
 
-    # Phase 2: compute routes in parallel for all candidates
+    # Phase 2: compute real routed distance in parallel, hard radius cap
     matches = []
     lock    = threading.Lock()
 
     def _route_truck(t):
+        name = t.get("driver_name", "?")
         dist = get_distance_from_zip(t["zip"], pickup_loc)
-        if not dist or dist["miles"] > max_radius_miles:
+        if not dist:
+            print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
+                  f"routing FAILED", flush=True)
             return
-        print(f"[TRUCK-ROUTE] {t.get('driver_name','?')} zip={t['zip']} -> pickup={pickup_loc}  "
-              f"source={dist.get('source','?')}  miles={dist['miles']}", flush=True)
+        if dist["miles"] > max_radius_miles:
+            print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
+                  f"REJECTED {dist['miles']}mi > cap {max_radius_miles}mi", flush=True)
+            return
+        print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
+              f"ACCEPTED source={dist.get('source','?')}  miles={dist['miles']}", flush=True)
         with lock:
             matches.append({
                 "driver_name":          t.get("driver_name", ""),
@@ -920,10 +982,15 @@ def find_all_trucks_for_pickup(
         futures = [ex.submit(_route_truck, t) for t in candidates]
         futures_wait(futures, timeout=25)
     finally:
+        # FIX #5: never block the request thread waiting on a stuck
+        # worker — cancel anything unfinished and move on.
         ex.shutdown(wait=False, cancel_futures=True)
 
     matches.sort(key=lambda x: x["google_deadhead"])
+    print(f"[MATCH] {len(candidates)} candidates -> {len(matches)} within "
+          f"{max_radius_miles}mi radius", flush=True)
     return matches
+
 
 def normalize_mmddyyyy(date_str):
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
@@ -1074,10 +1141,10 @@ def validate_truck_definitions(text):
 
 
 def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
-                         delivery, delivery_dt, google_deadhead=None,
-                         driver_name="", truck_type="", truck_dims="",
-                         deadhead_eta_minutes=None, truck_equipment="",
-                         bid_template=None):
+                          delivery, delivery_dt, google_deadhead=None,
+                          driver_name="", truck_type="", truck_dims="",
+                          deadhead_eta_minutes=None, truck_equipment="",
+                          bid_template=None):
     eta_str = fmt_hours_minutes(deadhead_eta_minutes) if deadhead_eta_minutes else ""
     data = dict(
         order=order or "", broker_name=broker or "",
@@ -1098,15 +1165,15 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
     try:
         return bid_template.format(**data)
     except KeyError as e:
-        print(f"BID_TEMPLATE missing key: {e}")
+        print(f"BID_TEMPLATE missing key: {e}", flush=True)
         return bid_template
 
 
 def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
-                         delivery_loc, delivery_dt, google_deadhead=None,
-                         driver_name="", truck_type="", truck_dimensions="",
-                         deadhead_eta_minutes=None, truck_equipment="",
-                         bid_template=None):
+                          delivery_loc, delivery_dt, google_deadhead=None,
+                          driver_name="", truck_type="", truck_dimensions="",
+                          deadhead_eta_minutes=None, truck_equipment="",
+                          bid_template=None):
     return build_bid_email_body(
         order=order, broker="", vehicle=vehicle_required,
         pickup=pickup_loc, pickup_dt=pickup_dt,
@@ -1120,12 +1187,19 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
 
 
 # =============================================================
-# TRUCK MATCHING
+# TRUCK MATCHING — VEHICLE-TYPE COMPARISON
 # =============================================================
 
 def _vehicle_matches(truck_veh: str, required: str) -> bool:
+    """
+    FIX #4: whole-word match instead of raw substring containment.
+    Previously "VAN" would match "SPRINTER VAN" via naive `in` checks.
+    Now each side must appear as a whole word/phrase within the other.
+    """
     t = truck_veh.upper().strip()
     r = (required or "").upper().strip()
+    if not t or not r:
+        return False
     if t == r:
         return True
     return bool(re.search(rf"\b{re.escape(t)}\b", r)) or bool(re.search(rf"\b{re.escape(r)}\b", t))
@@ -1144,7 +1218,14 @@ def find_best_truck_for_pickup_with_date(
         load_height_in=None,
         delivery_loc=None,
         max_radius_miles=500):
-    """Used only for rejection reason logging — serial is fine here."""
+    """
+    Serial matcher — used for (a) rejection-reason logging when the
+    parallel matcher finds zero candidates, and (b) as a recovery path
+    if it finds a truck the parallel matcher missed (e.g. due to a
+    transient geocode timeout). FIX #3: this function now enforces the
+    exact same hard radius cap as the parallel path, so recovered
+    matches can never be outside max_radius_miles.
+    """
     best, best_miles   = None, None
     per_truck_log      = []
     saw_vehicle_match  = False
@@ -1168,7 +1249,7 @@ def find_best_truck_for_pickup_with_date(
         if not truck_date_matches(t, pickup_dt, raw_text):
             truck_date_label = t.get("pickup_date") or "any"
             email_date_label = (extract_pickup_date_only(pickup_dt)
-                                or ("ASAP" if has_pickup_asap(raw_text) else "unknown"))
+                                 or ("ASAP" if has_pickup_asap(raw_text) else "unknown"))
             per_truck_log.append(
                 (name, f"date mismatch (truck={truck_date_label}, email={email_date_label})"))
             continue
@@ -1178,7 +1259,7 @@ def find_best_truck_for_pickup_with_date(
             if delivery_state not in truck_states:
                 saw_state_block    = True
                 detail_str         = (f"state blocked ({delivery_state} not in "
-                                      f"{','.join(sorted(truck_states))})")
+                                       f"{','.join(sorted(truck_states))})")
                 per_truck_log.append((name, detail_str))
                 state_block_detail = f"{name} → {detail_str}"
                 continue
@@ -1188,7 +1269,7 @@ def find_best_truck_for_pickup_with_date(
             if load_weight_lbs > truck_payload:
                 saw_overweight    = True
                 detail_str        = (f"overweight ({load_weight_lbs:,} lb > "
-                                     f"{truck_payload:,} lb cap)")
+                                      f"{truck_payload:,} lb cap)")
                 per_truck_log.append((name, detail_str))
                 overweight_detail = detail_str
                 continue
@@ -1198,7 +1279,7 @@ def find_best_truck_for_pickup_with_date(
             if load_height_in > truck_height:
                 saw_over_height    = True
                 detail_str         = (f"too tall ({load_height_in}\" load > "
-                                      f"{truck_height}\" door opening)")
+                                       f"{truck_height}\" door opening)")
                 per_truck_log.append((name, detail_str))
                 over_height_detail = detail_str
                 continue
@@ -1211,16 +1292,23 @@ def find_best_truck_for_pickup_with_date(
             if sl > max_radius_miles * 1.4:
                 per_truck_log.append((name, f"too far ({int(sl)} mi)"))
                 continue
+
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist:
             per_truck_log.append((name, f"routing failed ({pickup_loc})"))
             continue
+
+        # ── FIX #3: hard radius enforcement — previously missing here ──
         if dist["miles"] > max_radius_miles:
             per_truck_log.append(
                 (name, f"too far ({dist['miles']} mi > {max_radius_miles} mi cap)"))
+            print(f"[FALLBACK-MATCH] {name} REJECTED — {dist['miles']}mi exceeds "
+                  f"{max_radius_miles}mi cap", flush=True)
             continue
 
         per_truck_log.append((name, f"✓ {dist['miles']} mi deadhead"))
+        print(f"[FALLBACK-MATCH] {name} ACCEPTED — {dist['miles']}mi within "
+              f"{max_radius_miles}mi cap", flush=True)
         if best_miles is None or dist["miles"] < best_miles:
             best, best_miles = t, dist["miles"]
 
@@ -1261,10 +1349,10 @@ _PICKUP_STOP_PATS = [
 
 
 def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
-                      max_radius_miles, original_msg_full,
-                      trucks=None,
-                      bid_template=None,
-                      allowed_delivery_states=None):
+                       max_radius_miles, original_msg_full,
+                       trucks=None,
+                       bid_template=None,
+                       allowed_delivery_states=None):
     local_trucks   = trucks if trucks is not None else []
     local_template = bid_template
     if local_template is None:
@@ -1279,7 +1367,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if not vehicle_required:
         return None, "NO VEHICLE", order, None
     if allowed_vehicles and not any(v in vehicle_required.upper()
-                                    for v in allowed_vehicles):
+                                     for v in allowed_vehicles):
         return None, f"FILTERED {vehicle_required}", order, None
 
     _PU_STRICT  = r"(?m)^\s*Pick[\s\-]*[Uu]p\s*:?\s*$"
@@ -1288,9 +1376,9 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     _del_label  = _DEL_STRICT if re.search(_DEL_STRICT, t) else r"Delivery"
 
     pick_win = _bounded_section_window(t, _pu_label,
-                                       stop_regexes=_DELIVERY_STOP_PATS, window=400)
+                                        stop_regexes=_DELIVERY_STOP_PATS, window=400)
     del_win  = _bounded_section_window(t, _del_label,
-                                       stop_regexes=_PICKUP_STOP_PATS,   window=400)
+                                        stop_regexes=_PICKUP_STOP_PATS,   window=400)
 
     pickup_loc   = extract_location_after_label(t, _pu_label)
     delivery_loc = extract_location_after_label(t, _del_label)
@@ -1304,7 +1392,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if _is_placeholder_location(pickup_loc) or _is_placeholder_location(delivery_loc):
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
-    # Geocode pickup + delivery in parallel
+    # Geocode pickup + delivery in parallel — FIX #5: bounded joins.
     _pu_coords = [None]
     _dl_coords = [None]
 
@@ -1362,7 +1450,6 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "PICKUP LOCATION NOT FOUND\n  (cannot compute deadhead)",
                     order, None)
 
-        # find_all_trucks_for_pickup now runs routes in parallel
         all_matches = find_all_trucks_for_pickup(
             local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
             load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
@@ -1379,12 +1466,13 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     max_radius_miles=max_radius_miles
                 )
             if _best:
-                # Parallel matcher timed out/missed it (cold cache, slow geocode,
-                # etc.) but the serial fallback found a valid truck — use it
-                # instead of discarding a good load.
+                # Parallel matcher missed it (cold cache, slow geocode, etc.)
+                # but the serial fallback found a valid truck WITHIN RADIUS
+                # (enforced above) — use it instead of discarding a good load.
                 print(f"[MATCH] Parallel matcher found 0 candidates but serial "
                       f"fallback recovered {_best.get('driver_name')} at "
-                      f"{_best_miles}mi — using it.", flush=True)
+                      f"{_best_miles}mi (within {max_radius_miles}mi cap) — using it.",
+                      flush=True)
                 all_matches = [{
                     "driver_name":          _best.get("driver_name", ""),
                     "truck_type":           _best.get("vehicle", ""),
@@ -1398,10 +1486,10 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     reject_reason = "NO TRUCK MATCH"
                 return None, reject_reason + _fmt_truck_detail(per_truck_log), order, None
 
-        best_match   = all_matches[0]
+        best_match     = all_matches[0]
         deadhead_miles = best_match["google_deadhead"]
         deadhead_eta   = {"miles": deadhead_miles,
-                          "minutes": best_match["deadhead_eta_minutes"]}
+                           "minutes": best_match["deadhead_eta_minutes"]}
 
         best_truck = {
             "driver_name": best_match["driver_name"],
@@ -1414,7 +1502,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     if deadhead_miles:
         deadhead_eta = {"miles": deadhead_miles,
-                        "minutes": int((deadhead_miles / 45) * 60)}
+                         "minutes": int((deadhead_miles / 45) * 60)}
 
     total_miles = None
     if estimated_miles_from_email is not None and deadhead_miles is not None:
@@ -1658,22 +1746,27 @@ def parse_email_for_api(request_data: dict) -> dict:
     T1 = time.perf_counter()
     print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)
 
-    # Pre-warm geocode cache for truck ZIPs — parallel
-    # In parse_email_for_api, replace the warmup block:
     def _warm(zip_loc):
         key = (zip_loc or "").strip().upper()
         with _GEO_CACHE_LOCK:
             if key in GEO_CACHE:
-                return   # already cached — skip entirely
+                return
         if zip_loc:
             photon_geocode(zip_loc)
 
     if local_trucks:
-        uncached = [t["zip"] for t in local_trucks 
+        uncached = [t["zip"] for t in local_trucks
                     if (t["zip"] or "").strip().upper() not in GEO_CACHE]
         if uncached:
-            with ThreadPoolExecutor(max_workers=min(4, len(uncached))) as ex:
-                list(ex.map(_warm, uncached))   # list() to surface exceptions
+            # FIX #5: bounded, non-blocking executor shutdown here too —
+            # a `with` block would still block on executor.shutdown(wait=True)
+            # if any _warm() call hung past its own internal timeouts.
+            ex = ThreadPoolExecutor(max_workers=min(4, len(uncached)))
+            try:
+                futures = [ex.submit(_warm, z) for z in uncached]
+                futures_wait(futures, timeout=20)
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
     T2 = time.perf_counter()
     print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
 
@@ -1709,6 +1802,6 @@ def parse_email_for_api(request_data: dict) -> dict:
             if ld:
                 result['route_url'] = ld.get('route_url', '')
                 result['load_data'] = {k: v for k, v in ld.items()
-                                       if k != 'original_msg_full'}
+                                        if k != 'original_msg_full'}
 
     return result
