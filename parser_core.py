@@ -615,8 +615,13 @@ def _graphhopper_route(origin_latlon, dest_latlon):
     lat2, lon2 = dest_latlon
     with _GH_SEMAPHORE:
         try:
-            r = _gh_session.get(GRAPHHOPPER_URL, params={...}, timeout=4)
-            ...
+            r = _gh_session.get(GRAPHHOPPER_URL, params={
+                "point": [f"{lat1},{lon1}", f"{lat2},{lon2}"],
+                "vehicle": "car",
+                "calc_points": "false",
+                "instructions": "false",
+            }, timeout=4)
+            data = r.json()
             path = data["paths"][0]
             raw_miles  = path["distance"] / 1609.344
 
