@@ -485,6 +485,21 @@ def _in_state_bbox(state, lat, lon):
     return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
 
 
+def _extract_zip_state(place: str):
+    """
+    Pull a bare (state, zip) out of a noisy string like
+    'SIENNA PLANT, TX 77459'. Business/facility names aren't real
+    places and confuse fuzzy geocoders — the ZIP is the only
+    unambiguous part, so geocode THAT when one is present.
+    """
+    if not place:
+        return None
+    m = re.search(r"\b([A-Z]{2})\s*(\d{5})\b", place.upper())
+    if m and m.group(1) in _US_STATES_SET:
+        return m.group(1), m.group(2)
+    return None
+
+
 def photon_geocode(place: str):
     key = place.strip().upper()
     with _GEO_CACHE_LOCK:
@@ -495,23 +510,31 @@ def photon_geocode(place: str):
     place_clean    = _normalize_address(place.strip())
     expected_state = extract_state_from_location(place)
 
-    def _try(provider_fn, provider_name):
-        r = provider_fn(place, place_clean)
+    def _try(provider_fn, provider_name, query_str, query_clean):
+        r = provider_fn(query_str, query_clean)
         if not r:
             return None
         if expected_state and not _in_state_bbox(expected_state, r[0], r[1]):
-            print(f"[GEOCODE] REJECTED '{place}' -> {r} via {provider_name} "
+            print(f"[GEOCODE] REJECTED '{query_str}' -> {r} via {provider_name} "
                   f"(outside {expected_state} bounding box)", flush=True)
             return None
         return r
 
-    # Nominatim first — structured/zip-aware, much less prone to picking
-    # the wrong same-named city than Photon's fuzzy text search.
-    result = _try(_geocode_nominatim, "nominatim")
-    source = "nominatim"
+    result, source = None, None
+
+    zip_state = _extract_zip_state(place)
+    if zip_state:
+        _, zip_code = zip_state
+        result = _try(_geocode_nominatim, "nominatim(zip)", zip_code, zip_code)
+        if result:
+            source = "nominatim-zip"
 
     if not result:
-        result = _try(_geocode_photon, "photon")
+        result = _try(_geocode_nominatim, "nominatim", place, place_clean)
+        source = "nominatim"
+
+    if not result:
+        result = _try(_geocode_photon, "photon", place, place_clean)
         source = "photon"
 
     if result:
@@ -592,20 +615,23 @@ def _graphhopper_route(origin_latlon, dest_latlon):
     lat2, lon2 = dest_latlon
     with _GH_SEMAPHORE:
         try:
-            r = _gh_session.get(GRAPHHOPPER_URL, params={
-                "point":        [f"{lat1},{lon1}", f"{lat2},{lon2}"],
-                "profile":      "car",
-                "locale":       "en",
-                "calc_points":  "false",
-                "instructions": "false",
-            }, timeout=4)
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            if "paths" not in data or not data["paths"]:
-                return None
+            r = _gh_session.get(GRAPHHOPPER_URL, params={...}, timeout=4)
+            ...
             path = data["paths"][0]
             raw_miles  = path["distance"] / 1609.344
+
+            # ── Sanity check: a real route can't be shorter than the ──
+            # straight-line distance. If it is, one of the two geocoded
+            # points is almost certainly wrong (e.g. a facility/business
+            # name resolved to the wrong city) — treat as a failed route
+            # instead of silently returning a too-short deadhead.
+            sl_miles = _haversine_miles(lat1, lon1, lat2, lon2)
+            if raw_miles < sl_miles * 0.95:
+                print(f"[GH] IMPOSSIBLE ROUTE: raw={raw_miles:.1f}mi < "
+                      f"straight-line={sl_miles:.1f}mi — treating as failed "
+                      f"(likely bad geocode)", flush=True)
+                return None
+
             base_miles = raw_miles * GRAPHHOPPER_MILE_FACTOR
             miles = round(base_miles * GRAPHHOPPER_CORRECTION)
             offset_applied = 0
