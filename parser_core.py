@@ -1,5 +1,5 @@
 # =============================================================
-# parser_core.py  —  server-side module  (FRESH REWRITE)
+# parser_core.py  —  server-side module  (FRESH REWRITE + MAPS VERIFY)
 #
 # This replaces both the pre-driverbot version and the unstable
 # "FIX #1-9" version. It keeps the simpler architecture of the
@@ -73,11 +73,25 @@
 #     Bumped to v3 for this rewrite so any previously-cached ghost
 #     values (0mi / 199mi) are wiped on first restart.
 #
+#  9. GOOGLE MAPS MILEAGE VERIFICATION  (NEW)
+#     GraphHopper (and the OSRM/ORS fallbacks) are never cross-checked
+#     against anything — a bad local GH install, a stale OSM extract,
+#     or a subtly wrong geocode can silently produce a plausible-but-
+#     wrong deadhead number with nothing to catch it. The winning
+#     truck's deadhead route is now independently re-verified against
+#     Google Maps Directions, cached 30 days per origin/dest pair
+#     (same schema-versioned cache pattern as GEO_CACHE/ROUTE_CACHE),
+#     and surfaced in both the Telegram message and LOAD_STORE so a
+#     dispatcher can see when GraphHopper and Google disagree before
+#     bidding on a number that turns out to be wrong. Fails soft: if
+#     GOOGLE_MAPS_API_KEY isn't set, or the API call fails, everything
+#     behaves exactly as it did before this feature existed.
+#
 # Deployment verification: watch for the "[PARSER_CORE] Fresh rewrite
 # loaded" line in journalctl right after restart, and for
-# [TRUCK-ROUTE] / [FALLBACK-MATCH] / [MATCH] lines on the next parse
-# request — their absence means the service is still running an old
-# file, not that the logic itself is broken.
+# [TRUCK-ROUTE] / [FALLBACK-MATCH] / [MATCH] / [MAPS-VERIFY] lines on
+# the next parse request — their absence means the service is still
+# running an old file, not that the logic itself is broken.
 # =============================================================
 
 import os
@@ -89,6 +103,7 @@ import time
 import threading
 import socket
 import math
+from typing import Any
 from urllib.parse import quote
 from email.utils import parseaddr
 from datetime import datetime, timezone
@@ -125,16 +140,34 @@ _ORS_DISABLED   = True
 _ORS_FAIL_COUNT = 0
 _ORS_LOCK       = threading.Lock()
 
+# ── GOOGLE MAPS VERIFICATION (NEW) ──────────────────────────────────────
+# Independent cross-check of the winning truck's deadhead distance.
+# Key is read lazily inside _get_maps_api_key() — never at import time —
+# so .env load order in main.py can never cause this to silently miss
+# the key. If GOOGLE_MAPS_API_KEY isn't set, verification just no-ops
+# and every downstream call behaves exactly as it did before this
+# feature existed.
+GOOGLE_MAPS_DIRECTIONS_URL  = "https://maps.googleapis.com/maps/api/directions/json"
+MAPS_VERIFY_PCT_THRESHOLD   = 0.04   # 4%  — flag if diff is this large or more
+MAPS_VERIFY_MILES_THRESHOLD = 12     # mi  — OR this large or more
+MAPS_VERIFY_MIN_ABS_DIFF    = 3      # mi  — ignore noise under this many miles regardless of %
+MAPS_CACHE_TTL_DAYS         = 30
+
+_MAPS_KEY_WARNED = False
+
 PHOTON_URL    = "https://photon.komoot.io/api/"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GEOCODER_UA   = "MailBotDispatcher/1.0"
 
 GEO_CACHE_FILE   = "geo_cache.json"
 ROUTE_CACHE_FILE = "route_cache.json"
+MAPS_CACHE_FILE  = "maps_verify_cache.json"          # ← NEW
 _GEO_CACHE_LOCK   = threading.Lock()
 _ROUTE_CACHE_LOCK = threading.Lock()
+_MAPS_CACHE_LOCK  = threading.Lock()                  # ← NEW
 _GEO_CACHE_DIRTY   = False
 _ROUTE_CACHE_DIRTY = False
+_MAPS_CACHE_DIRTY  = False                             # ← NEW
 
 # Bumped for this rewrite — see FIX #8 in the header comment.
 CACHE_SCHEMA_VERSION = 3
@@ -172,6 +205,9 @@ _route_http_session.mount("http://",  HTTPAdapter(max_retries=0))
 _gh_session = requests.Session()
 _gh_session.mount("http://", HTTPAdapter(max_retries=0))
 
+_maps_session = requests.Session()
+_maps_session.mount("https://", HTTPAdapter(max_retries=0))
+
 # ── FIX #2: was Semaphore(1) — serialized every "parallel" truck route
 # through a single GraphHopper slot. GH is local + fast; 6 concurrent
 # calls is safe and actually lets the parallel matcher run in parallel.
@@ -179,7 +215,7 @@ _GH_SEMAPHORE = threading.Semaphore(6)
 
 
 def _cache_flush_worker():
-    global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY
+    global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY, _MAPS_CACHE_DIRTY
     while not STOP_EVENT.is_set():
         time.sleep(30)
         if _GEO_CACHE_DIRTY:
@@ -190,6 +226,10 @@ def _cache_flush_worker():
             with _ROUTE_CACHE_LOCK:
                 _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
                 _ROUTE_CACHE_DIRTY = False
+        if _MAPS_CACHE_DIRTY:
+            with _MAPS_CACHE_LOCK:
+                _save_cache(MAPS_CACHE_FILE, MAPS_CACHE)
+                _MAPS_CACHE_DIRTY = False
 
 
 threading.Thread(target=_cache_flush_worker, daemon=True).start()
@@ -305,7 +345,7 @@ def parse_load_height_from_dims(dims_text: str):
 # CACHE LOAD / SAVE  (FIX #8: schema versioning)
 # =============================================================
 
-def _load_cache(path, expected_version):
+def _load_cache(path: str, expected_version: int) -> dict[str, Any]:
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -327,8 +367,9 @@ def _save_cache(path, data):
         pass
 
 
-GEO_CACHE   = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
-ROUTE_CACHE = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
+GEO_CACHE: dict[str, Any] = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
+ROUTE_CACHE: dict[str, Any] = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
+MAPS_CACHE: dict[str, Any] = _load_cache(MAPS_CACHE_FILE, CACHE_SCHEMA_VERSION)   # ← NEW
 
 _US_LAT = (15.0, 72.0)
 _US_LON = (-180.0, -65.0)
@@ -500,7 +541,7 @@ def _extract_zip_state(place: str):
     return None
 
 
-def photon_geocode(place: str):
+def photon_geocode(place: str) -> list[float] | None:
     key = place.strip().upper()
     with _GEO_CACHE_LOCK:
         cached = GEO_CACHE.get(key)
@@ -681,13 +722,172 @@ def _osrm_route_fallback(origin_latlon, dest_latlon):
     return None
 
 
+# =============================================================
+# GOOGLE MAPS VERIFICATION  (NEW — FIX #9)
+# =============================================================
+
+def _get_maps_api_key() -> str:
+    """
+    Read lazily on every call — never cached at import time — so
+    .env load order in main.py (which currently loads AFTER
+    parser_core is imported) can never cause this to silently miss
+    a key that was actually set.
+    """
+    global _MAPS_KEY_WARNED
+    key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if not key and not _MAPS_KEY_WARNED:
+        print("[MAPS] GOOGLE_MAPS_API_KEY not set — mileage verification disabled "
+              "(deadhead will use GraphHopper/fallback only, unverified).", flush=True)
+        _MAPS_KEY_WARNED = True
+    return key
+
+
+def _google_maps_route(origin_latlon, dest_latlon):
+    """
+    One bounded attempt at the Google Directions API — no urllib3
+    retries stacked underneath (same FIX #1 pattern as the other
+    sessions). Fails soft: returns None on any error so verification
+    can never block or break a bid.
+    """
+    api_key = _get_maps_api_key()
+    if not api_key:
+        return None
+    lat1, lon1 = origin_latlon
+    lat2, lon2 = dest_latlon
+    try:
+        r = _maps_session.get(
+            GOOGLE_MAPS_DIRECTIONS_URL,
+            params={
+                "origin": f"{lat1},{lon1}",
+                "destination": f"{lat2},{lon2}",
+                "mode": "driving",
+                "units": "imperial",
+                "key": api_key,
+            },
+            timeout=4,
+        )
+        if r.status_code != 200:
+            print(f"[MAPS] HTTP {r.status_code}: {r.text[:200]}", flush=True)
+            return None
+        data = r.json()
+        if data.get("status") != "OK":
+            print(f"[MAPS] API status={data.get('status')}: "
+                  f"{data.get('error_message', '')}", flush=True)
+            return None
+        route     = data["routes"][0]
+        leg       = route["legs"][0]
+        miles     = round(leg["distance"]["value"] / 1609.344)
+        minutes   = round(leg["duration"]["value"] / 60)
+        warnings  = route.get("warnings", []) or []
+        has_tolls = any("toll" in w.lower() for w in warnings)
+        return {"miles": miles, "minutes": minutes,
+                "has_tolls": has_tolls, "warnings": warnings}
+    except requests.exceptions.Timeout:
+        print("[MAPS] timeout", flush=True)
+        return None
+    except Exception as e:
+        print(f"[MAPS] exception: {e}", flush=True)
+        return None
+
+
+def verify_route_with_google_maps(origin_latlon, dest_latlon, gh_result: dict, label: str = ""):
+    """
+    Cross-check a GraphHopper/fallback distance against Google Maps.
+    Never raises. If Maps is unavailable/unconfigured/erroring, returns
+    the GH numbers marked 'unverified' so callers behave exactly as
+    they did before this feature existed.
+    """
+    if not gh_result:
+        return None
+
+    gh_miles = gh_result.get("miles")
+    maps_result = _google_maps_route(origin_latlon, dest_latlon)
+
+    if not maps_result:
+        return {
+            "gh_miles": gh_miles, "gh_minutes": gh_result.get("minutes"),
+            "maps_miles": None, "maps_minutes": None,
+            "diff_miles": None, "diff_pct": None, "has_tolls": None,
+            "flagged": False, "confidence": "unverified", "confidence_score": None,
+            "verified_miles": gh_miles, "verified_minutes": gh_result.get("minutes"),
+            "verified_source": "graphhopper",
+        }
+
+    maps_miles = maps_result["miles"]
+    diff_miles = abs(maps_miles - gh_miles)
+    diff_pct   = (diff_miles / gh_miles) if gh_miles else 0.0
+
+    flagged = (
+        diff_miles >= MAPS_VERIFY_MIN_ABS_DIFF
+        and (diff_pct >= MAPS_VERIFY_PCT_THRESHOLD or diff_miles >= MAPS_VERIFY_MILES_THRESHOLD)
+    )
+    if diff_miles < MAPS_VERIFY_MIN_ABS_DIFF:
+        confidence = "high"
+    elif flagged:
+        confidence = "low"
+    else:
+        confidence = "medium"
+    confidence_score = max(0, round(100 - diff_pct * 400))  # 4% diff -> ~84
+
+    tag = f"[MAPS-VERIFY] {label}: " if label else "[MAPS-VERIFY] "
+    print(f"{tag}GH={gh_miles}mi Maps={maps_miles}mi diff={diff_miles}mi "
+          f"({diff_pct * 100:.1f}%) — {'FLAGGED' if flagged else 'ok'}", flush=True)
+
+    return {
+        "gh_miles": gh_miles, "gh_minutes": gh_result.get("minutes"),
+        "maps_miles": maps_miles, "maps_minutes": maps_result["minutes"],
+        "diff_miles": diff_miles, "diff_pct": round(diff_pct, 4),
+        "has_tolls": maps_result.get("has_tolls"),
+        "flagged": flagged, "confidence": confidence, "confidence_score": confidence_score,
+        "verified_miles": maps_miles, "verified_minutes": maps_result["minutes"],
+        "verified_source": "google_maps",
+    }
+
+
+def verify_route_with_google_maps_cached(origin_latlon, dest_latlon, gh_result: dict, label: str = ""):
+    """
+    Same as verify_route_with_google_maps but cached MAPS_CACHE_TTL_DAYS
+    per origin/dest pair (schema-versioned, same pattern as GEO_CACHE /
+    ROUTE_CACHE) — a given truck-zip -> pickup-zip pair repeats across
+    many loads, so after warmup this rarely calls the paid API at all.
+    """
+    global _MAPS_CACHE_DIRTY
+    cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
+                 f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
+    now = time.time()
+
+    with _MAPS_CACHE_LOCK:
+        cached = MAPS_CACHE.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) < MAPS_CACHE_TTL_DAYS * 86400:
+        result = dict(cached)
+        # Recompute the diff against THIS request's GH number in case it
+        # moved — the route cache refreshes on its own schedule,
+        # independent of the maps cache.
+        result["gh_miles"]   = gh_result.get("miles")
+        result["gh_minutes"] = gh_result.get("minutes")
+        if result.get("maps_miles") is not None and result["gh_miles"]:
+            diff = abs(result["maps_miles"] - result["gh_miles"])
+            result["diff_miles"] = diff
+            result["diff_pct"]   = round(diff / result["gh_miles"], 4)
+        return result
+
+    result = verify_route_with_google_maps(origin_latlon, dest_latlon, gh_result, label)
+    if result and result.get("maps_miles") is not None:
+        to_store = dict(result)
+        to_store["ts"] = now
+        with _MAPS_CACHE_LOCK:
+            MAPS_CACHE[cache_key] = to_store
+            _MAPS_CACHE_DIRTY = True
+    return result
+
+
 def _parallel_fallback_route(origin_latlon, dest_latlon):
     """
     Race ORS and OSRM concurrently. Return the first successful result.
     When ORS is disabled, OSRM responds alone in ~3s.
     """
-    result_holder = [None]
-    source_holder = [""]
+    result_holder: list[dict[str, Any] | None] = [None]
+    source_holder: list[str] = [""]
     done_event    = threading.Event()
 
     def _try_ors():
@@ -1269,6 +1469,7 @@ def find_all_trucks_for_pickup(
                 "truck_equipment":      t.get("equipment", ""),
                 "google_deadhead":      dist["miles"],
                 "deadhead_eta_minutes": dist["minutes"],
+                "truck_zip":            t["zip"],
             })
 
     max_workers = min(len(candidates), 8)
@@ -1475,8 +1676,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
     # Geocode pickup + delivery in parallel — FIX #7: bounded joins.
-    _pu_coords = [None]
-    _dl_coords = [None]
+    _pu_coords: list[list[float] | None] = [None]
+    _dl_coords: list[list[float] | None] = [None]
 
     def _geo_pu():
         _pu_coords[0] = photon_geocode(pickup_loc) if pickup_loc else None
@@ -1530,6 +1731,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     best_truck, deadhead_miles, reject_reason, per_truck_log = None, None, None, []
     deadhead_eta = None
     all_matches  = []
+    maps_verification = None   # ← NEW — always defined, regardless of branch below
 
     if local_trucks:
         if not pickup_loc:
@@ -1567,6 +1769,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "truck_equipment":      _best.get("equipment", ""),
                     "google_deadhead":      _best_miles,
                     "deadhead_eta_minutes": int((_best_miles / 45) * 60) if _best_miles else None,
+                    "truck_zip":            _best["zip"],
                 }]
             else:
                 if reject_reason is None:
@@ -1584,6 +1787,21 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             "dimensions":  best_match["truck_dimensions"],
             "equipment":   best_match["truck_equipment"],
         }
+
+        # ── NEW: independent Google Maps mileage verification ──────────
+        # Only re-checks the WINNING truck (not every candidate) to keep
+        # this to at most one paid API call per parsed load — and that
+        # call is itself cached 30 days per truck-zip/pickup pair.
+        truck_zip = best_match.get("truck_zip")
+        if truck_zip and _pu_coords[0] and deadhead_miles is not None:
+            truck_coords = photon_geocode(truck_zip)
+            if truck_coords:
+                maps_verification = verify_route_with_google_maps_cached(
+                    truck_coords, _pu_coords[0],
+                    {"miles": deadhead_miles,
+                     "minutes": deadhead_eta["minutes"] if deadhead_eta else None},
+                    label=f"deadhead:{best_truck['driver_name']}",
+                )
     else:
         _PE2 = time.perf_counter()
 
@@ -1626,6 +1844,17 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     if deadhead_miles is not None:
         lines.append(f"Out Miles: {deadhead_miles}")
+        # ── NEW: surface the Google Maps cross-check right under the
+        # GraphHopper number, when it was computed ──────────────────────
+        if maps_verification and maps_verification.get("maps_miles") is not None:
+            mv = maps_verification
+            icon = "⚠️" if mv["flagged"] else "✅"
+            toll_note = " · has tolls" if mv.get("has_tolls") else ""
+            lines.append(
+                f"{icon} Maps verified: {mv['maps_miles']}mi  "
+                f"(GH {mv['gh_miles']}mi, Δ{mv['diff_miles']}mi/{mv['diff_pct']*100:.1f}%, "
+                f"confidence {mv['confidence']}{toll_note})"
+            )
     if estimated_miles_from_email is not None:
         lines.append(f"Loaded Miles: {estimated_miles_from_email}")
     if total_miles is not None:
@@ -1726,6 +1955,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     pickup_loc or "", delivery_loc or ""),
                 "bid_template":         local_template,
                 "all_trucks":           all_matches,
+                "maps_verification":    maps_verification,   # ← NEW
             }
 
     _PE3 = time.perf_counter()
