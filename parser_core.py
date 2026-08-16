@@ -1909,9 +1909,11 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         lines.append(f"🕒 ETA: {fmt_hours_minutes(deadhead_eta['minutes'])}")
 
     bid_url = None
+    broker_email = ""                                    # ← NEW
     for h in original_msg_full.get("payload", {}).get("headers", []):
         if h.get("name", "").lower() == "from":
             broker_addr = parseaddr(h.get("value", ""))[1]
+            broker_email = broker_addr or ""              # ← NEW
             if broker_addr:
                 body = build_bid_email_body(
                     order, broker_name or "", vehicle_required,
@@ -1955,7 +1957,9 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     pickup_loc or "", delivery_loc or ""),
                 "bid_template":         local_template,
                 "all_trucks":           all_matches,
-                "maps_verification":    maps_verification,   # ← NEW
+                "maps_verification":    maps_verification,
+                "broker_name":          broker_name or "",     # ← NEW
+                "broker_email":         broker_email,          # ← NEW
             }
 
     _PE3 = time.perf_counter()

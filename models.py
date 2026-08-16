@@ -38,3 +38,21 @@ class ActivateRequest(BaseModel):
 class HeartbeatRequest(BaseModel):
     license_key: str
     machine_id: str
+class RecordBidRequest(BaseModel):
+    license_key:  str
+    machine_id:   str
+    order_id:     str
+    thread_id:    Optional[str] = None
+    bid_method:   str = ""
+    vehicle_type: str = ""
+    driver_name:  str = ""
+    pickup_loc:   str = ""
+    delivery_loc: str = ""
+    broker_name:  str = ""
+    broker_email: str = ""
+    deadhead_miles:  Optional[float] = None
+    loaded_miles:    Optional[float] = None
+    total_miles:     Optional[float] = None
+    verified_miles:  Optional[float] = None
+    verified_source: Optional[str] = None
+    bid_amount:      Optional[float] = None

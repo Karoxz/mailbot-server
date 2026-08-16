@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from models import ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest
 from license_db import init_db, validate_license, activate_license, heartbeat
 from parser_core import parse_email_for_api
+import bid_history  
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 import threading
 import json
@@ -30,18 +31,44 @@ def _load_env_file(path=".env"):
 
 _load_env_file()
 
+GOOGLE_MAPS_API_KEY="AIzaSyAq8RYem8YVPUeHoCjdAdBDHjQsyzaetn0"
+
 API_SECRET = os.environ.get("API_SECRET", "dev-secret-local")
 
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    bid_history.init_db()                              # ← NEW
     logger.info("Database initialized")
     yield
+    
+    
+
 
 app = FastAPI(title="MailBot API", lifespan=lifespan, docs_url=None, redoc_url=None)
 
+@app.post("/api/record_bid")
+def record_bid(req: RecordBidRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    try:
+        bid_id = bid_history.record_bid(
+            order_id=req.order_id, thread_id=req.thread_id, bid_method=req.bid_method,
+            vehicle_type=req.vehicle_type, driver_name=req.driver_name,
+            pickup_loc=req.pickup_loc, delivery_loc=req.delivery_loc,
+            broker_name=req.broker_name, broker_email=req.broker_email,
+            deadhead_miles=req.deadhead_miles, loaded_miles=req.loaded_miles,
+            total_miles=req.total_miles, verified_miles=req.verified_miles,
+            verified_source=req.verified_source, bid_amount=req.bid_amount,
+        )
+        return {"success": True, "bid_id": bid_id}
+    except Exception as e:
+        logger.error(f"record_bid error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to record bid")
+
 @app.get("/health")
-async def health():
+async def health(): # type: ignore
     return {"status": "ok"}
 @app.post("/webhook/gmail")
 async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
