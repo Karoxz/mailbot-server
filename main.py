@@ -14,6 +14,10 @@ logger = logging.getLogger("mailbot")
 import collections
 _push_queue: collections.deque = collections.deque()
 _push_lock = threading.Lock()
+from models import (ParseRequest, ParseResponse, ActivateRequest,
+                     HeartbeatRequest, RecordBidRequest, ClassifyReplyRequest)
+import bid_history
+import reply_classifier                                # ← NEW
 
 # ── Load .env file manually (works without python-dotenv) ─────────────────
 def _load_env_file(path=".env"):
@@ -67,6 +71,37 @@ def record_bid(req: RecordBidRequest):
         logger.error(f"record_bid error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to record bid")
 
+@app.post("/api/classify_reply")
+def classify_reply(req: ClassifyReplyRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    # Cheap DB lookup FIRST — the LLM is only ever called when this
+    # thread actually has a bid awaiting an outcome.
+    pending = bid_history.get_pending_bids_for_thread(req.thread_id)
+    if not pending:
+        return {"success": True, "matched": False}
+
+    result = reply_classifier.classify_broker_reply(req.subject, req.message_body)
+
+    if result["status"] == "no_signal" or result["confidence"] < 0.55:
+        logger.info(f"[CLASSIFY] thread={req.thread_id} no actionable signal "
+                    f"(status={result['status']} conf={result['confidence']})")
+        return {"success": True, "matched": True, "updated": False, "classification": result}
+
+    updated_ids = []
+    for bid in pending:
+        if bid_history.update_bid_outcome(
+            bid["id"], result["status"],
+            outcome_source="broker_reply", outcome_note=result["reason"],
+        ):
+            updated_ids.append(bid["id"])
+
+    logger.info(f"[CLASSIFY] thread={req.thread_id} -> {result['status']} "
+                f"(conf={result['confidence']}) bids={updated_ids}")
+    return {"success": True, "matched": True, "updated": True,
+            "bid_ids": updated_ids, "classification": result}
 @app.get("/health")
 async def health(): # type: ignore
     return {"status": "ok"}

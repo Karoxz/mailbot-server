@@ -56,3 +56,10 @@ class RecordBidRequest(BaseModel):
     verified_miles:  Optional[float] = None
     verified_source: Optional[str] = None
     bid_amount:      Optional[float] = None
+    
+class ClassifyReplyRequest(BaseModel):
+    license_key:  str
+    machine_id:   str
+    thread_id:    str
+    subject:      str = ""
+    message_body: str = ""
