@@ -36,7 +36,7 @@ def _load_env_file(path=".env"):
 _load_env_file()
 
 GOOGLE_MAPS_API_KEY="AIzaSyAq8RYem8YVPUeHoCjdAdBDHjQsyzaetn0"
-
+ANTHROPIC_API_KEY="***REMOVED***ANTHROPIC_KEY_REMOVED"
 API_SECRET = os.environ.get("API_SECRET", "dev-secret-local")
 
 @asynccontextmanager

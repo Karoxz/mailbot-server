@@ -103,7 +103,6 @@ import time
 import threading
 import socket
 import math
-from typing import Any
 from urllib.parse import quote
 from email.utils import parseaddr
 from datetime import datetime, timezone
@@ -112,6 +111,10 @@ from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 
 import requests
 from requests.adapters import HTTPAdapter
+from typing import Any, Dict, List, Optional
+
+import bid_history
+import decision_engine
 
 
 def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
@@ -345,7 +348,7 @@ def parse_load_height_from_dims(dims_text: str):
 # CACHE LOAD / SAVE  (FIX #8: schema versioning)
 # =============================================================
 
-def _load_cache(path: str, expected_version: int) -> dict[str, Any]:
+def _load_cache(path, expected_version) -> Dict[str, Any]:
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -367,9 +370,9 @@ def _save_cache(path, data):
         pass
 
 
-GEO_CACHE: dict[str, Any] = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
-ROUTE_CACHE: dict[str, Any] = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
-MAPS_CACHE: dict[str, Any] = _load_cache(MAPS_CACHE_FILE, CACHE_SCHEMA_VERSION)   # ← NEW
+GEO_CACHE: Dict[str, Any]   = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
+ROUTE_CACHE: Dict[str, Any] = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
+MAPS_CACHE: Dict[str, Any]  = _load_cache(MAPS_CACHE_FILE, CACHE_SCHEMA_VERSION)   # ← NEW
 
 _US_LAT = (15.0, 72.0)
 _US_LON = (-180.0, -65.0)
@@ -541,7 +544,7 @@ def _extract_zip_state(place: str):
     return None
 
 
-def photon_geocode(place: str) -> list[float] | None:
+def photon_geocode(place: str) -> Optional[List[float]]:
     key = place.strip().upper()
     with _GEO_CACHE_LOCK:
         cached = GEO_CACHE.get(key)
@@ -886,8 +889,8 @@ def _parallel_fallback_route(origin_latlon, dest_latlon):
     Race ORS and OSRM concurrently. Return the first successful result.
     When ORS is disabled, OSRM responds alone in ~3s.
     """
-    result_holder: list[dict[str, Any] | None] = [None]
-    source_holder: list[str] = [""]
+    result_holder: List[Optional[Dict[str, Any]]] = [None]
+    source_holder: List[str] = [""]
     done_event    = threading.Event()
 
     def _try_ors():
@@ -1676,8 +1679,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         return None, "PLACEHOLDER LOCATION (XX)", order, None
 
     # Geocode pickup + delivery in parallel — FIX #7: bounded joins.
-    _pu_coords: list[list[float] | None] = [None]
-    _dl_coords: list[list[float] | None] = [None]
+    _pu_coords: List[Optional[List[float]]] = [None]
+    _dl_coords: List[Optional[List[float]]] = [None]
 
     def _geo_pu():
         _pu_coords[0] = photon_geocode(pickup_loc) if pickup_loc else None
@@ -1909,11 +1912,11 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         lines.append(f"🕒 ETA: {fmt_hours_minutes(deadhead_eta['minutes'])}")
 
     bid_url = None
-    broker_email = ""                                    # ← NEW
+    broker_email_addr = ""
     for h in original_msg_full.get("payload", {}).get("headers", []):
         if h.get("name", "").lower() == "from":
             broker_addr = parseaddr(h.get("value", ""))[1]
-            broker_email = broker_addr or ""              # ← NEW
+            broker_email_addr = broker_addr or ""
             if broker_addr:
                 body = build_bid_email_body(
                     order, broker_name or "", vehicle_required,
@@ -1932,6 +1935,64 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     f"&body={quote(body)}"
                 )
             break
+
+    # ── NEW: historical bid recommendation ──────────────────────────
+    # Uses the sender's actual From-header address (broker_email_addr)
+    # rather than the "Email:" field parsed out of the body text —
+    # that's the address bid_history rows are keyed on too, since it's
+    # what a reply will actually come from.
+    bid_recommendation = None
+    if deadhead_miles is not None:
+        _rec_miles = None
+        if maps_verification and maps_verification.get("verified_miles") is not None:
+            _rec_miles = maps_verification["verified_miles"]
+        elif total_miles is not None:
+            _rec_miles = total_miles
+        else:
+            _rec_miles = deadhead_miles
+
+        _pu_state = extract_state_from_location(pickup_loc) if pickup_loc else None
+        _dl_state = extract_state_from_location(delivery_loc) if delivery_loc else None
+        _rec_lane = f"{_pu_state}-{_dl_state}" if _pu_state and _dl_state else ""
+
+        bid_recommendation = bid_history.get_bid_recommendation(
+            broker_email=broker_email_addr,
+            lane=_rec_lane,
+            vehicle_type=vehicle_required,
+            miles=_rec_miles,
+        )
+        if bid_recommendation:
+            lines.append("")
+            lines.append(
+                f"💡 Suggested bid: ${bid_recommendation['suggested_amount']:,.0f}  "
+                f"(${bid_recommendation['rate_per_mile']:.2f}/mi · "
+                f"{bid_recommendation['basis']} · n={bid_recommendation['sample_size']})"
+            )
+
+    # ── NEW: decision engine — Accept/Bid/Negotiate/Reject ──────────
+    # Pure deterministic scoring over signals already computed above
+    # (broker track record, deadhead-vs-radius margin, Maps-verification
+    # confidence, rate-guidance availability) — no extra network call.
+    load_decision = None
+    if deadhead_miles is not None:
+        load_decision = decision_engine.get_load_decision(
+            broker_email=broker_email_addr,
+            deadhead_miles=deadhead_miles,
+            max_radius_miles=max_radius_miles,
+            maps_verification=maps_verification,
+            bid_recommendation=bid_recommendation,
+        )
+        _DECISION_ICON = {
+            "Accept": "✅", "Bid": "🎯", "Negotiate": "⚠️", "Reject": "⛔",
+        }
+        lines.append("")
+        lines.append(
+            f"{_DECISION_ICON.get(load_decision['decision'], '🎯')} "
+            f"Decision: {load_decision['decision'].upper()}  "
+            f"(confidence {load_decision['confidence']*100:.0f}%)"
+        )
+        for _reason in load_decision["reasons"]:
+            lines.append(f"   • {_reason}")
 
     delivery_dt_stored = "ASAP" if delivery_asap else delivery_dt
 
@@ -1958,8 +2019,10 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "bid_template":         local_template,
                 "all_trucks":           all_matches,
                 "maps_verification":    maps_verification,
-                "broker_name":          broker_name or "",     # ← NEW
-                "broker_email":         broker_email,          # ← NEW
+                "broker_name":          broker_name or "",
+                "broker_email":         broker_email_addr,
+                "bid_recommendation":   bid_recommendation,
+                "load_decision":        load_decision,        # ← NEW   # ← NEW
             }
 
     _PE3 = time.perf_counter()

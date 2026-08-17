@@ -79,9 +79,17 @@ def classify_broker_reply(subject: str, body: str) -> dict:
                 "role": "user",
                 "content": f"Subject: {subject or '(no subject)'}\n\nBody:\n{trimmed_body}",
             }],
+            timeout=20.0,  # bounded — a hung network call must never tie up
+                           # a server request-thread indefinitely
         )
+        # resp.content is a union of many block types (TextBlock,
+        # ThinkingBlock, ToolUseBlock, ...) — only TextBlock has .text.
+        # getattr(..., "") sidesteps needing Pylance to narrow that union
+        # and is exactly as safe at runtime (falls back to "" for any
+        # non-text block instead of raising).
         text = "".join(
-            block.text for block in resp.content if getattr(block, "type", "") == "text"
+            getattr(block, "text", "") for block in resp.content
+            if getattr(block, "type", "") == "text"
         ).strip()
         text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
         data = json.loads(text)
