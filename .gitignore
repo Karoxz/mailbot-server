@@ -1,2 +1,7 @@
 .env
-.env
+credentials.json
+token.json
+license_cache.json
+*.db
+driver_config.json
+plutus_config.json
