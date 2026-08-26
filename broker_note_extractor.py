@@ -30,7 +30,7 @@ import json
 from typing import Any, Dict, Optional
 
 _GEMINI_KEY_WARNED = False
-_EXTRACT_MODEL = "gemini-2.5-flash-lite"
+_EXTRACT_MODEL = "gemini-3.5-flash-lite"
 
 _SYSTEM_PROMPT = """You are extracting structured freight-shipping details from a broker's load-posting email for a truck dispatcher. A truck has ALREADY been matched to this load using separate logic — your job is only to surface details from the email text that a human dispatcher would want to know before confirming the bid.
 
