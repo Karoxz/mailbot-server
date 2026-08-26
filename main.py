@@ -1,23 +1,27 @@
 import os
+import json
+import time
+import base64 as _b64
+import threading
+import collections
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
-from models import ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest
+
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+
+from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest,
+                     RecordBidRequest, ClassifyReplyRequest)
 from license_db import init_db, validate_license, activate_license, heartbeat
 from parser_core import parse_email_for_api
-import bid_history  
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-import threading
-import json
+import bid_history
+import reply_classifier
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
-import collections
+
 _push_queue: collections.deque = collections.deque()
 _push_lock = threading.Lock()
-from models import (ParseRequest, ParseResponse, ActivateRequest,
-                     HeartbeatRequest, RecordBidRequest, ClassifyReplyRequest)
-import bid_history
-import reply_classifier                                # ← NEW
+
 
 # ── Load .env file manually (works without python-dotenv) ─────────────────
 def _load_env_file(path=".env"):
@@ -36,20 +40,128 @@ def _load_env_file(path=".env"):
 _load_env_file()
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-API_SECRET = os.environ.get("API_SECRET", "dev-secret-local")
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
+API_SECRET          = os.environ.get("API_SECRET", "dev-secret-local")
+
 
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    bid_history.init_db()                              # ← NEW
+    bid_history.init_db()
     logger.info("Database initialized")
     yield
-    
-    
 
 
 app = FastAPI(title="MailBot API", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/webhook/gmail")
+async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        body = await request.json()
+        message = body.get("message", {})
+        if not message:
+            return {"status": "ok"}
+        data = message.get("data", "")
+        if data:
+            decoded = _b64.b64decode(data).decode("utf-8")
+            notification = json.loads(decoded)
+            history_id = str(notification.get("historyId", ""))
+            print(f"WEBHOOK_HIT t={time.time():.3f}", flush=True)
+            logger.info(f"PUSH_IN historyId={history_id} t={time.time():.3f}")
+            with _push_lock:
+                _push_queue.append((history_id, time.time()))
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"status": "ok"}
+
+
+@app.get("/webhook/poll")
+async def poll_push(request: Request):
+    check = validate_license(
+        request.headers.get("X-License-Key", ""),
+        request.headers.get("X-Machine-Id", "")
+    )
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    with _push_lock:
+        items = list(_push_queue)
+        _push_queue.clear()
+    if items:
+        for history_id, pushed_at in items:
+            lag = time.time() - pushed_at
+            logger.info(f"PUSH_OUT historyId={history_id} lag={lag:.3f}s")
+    # Return only the LATEST historyId — client just needs "new mail arrived"
+    # and will walk history from its own cursor forward
+    if items:
+        latest = max(items, key=lambda x: int(x[0]))
+        return {"history_ids": [latest[0]]}
+    return {"history_ids": []}
+
+
+@app.post("/api/activate")
+async def activate(req: ActivateRequest):
+    result = activate_license(req.license_key, req.machine_id, req.machine_name)
+    if not result["success"]:
+        raise HTTPException(status_code=403, detail=result["reason"])
+    return {"success": True, "message": "Activated"}
+
+
+@app.post("/api/heartbeat")
+async def hb(req: HeartbeatRequest):
+    ok = heartbeat(req.license_key, req.machine_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="License invalid or revoked")
+    return {"valid": True}
+
+
+@app.post("/api/parse", response_model=ParseResponse)
+def parse(req: ParseRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    try:
+        result = parse_email_for_api(req.dict())
+        return ParseResponse(**result)
+    except Exception as e:
+        logger.error(f"Parse error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal parsing error")
+
+
+@app.post("/api/build_bid")
+def build_bid(req: dict):
+    check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    try:
+        load_data = req.get("load_data", {})
+        from parser_core import build_bid_reply_body
+        bid_text = build_bid_reply_body(
+            order            = load_data.get("order"),
+            vehicle_required = load_data.get("vehicle_required"),
+            pickup_loc       = load_data.get("pickup_loc"),
+            pickup_dt        = load_data.get("pickup_dt"),
+            delivery_loc     = load_data.get("delivery_loc"),
+            delivery_dt      = load_data.get("delivery_dt"),
+            google_deadhead  = load_data.get("google_deadhead"),
+            driver_name      = load_data.get("driver_name"),
+            truck_type       = load_data.get("truck_type"),
+            truck_dimensions = load_data.get("truck_dimensions"),
+            deadhead_eta_minutes = load_data.get("deadhead_eta_minutes"),
+            truck_equipment  = load_data.get("truck_equipment", ""),
+            bid_template     = load_data.get("bid_template"),
+        )
+        return {"bid_text": bid_text}
+    except Exception as e:
+        logger.error(f"build_bid error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to build bid text")
+
 
 @app.post("/api/record_bid")
 def record_bid(req: RecordBidRequest):
@@ -70,6 +182,7 @@ def record_bid(req: RecordBidRequest):
     except Exception as e:
         logger.error(f"record_bid error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to record bid")
+
 
 @app.post("/api/classify_reply")
 def classify_reply(req: ClassifyReplyRequest):
@@ -102,109 +215,3 @@ def classify_reply(req: ClassifyReplyRequest):
                 f"(conf={result['confidence']}) bids={updated_ids}")
     return {"success": True, "matched": True, "updated": True,
             "bid_ids": updated_ids, "classification": result}
-@app.get("/health")
-async def health(): # type: ignore
-    return {"status": "ok"}
-@app.post("/webhook/gmail")
-async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
-    try:
-        body = await request.json()
-        message = body.get("message", {})
-        if not message:
-            return {"status": "ok"}
-        import base64 as _b64
-        data = message.get("data", "")
-        if data:
-            decoded = _b64.b64decode(data).decode("utf-8")
-            notification = json.loads(decoded)
-            history_id = str(notification.get("historyId", ""))
-            import time as _time
-            print(f"WEBHOOK_HIT t={_time.time():.3f}", flush=True)  # ← ADD THIS
-            logger.info(f"PUSH_IN historyId={history_id} t={_time.time():.3f}")
-            with _push_lock:
-                _push_queue.append((history_id, _time.time()))
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return {"status": "ok"}
-
-@app.get("/webhook/poll")
-async def poll_push(request: Request):
-    check = validate_license(
-        request.headers.get("X-License-Key", ""),
-        request.headers.get("X-Machine-Id", "")
-    )
-    if not check["valid"]:
-        raise HTTPException(status_code=403, detail=check["reason"])
-    import time as _time
-    with _push_lock:
-        items = list(_push_queue)
-        _push_queue.clear()
-    if items:
-        for history_id, pushed_at in items:
-            lag = _time.time() - pushed_at
-            logger.info(f"PUSH_OUT historyId={history_id} lag={lag:.3f}s")
-    # Return only the LATEST historyId — client just needs "new mail arrived"
-    # and will walk history from its own cursor forward
-    if items:
-        latest = max(items, key=lambda x: int(x[0]))
-        return {"history_ids": [latest[0]]}
-    return {"history_ids": []}
-@app.post("/api/activate")
-async def activate(req: ActivateRequest):
-    result = activate_license(req.license_key, req.machine_id, req.machine_name)
-    if not result["success"]:
-        raise HTTPException(status_code=403, detail=result["reason"])
-    return {"success": True, "message": "Activated"}
-
-@app.post("/api/heartbeat")
-async def hb(req: HeartbeatRequest):
-    ok = heartbeat(req.license_key, req.machine_id)
-    if not ok:
-        raise HTTPException(status_code=403, detail="License invalid or revoked")
-    return {"valid": True}
-
-@app.post("/api/parse", response_model=ParseResponse)
-def parse(req: ParseRequest):          # ← removed "async"
-    check = validate_license(req.license_key, req.machine_id)
-    if not check["valid"]:
-        raise HTTPException(status_code=403, detail=check["reason"])
-    try:
-        result = parse_email_for_api(req.dict())
-        return ParseResponse(**result)
-    except Exception as e:
-        logger.error(f"Parse error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal parsing error")
-
-@app.post("/api/build_bid")
-def build_bid(req: dict):              # ← removed "async"
-    check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
-    if not check["valid"]:
-        raise HTTPException(status_code=403, detail=check["reason"])
-    try:
-        load_data = req.get("load_data", {})
-        from parser_core import build_bid_reply_body
-        bid_text = build_bid_reply_body(
-            order            = load_data.get("order"),
-            vehicle_required = load_data.get("vehicle_required"),
-            pickup_loc       = load_data.get("pickup_loc"),
-            pickup_dt        = load_data.get("pickup_dt"),
-            delivery_loc     = load_data.get("delivery_loc"),
-            delivery_dt      = load_data.get("delivery_dt"),
-            google_deadhead  = load_data.get("google_deadhead"),
-            driver_name      = load_data.get("driver_name"),
-            truck_type       = load_data.get("truck_type"),
-            truck_dimensions = load_data.get("truck_dimensions"),
-            deadhead_eta_minutes = load_data.get("deadhead_eta_minutes"),
-            truck_equipment  = load_data.get("truck_equipment", ""),
-            bid_template     = load_data.get("bid_template"),
-        )
-        return {"bid_text": bid_text}
-    except Exception as e:
-        logger.error(f"build_bid error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to build bid text")
- 
-# ── Health check ──────────────────────────────────────────────────────────
-@app.get('/health')
-async def health():
-    return {'status': 'ok'}
