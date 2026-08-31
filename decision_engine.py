@@ -90,11 +90,28 @@ def _score_rate_guidance(bid_recommendation: Optional[Dict[str, Any]]) -> tuple:
     return 0, ["No rate history for this lane/broker/vehicle yet — pricing blind"]
 
 
+def _score_freight_fit(freight_fit: Optional[Dict[str, Any]]) -> tuple:
+    """
+    Returns (score_delta, reasons). A hard fit issue (freight literally
+    doesn't fit / overweight) is weighted heavily enough on its own to
+    push the decision toward Reject — this is a physical constraint,
+    not a soft preference like the other signals.
+    """
+    if not freight_fit or not freight_fit.get("checked"):
+        return 0, []
+    if freight_fit.get("issues"):
+        return -4, [f"Fit check: {issue}" for issue in freight_fit["issues"]]
+    if freight_fit.get("warnings"):
+        return -1, [f"Fit check: {warning}" for warning in freight_fit["warnings"]]
+    return 0, []
+
+
 def get_load_decision(broker_email: str = "",
                        deadhead_miles: Optional[float] = None,
                        max_radius_miles: Optional[float] = None,
                        maps_verification: Optional[Dict[str, Any]] = None,
-                       bid_recommendation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       bid_recommendation: Optional[Dict[str, Any]] = None,
+                       freight_fit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Returns:
       {
@@ -130,6 +147,10 @@ def get_load_decision(broker_email: str = "",
     rate_delta, rate_reasons = _score_rate_guidance(bid_recommendation)
     score += rate_delta
     reasons += rate_reasons
+
+    fit_delta, fit_reasons = _score_freight_fit(freight_fit)
+    score += fit_delta
+    reasons += fit_reasons
 
     if score <= -3:
         decision = "Reject"

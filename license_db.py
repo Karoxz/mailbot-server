@@ -1,8 +1,7 @@
 import sqlite3
 import os
+from typing import Optional
 from datetime import datetime, timezone
-
-import os
 
 # Forces the script to always find its files right where the code sits
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +18,15 @@ def init_db():
         expires_at   TEXT,
         last_heartbeat TEXT
     )''')
+    # Migration: add thread_learning_enabled to any DB created before this
+    # feature existed. ALTER TABLE ADD COLUMN errors if the column is
+    # already there, so this is wrapped and safe to run on every startup.
+    try:
+        conn.execute(
+            'ALTER TABLE licenses ADD COLUMN thread_learning_enabled INTEGER DEFAULT 0'
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -32,7 +40,30 @@ def _get_row(key: str):
     conn.close()
     return row
 
+def get_thread_learning_enabled(key: str) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        'SELECT thread_learning_enabled FROM licenses WHERE key=?', (key,)
+    ).fetchone()
+    conn.close()
+    return bool(val[0]) if val else False
 
+
+def set_thread_learning_enabled(key: str, enabled: bool) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE licenses SET thread_learning_enabled=? WHERE key=?',
+        (1 if enabled else 0, key)
+    )
+    conn.commit()
+    conn.close()
+    return True
 def validate_license(key: str, machine_id: str) -> dict:
     row = _get_row(key)
     if not row:
@@ -95,7 +126,7 @@ def heartbeat(key: str, machine_id: str) -> bool:
     return True
 
 
-def add_license(key: str, expires_at: str = None):
+def add_license(key: str, expires_at: Optional[str] = None):
     now = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     conn.execute(

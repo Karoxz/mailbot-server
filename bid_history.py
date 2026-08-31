@@ -92,6 +92,44 @@ def init_db():
     finally:
         conn.close()
 
+def init_processed_threads_table():
+    """
+    Call once at startup (main.py's lifespan already calls bid_history.init_db();
+    add this call right next to it). Tracks which Gmail threads thread_learner
+    has already walked, and how many messages were in them last time, so a
+    recurring sweep only re-processes threads that actually got new replies.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''CREATE TABLE IF NOT EXISTS processed_threads (
+        thread_id      TEXT PRIMARY KEY,
+        message_count  INTEGER,
+        last_checked_at TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+
+def get_processed_thread_count(thread_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        'SELECT message_count FROM processed_threads WHERE thread_id=?', (thread_id,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def mark_thread_processed(thread_id: str, message_count: int):
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'INSERT INTO processed_threads (thread_id, message_count, last_checked_at) '
+        'VALUES (?,?,?) '
+        'ON CONFLICT(thread_id) DO UPDATE SET message_count=excluded.message_count, '
+        'last_checked_at=excluded.last_checked_at',
+        (thread_id, message_count, now)
+    )
+    conn.commit()
+    conn.close()
 
 def _row_to_dict(cursor, row) -> dict:
     cols = [c[0] for c in cursor.description]
