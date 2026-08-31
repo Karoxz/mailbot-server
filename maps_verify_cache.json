@@ -1,0 +1,1 @@
+{"__version__": 3, "41.396,-81.738|39.971,-83.004": {"gh_miles": 130, "gh_minutes": 151, "maps_miles": 132, "maps_minutes": 126, "diff_miles": 2, "diff_pct": 0.0154, "has_tolls": false, "flagged": false, "confidence": "high", "confidence_score": 94, "verified_miles": 132, "verified_minutes": 126, "verified_source": "google_maps", "ts": 1788196538.234174}}

@@ -65,3 +65,33 @@ class ClassifyReplyRequest(BaseModel):
     thread_id:    str
     subject:      str = ""
     message_body: str = ""
+
+
+# ── NEW: update the bid_amount on an already-recorded bid row ──────────
+# Used by both the driver-bot rate capture and the dispatcher-side
+# rate-confirmation prompt, since bid_amount is usually unknown at the
+# moment record_bid() first runs.
+class UpdateBidAmountRequest(BaseModel):
+    license_key: str
+    machine_id:  str
+    bid_id:      int
+    bid_amount:  float
+    
+class ThreadLearningToggleRequest(BaseModel):
+    license_key: str
+    machine_id:  str
+    
+class ThreadMessageIn(BaseModel):
+    message_id: str
+    date_ms:    int
+    is_from_me: bool
+    subject:    str = ""
+    body:       str = ""
+
+
+class BackfillThreadRequest(BaseModel):
+    license_key: str
+    machine_id:  str
+    thread_id:   str
+    order_id:    Optional[str] = None       # if the client already knows it
+    messages:    List[ThreadMessageIn]

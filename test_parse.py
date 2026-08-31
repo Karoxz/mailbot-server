@@ -20,7 +20,7 @@ r = requests.post("http://127.0.0.1:8000/api/parse", json={
     "email_body": """Bid on Order #99999
 Vehicle required: LARGE STRAIGHT
 Pick-Up:
-Chicago, IL 60601
+Columbus, OH 43215
 01/15/2025 08:00 AM EST
 Delivery:
 Detroit, MI 48201

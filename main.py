@@ -10,7 +10,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 
 from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest,
-                     RecordBidRequest, ClassifyReplyRequest)
+                     RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
+                     ThreadLearningToggleRequest, BackfillThreadRequest)
+import thread_learner
+import license_db
 from license_db import init_db, validate_license, activate_license, heartbeat
 from parser_core import parse_email_for_api
 import bid_history
@@ -48,6 +51,7 @@ API_SECRET          = os.environ.get("API_SECRET", "dev-secret-local")
 async def lifespan(app):
     init_db()
     bid_history.init_db()
+    bid_history.init_processed_threads_table()
     logger.info("Database initialized")
     yield
 
@@ -184,6 +188,71 @@ def record_bid(req: RecordBidRequest):
         raise HTTPException(status_code=500, detail="Failed to record bid")
 
 
+@app.post("/api/update_bid_amount")
+def update_bid_amount(req: UpdateBidAmountRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    try:
+        ok = bid_history.update_bid_amount(req.bid_id, req.bid_amount)
+        return {"success": ok}
+    except Exception as e:
+        logger.error(f"update_bid_amount error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update bid amount")
+
+@app.post("/api/thread_learning/enable")
+def enable_thread_learning(req: ThreadLearningToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    ok = license_db.set_thread_learning_enabled(req.license_key, True)
+    if not ok:
+        raise HTTPException(status_code=404, detail="License not found")
+    logger.info(f"[THREAD-LEARNING] enabled for {req.license_key}")
+    return {"success": True, "enabled": True}
+
+
+@app.post("/api/thread_learning/disable")
+def disable_thread_learning(req: ThreadLearningToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    ok = license_db.set_thread_learning_enabled(req.license_key, False)
+    if not ok:
+        raise HTTPException(status_code=404, detail="License not found")
+    logger.info(f"[THREAD-LEARNING] disabled for {req.license_key}")
+    return {"success": True, "enabled": False}
+
+
+@app.post("/api/thread_learning/status")
+def thread_learning_status(req: ThreadLearningToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"enabled": license_db.get_thread_learning_enabled(req.license_key)}
+
+@app.post("/api/backfill_thread")
+def backfill_thread(req: BackfillThreadRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    # Hard gate: even if a client somehow calls this while the toggle is
+    # off, the server refuses to run any LLM extraction against the
+    # thread — the on/off switch is enforced here, not just in the GUI.
+    if not license_db.get_thread_learning_enabled(req.license_key):
+        return {"success": False, "skipped": True, "reason": "thread_learning disabled"}
+
+    try:
+        result = thread_learner.process_thread(
+            thread_id=req.thread_id,
+            order_id=req.order_id,
+            messages=[m.dict() for m in req.messages],
+        )
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error(f"backfill_thread error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process thread")
 @app.post("/api/classify_reply")
 def classify_reply(req: ClassifyReplyRequest):
     check = validate_license(req.license_key, req.machine_id)

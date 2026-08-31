@@ -116,7 +116,8 @@ from typing import Any, Dict, List, Optional
 import bid_history
 import decision_engine
 
-
+import freight_fit_checker
+import broker_note_extractor
 def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
     R = 3958.8
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -150,7 +151,7 @@ _ORS_LOCK       = threading.Lock()
 # the key. If GOOGLE_MAPS_API_KEY isn't set, verification just no-ops
 # and every downstream call behaves exactly as it did before this
 # feature existed.
-GOOGLE_MAPS_DIRECTIONS_URL  = "https://maps.googleapis.com/maps/api/directions/json"
+GOOGLE_MAPS_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 MAPS_VERIFY_PCT_THRESHOLD   = 0.04   # 4%  — flag if diff is this large or more
 MAPS_VERIFY_MILES_THRESHOLD = 12     # mi  — OR this large or more
 MAPS_VERIFY_MIN_ABS_DIFF    = 3      # mi  — ignore noise under this many miles regardless of %
@@ -747,10 +748,16 @@ def _get_maps_api_key() -> str:
 
 def _google_maps_route(origin_latlon, dest_latlon):
     """
-    One bounded attempt at the Google Directions API — no urllib3
-    retries stacked underneath (same FIX #1 pattern as the other
-    sessions). Fails soft: returns None on any error so verification
-    can never block or break a bid.
+    One bounded attempt at the Google Routes API (v2) — the successor
+    to the legacy Directions API used previously. Same fail-soft
+    contract as before: any error, bad status, or missing key returns
+    None so verification can never block or break a bid.
+
+    Routes API uses a POST body + a fieldmask header instead of the
+    old query-string GET, and reports distance in meters / duration
+    as a "123s" string rather than nested distance.value/duration.value
+    objects — everything else about this function's return shape is
+    unchanged so callers don't need to know which API backs it.
     """
     api_key = _get_maps_api_key()
     if not api_key:
@@ -758,14 +765,24 @@ def _google_maps_route(origin_latlon, dest_latlon):
     lat1, lon1 = origin_latlon
     lat2, lon2 = dest_latlon
     try:
-        r = _maps_session.get(
-            GOOGLE_MAPS_DIRECTIONS_URL,
-            params={
-                "origin": f"{lat1},{lon1}",
-                "destination": f"{lat2},{lon2}",
-                "mode": "driving",
-                "units": "imperial",
-                "key": api_key,
+        r = _maps_session.post(
+            GOOGLE_MAPS_ROUTES_URL,
+            json={
+                "origin": {"location": {"latLng": {"latitude": lat1, "longitude": lon1}}},
+                "destination": {"location": {"latLng": {"latitude": lat2, "longitude": lon2}}},
+                "travelMode": "DRIVE",
+                "units": "IMPERIAL",
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                # Fieldmask is REQUIRED by Routes API — a request with no
+                # fieldmask returns an empty response body, not an error,
+                # which would otherwise look like a silent "0 routes" miss.
+                "X-Goog-FieldMask": (
+                    "routes.distanceMeters,routes.duration,"
+                    "routes.travelAdvisory.tollInfo"
+                ),
             },
             timeout=4,
         )
@@ -773,18 +790,27 @@ def _google_maps_route(origin_latlon, dest_latlon):
             print(f"[MAPS] HTTP {r.status_code}: {r.text[:200]}", flush=True)
             return None
         data = r.json()
-        if data.get("status") != "OK":
-            print(f"[MAPS] API status={data.get('status')}: "
-                  f"{data.get('error_message', '')}", flush=True)
+        routes = data.get("routes") or []
+        if not routes:
+            print(f"[MAPS] no routes returned: {data}", flush=True)
             return None
-        route     = data["routes"][0]
-        leg       = route["legs"][0]
-        miles     = round(leg["distance"]["value"] / 1609.344)
-        minutes   = round(leg["duration"]["value"] / 60)
-        warnings  = route.get("warnings", []) or []
-        has_tolls = any("toll" in w.lower() for w in warnings)
+        route = routes[0]
+        meters = route.get("distanceMeters")
+        if meters is None:
+            print(f"[MAPS] route missing distanceMeters: {route}", flush=True)
+            return None
+        miles = round(meters / 1609.344)
+        # duration comes back as a string like "1234s"
+        dur_raw = route.get("duration", "0s")
+        try:
+            seconds = int(str(dur_raw).rstrip("s"))
+        except ValueError:
+            seconds = 0
+        minutes = round(seconds / 60)
+        toll_info = (route.get("travelAdvisory") or {}).get("tollInfo")
+        has_tolls = bool(toll_info)
         return {"miles": miles, "minutes": minutes,
-                "has_tolls": has_tolls, "warnings": warnings}
+                "has_tolls": has_tolls, "warnings": []}
     except requests.exceptions.Timeout:
         print("[MAPS] timeout", flush=True)
         return None
@@ -1808,6 +1834,27 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     else:
         _PE2 = time.perf_counter()
 
+    # ── NEW: broker note extraction (LLM, fails soft to None) ──────────
+    # Runs regardless of whether a truck matched — the notes describe
+    # the load itself, not the assignment, and don't depend on one.
+    broker_notes = broker_note_extractor.extract_broker_notes(t)
+
+    # ── NEW: deterministic freight-fit check against the winning truck ──
+    freight_fit = None
+    
+    if best_truck:
+        _truck_payload_lbs = next(
+            (tk.get("max_payload_lbs") for tk in local_trucks
+             if tk.get("driver_name") == best_truck.get("driver_name")),
+            None,
+        )
+        freight_fit = freight_fit_checker.check_freight_fit(
+            broker_notes,
+            best_truck.get("dimensions"),
+            _truck_payload_lbs,
+            load_weight_lbs,
+        )
+
     if deadhead_miles:
         deadhead_eta = {"miles": deadhead_miles,
                          "minutes": int((deadhead_miles / 45) * 60)}
@@ -1891,6 +1938,32 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     notes = _find(r"Notes:\s*([^\n]+)", t)
     if notes:
         lines.append(f"🔔 Notes: {notes}")
+
+    # ── NEW: broker note extraction + freight fit — surfaced right ────
+    # alongside the manually-parsed fields above, before broker info.
+    if broker_notes:
+        if broker_notes.get("special_handling"):
+            lines.append(f"🧰 Special handling: {', '.join(broker_notes['special_handling'])}")
+        if broker_notes.get("equipment_restrictions"):
+            lines.append(f"🚛 Equipment needed: {', '.join(broker_notes['equipment_restrictions'])}")
+        if broker_notes.get("driver_requirements"):
+            lines.append(f"🪪 Driver reqs: {', '.join(broker_notes['driver_requirements'])}")
+        if broker_notes.get("detention_terms"):
+            lines.append(f"⏳ Detention: {broker_notes['detention_terms']}")
+        if broker_notes.get("layover_terms"):
+            lines.append(f"🛌 Layover: {broker_notes['layover_terms']}")
+        if broker_notes.get("accessorials"):
+            lines.append(f"💵 Accessorials: {', '.join(broker_notes['accessorials'])}")
+        if broker_notes.get("hidden_constraints"):
+            lines.append(f"🔎 Hidden: {', '.join(broker_notes['hidden_constraints'])}")
+        if broker_notes.get("risk_flags"):
+            lines.append("⚠️ Note risks: " + "; ".join(broker_notes["risk_flags"]))
+
+    if freight_fit and (freight_fit.get("issues") or freight_fit.get("warnings")):
+        for _iss in freight_fit["issues"]:
+            lines.append(f"⛔ {_iss}")
+        for _warn in freight_fit["warnings"]:
+            lines.append(f"⚠️ {_warn}")
 
     broker_name    = _find(r"Broker\s*Name\s*:?\s*([^\n]+)", t)
     broker_company = _find(r"Broker\s*Company\s*:?\s*([^\n]+)", t)
@@ -2022,6 +2095,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "broker_name":          broker_name or "",
                 "broker_email":         broker_email_addr,
                 "bid_recommendation":   bid_recommendation,
+                "broker_notes":         broker_notes,     # ← NEW
+                "freight_fit":          freight_fit,      # ← NEW
                 "load_decision":        load_decision,        # ← NEW   # ← NEW
             }
 
