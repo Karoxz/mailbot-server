@@ -4,4 +4,12 @@ token.json
 license_cache.json
 *.db
 driver_config.json
-plutus_config.json
+plutus_config.jsongeo_cache.json
+route_cache.json
+maps_verify_cache.json
+licenses.db
+bid_history.db
+__pycache__/
+*.pyc
+venv/
+licenses.db
