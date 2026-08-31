@@ -125,6 +125,10 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
     my_rates    = [t for t in turns if t["is_from_me"] and t["rate"] is not None]
     their_turns = [t for t in turns if not t["is_from_me"]]
 
+    _from_me_count = sum(1 for t in turns if t["is_from_me"])
+    print(f"[THREAD-LEARNER] thread={thread_id} messages={len(turns)} "
+          f"from_me={_from_me_count} rates_found={len(my_rates)}", flush=True)
+
     if not my_rates:
         # Nothing to learn from — you never quoted a number in this thread.
         bid_history.mark_thread_processed(thread_id, len(messages))
