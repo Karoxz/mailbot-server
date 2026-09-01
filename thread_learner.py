@@ -154,13 +154,23 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
     # ── Determine outcome ────────────────────────────────────────────
     outcome, outcome_source, outcome_note = None, None, None
 
-    for t in reversed(their_turns):
-        result = reply_classifier.classify_broker_reply(t["subject"], t["body"])
-        if result["status"] != "no_signal" and result["confidence"] >= 0.55:
-            outcome = result["status"]
-            outcome_source = "broker_reply"
-            outcome_note = result["reason"]
-            break
+    # A Rate Confirmation (Gmail label "RC") is definitive proof the load
+    # was won, at whatever rate is in this thread — short-circuit past
+    # the reply_classifier LLM call entirely rather than inferring from
+    # reply tone, which is both cheaper and more trustworthy.
+    if any("RC" in m.get("label_ids", []) for m in messages):
+        outcome = "won"
+        outcome_source = "rc_label"
+        outcome_note = "Thread carries the RC (Rate Confirmation) Gmail label"
+
+    if not outcome:
+        for t in reversed(their_turns):
+            result = reply_classifier.classify_broker_reply(t["subject"], t["body"])
+            if result["status"] != "no_signal" and result["confidence"] >= 0.55:
+                outcome = result["status"]
+                outcome_source = "broker_reply"
+                outcome_note = result["reason"]
+                break
 
     if outcome is None:
         last_msg = turns[-1]

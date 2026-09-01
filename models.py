@@ -87,6 +87,7 @@ class ThreadMessageIn(BaseModel):
     is_from_me: bool
     subject:    str = ""
     body:       str = ""
+    label_ids:  List[str] = []
 
 
 class BackfillThreadRequest(BaseModel):
