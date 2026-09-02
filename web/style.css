@@ -39,7 +39,13 @@ html, body {
 }
 
 .screen { min-height: 100vh; }
-.screen[hidden] { display: none; }
+/* !important is deliberate: [hidden] must always win over any other
+   display rule (including #login-screen's own `display:flex` below —
+   an ID selector, which otherwise beats this class+attribute selector
+   on specificity alone regardless of source order). This was the
+   actual root cause of a real bug: hidden was toggling correctly in
+   the DOM the whole time, screens just never visually changed. */
+[hidden] { display: none !important; }
 
 /* ── Login ──────────────────────────────────────────────── */
 #login-screen {
