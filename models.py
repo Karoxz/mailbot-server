@@ -101,3 +101,46 @@ class BackfillThreadRequest(BaseModel):
 # ── Web dashboard — license-key-only auth, no machine binding ──────────
 class WebLoginRequest(BaseModel):
     license_key: str
+
+
+class WebTruckIn(BaseModel):
+    license_key:     str
+    vehicle:         str
+    driver_name:     str
+    zip_location:    str
+    dimensions:      str = ""
+    max_payload_lbs: Optional[int] = None
+    equipment:       str = ""
+    allowed_states:  Optional[List[str]] = None
+    pickup_date:     str = ""
+
+
+class WebTruckUpdate(BaseModel):
+    license_key:     str
+    vehicle:         Optional[str] = None
+    driver_name:     Optional[str] = None
+    zip_location:    Optional[str] = None
+    dimensions:      Optional[str] = None
+    max_payload_lbs: Optional[int] = None
+    equipment:       Optional[str] = None
+    allowed_states:  Optional[List[str]] = None
+    pickup_date:     Optional[str] = None
+    active:          Optional[bool] = None
+
+
+class WebBlacklistRequest(BaseModel):
+    license_key:  str
+    broker_email: str
+    broker_name:  str = ""
+    note:         str = ""
+
+
+class WebRecordBidRequest(BaseModel):
+    license_key: str
+    order_id:    str
+    method:      str   # "pc" | "phone" | "draft"
+
+
+class WebBidTemplateRequest(BaseModel):
+    license_key: str
+    template:    str

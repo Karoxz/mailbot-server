@@ -450,6 +450,22 @@ def broker_summary(broker_email: str) -> dict:
     }
 
 
+def list_all_brokers() -> list:
+    """Every distinct broker_email that's ever appeared on a bid, with
+    the same summary shape as broker_summary() — for the web
+    dashboard's Brokers page. Skips blank broker_email (a lot of
+    gmail_backfill rows never captured one)."""
+    conn = _connect()
+    try:
+        emails = [r[0] for r in conn.execute(
+            "SELECT DISTINCT broker_email FROM bids "
+            "WHERE broker_email IS NOT NULL AND broker_email != ''"
+        ).fetchall()]
+    finally:
+        conn.close()
+    return [broker_summary(email) for email in emails]
+
+
 # =============================================================
 # BID RECOMMENDATION  (foundation for the bidding/decision engine)
 # =============================================================

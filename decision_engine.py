@@ -21,6 +21,7 @@
 from typing import Any, Dict, List, Optional
 
 import bid_history
+import fleet_store
 
 # Decisions ordered from most to least favorable — used only for the
 # "never better than Negotiate for an unknown broker" override below.
@@ -129,6 +130,19 @@ def get_load_decision(broker_email: str = "",
         -1 <  score <  3     -> Bid
         score >= 3           -> Accept
     """
+    # ── Blacklist override ──────────────────────────────────────────
+    # A dispatcher-blacklisted broker is an absolute business rule, not
+    # a signal to weigh against others — short-circuits everything else
+    # below with maximum confidence, before any scoring happens.
+    if broker_email and fleet_store.is_broker_blacklisted(broker_email):
+        return {
+            "decision":     "Reject",
+            "confidence":   0.95,
+            "score":        -999,
+            "reasons":      [f"Broker {broker_email} is blacklisted"],
+            "broker_known": True,
+        }
+
     score = 0
     reasons: List[str] = []
 

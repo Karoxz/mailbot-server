@@ -13,14 +13,17 @@ from fastapi.staticfiles import StaticFiles
 from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest,
                      RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
                      ThreadLearningToggleRequest, BackfillThreadRequest,
-                     WebLoginRequest)
+                     WebLoginRequest, WebTruckIn, WebTruckUpdate, WebBlacklistRequest,
+                     WebRecordBidRequest, WebBidTemplateRequest)
 import thread_learner
 import license_db
 from license_db import init_db, validate_license, activate_license, heartbeat, \
     validate_license_key_only
+import parser_core
 from parser_core import parse_email_for_api, LOAD_STORE, LOAD_STORE_LOCK
 import bid_history
 import reply_classifier
+import fleet_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -55,6 +58,7 @@ async def lifespan(app):
     init_db()
     bid_history.init_db()
     bid_history.init_processed_threads_table()
+    fleet_store.init_db()
     logger.info("Database initialized")
     yield
 
@@ -344,6 +348,160 @@ def web_stats(license_key: str):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     return {"success": True, **bid_history.overall_summary()}
+
+
+# =============================================================
+# WEB DASHBOARD API — Phase W, slice 2: fleet management, broker
+# blacklist, bid actions, bid template. All still license-key-only
+# auth (validate_license_key_only), same reasoning as slice 1 above.
+# =============================================================
+
+@app.get("/api/web/trucks")
+def web_list_trucks(license_key: str, include_inactive: bool = False):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "items": fleet_store.list_trucks(active_only=not include_inactive)}
+
+
+@app.post("/api/web/trucks")
+def web_add_truck(req: WebTruckIn):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    truck_id = fleet_store.add_truck(
+        vehicle=req.vehicle, driver_name=req.driver_name, zip_location=req.zip_location,
+        dimensions=req.dimensions, max_payload_lbs=req.max_payload_lbs,
+        equipment=req.equipment, allowed_states=req.allowed_states,
+        pickup_date=req.pickup_date,
+    )
+    return {"success": True, "truck_id": truck_id}
+
+
+@app.patch("/api/web/trucks/{truck_id}")
+def web_update_truck(truck_id: int, req: WebTruckUpdate):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    fields = req.dict(exclude={"license_key"}, exclude_none=True)
+    updated = fleet_store.update_truck(truck_id, **fields)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Truck not found or nothing to update")
+    return {"success": True}
+
+
+@app.delete("/api/web/trucks/{truck_id}")
+def web_delete_truck(truck_id: int, license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    deleted = fleet_store.delete_truck(truck_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Truck not found")
+    return {"success": True}
+
+
+@app.get("/api/web/brokers")
+def web_list_brokers(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    blacklisted = {b["broker_email"] for b in fleet_store.list_blacklisted_brokers()}
+    brokers = bid_history.list_all_brokers()
+    for b in brokers:
+        b["blacklisted"] = b["broker_email"] in blacklisted
+    brokers.sort(key=lambda b: b["total_bids"], reverse=True)
+    return {"success": True, "items": brokers}
+
+
+@app.post("/api/web/brokers/blacklist")
+def web_blacklist_broker(req: WebBlacklistRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    fleet_store.blacklist_broker(req.broker_email, req.broker_name, req.note)
+    logger.info(f"[WEB] blacklisted broker: {req.broker_email}")
+    return {"success": True}
+
+
+@app.delete("/api/web/brokers/blacklist/{broker_email}")
+def web_unblacklist_broker(broker_email: str, license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    fleet_store.unblacklist_broker(broker_email)
+    logger.info(f"[WEB] un-blacklisted broker: {broker_email}")
+    return {"success": True}
+
+
+@app.post("/api/web/record_bid")
+def web_record_bid(req: WebRecordBidRequest):
+    """
+    The web equivalent of the desktop's BID PC / BID PHONE / DRAFT
+    buttons — records that the dispatcher acted on a load, using the
+    SAME bid_history.record_bid() function the desktop client's
+    _record_bid() calls, with the same field mapping. Looks the load
+    up from parser_core's LOAD_STORE (server-side already, no need to
+    round-trip load data through the browser) so this only needs an
+    order_id + which action was taken.
+    """
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    if req.method not in ("pc", "phone", "draft"):
+        raise HTTPException(status_code=400, detail="method must be pc, phone, or draft")
+
+    with LOAD_STORE_LOCK:
+        load = LOAD_STORE.get(req.order_id)
+    if not load:
+        raise HTTPException(status_code=404, detail="Order not found in the current live feed")
+
+    thread_id = (load.get("original_msg_full") or {}).get("threadId", "")
+    maps_v = load.get("maps_verification") or {}
+    bid_id = bid_history.record_bid(
+        order_id=req.order_id,
+        thread_id=thread_id,
+        bid_method=req.method,
+        vehicle_type=load.get("truck_type") or load.get("vehicle_required", ""),
+        driver_name=load.get("driver_name", ""),
+        pickup_loc=load.get("pickup_loc", ""),
+        delivery_loc=load.get("delivery_loc", ""),
+        broker_name=load.get("broker_name", ""),
+        broker_email=load.get("broker_email", ""),
+        deadhead_miles=load.get("google_deadhead"),
+        verified_miles=maps_v.get("verified_miles"),
+        verified_source=maps_v.get("verified_source"),
+    )
+    logger.info(f"[WEB] recorded bid: order={req.order_id} method={req.method} bid_id={bid_id}")
+    return {"success": True, "bid_id": bid_id}
+
+
+@app.get("/api/web/bid_template")
+def web_get_bid_template(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    with parser_core.BID_TEMPLATE_LOCK:
+        return {"success": True, "template": parser_core.BID_TEMPLATE}
+
+
+@app.post("/api/web/bid_template")
+def web_set_bid_template(req: WebBidTemplateRequest):
+    """
+    NOTE: this sets the SERVER's fallback default template
+    (parser_core.BID_TEMPLATE), used only when a client's /api/parse
+    call doesn't include its own bid_template. The desktop app always
+    sends its own locally-configured template on every parse call, so
+    editing this here does NOT change what the desktop actually uses
+    day to day — the UI should say so, not imply otherwise.
+    """
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    with parser_core.BID_TEMPLATE_LOCK:
+        parser_core.BID_TEMPLATE = req.template
+    logger.info("[WEB] bid template updated (server-side default)")
+    return {"success": True}
 
 
 # Static frontend — mounted LAST and at a sub-path so it can never
