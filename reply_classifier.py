@@ -22,6 +22,7 @@
 
 import os
 import json
+import time
 from typing import Any, Dict, Optional
 
 _GEMINI_KEY_WARNED = False
@@ -79,6 +80,14 @@ def classify_broker_reply(subject: str, body: str) -> Dict[str, Any]:
     Returns {"status", "confidence", "reason", "counter_rate"}.
     Never raises — any failure degrades to a 'no_signal' result so the
     caller can safely leave the bid's status untouched.
+
+    Throttled + retried the same way as thread_learner's rate
+    extraction: a bulk backfill calls this once per broker message
+    across many threads with no other pacing, so without this a run
+    at volume hits the free-tier rate limit and every call silently
+    degrades to "no_signal" — indistinguishable from a genuinely
+    ambiguous reply, and able to mask a real "won" outcome as quota
+    exhaustion rather than actual signal.
     """
     client = _get_gemini_client()
     if not client:
@@ -88,25 +97,32 @@ def classify_broker_reply(subject: str, body: str) -> Dict[str, Any]:
     # pathologically long thread from ballooning the request.
     trimmed_body = (body or "")[:4000]
 
-    try:
-        from google.genai import types
-        resp = client.models.generate_content(
-            model=_CLASSIFY_MODEL,
-            contents=f"Subject: {subject or '(no subject)'}\n\nBody:\n{trimmed_body}",
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_schema=_RESPONSE_SCHEMA,
-                max_output_tokens=200,
-            ),
-        )
-        # resp.text is Optional[str] — None if Gemini returned no text
-        # part (e.g. safety-blocked). "" fails json.loads cleanly and
-        # falls into the except below, same fail-soft path either way.
-        data = json.loads(resp.text or "")
-    except Exception as e:
-        print(f"[CLASSIFY] error: {e}", flush=True)
-        return _no_signal(f"classifier error: {e}")
+    time.sleep(4.5)  # ~13/min, safely under the 15/min free-tier cap
+    for attempt in range(2):
+        try:
+            from google.genai import types
+            resp = client.models.generate_content(
+                model=_CLASSIFY_MODEL,
+                contents=f"Subject: {subject or '(no subject)'}\n\nBody:\n{trimmed_body}",
+                config=types.GenerateContentConfig(
+                    system_instruction=_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=_RESPONSE_SCHEMA,
+                    max_output_tokens=200,
+                ),
+            )
+            # resp.text is Optional[str] — None if Gemini returned no text
+            # part (e.g. safety-blocked). "" fails json.loads cleanly and
+            # falls into the except below, same fail-soft path either way.
+            data = json.loads(resp.text or "")
+            break
+        except Exception as e:
+            if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt == 0:
+                print("[CLASSIFY] rate limited, waiting 10s and retrying once...", flush=True)
+                time.sleep(10)
+                continue
+            print(f"[CLASSIFY] error: {e}", flush=True)
+            return _no_signal(f"classifier error: {e}")
 
     status = data.get("status")
     if status not in ("won", "lost", "countered", "no_signal"):
