@@ -3,14 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MailBot Login</title>
+<title>Plutus Bot — Login</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/plutus_logo.jpg">
 </head>
 <body>
 
 <section class="screen" style="display:flex;align-items:center;justify-content:center;padding:24px;">
   <form id="login-form" class="login-card" onsubmit="return false;">
-    <h1>MailBot</h1>
+    <div class="login-brand">
+      <img src="assets/plutus_logo.jpg" alt="" class="login-logo">
+      <h1>Plutus Bot</h1>
+    </div>
     <p class="subtitle">Enter your license key to view your dashboard.</p>
     <input id="login-key" type="text" placeholder="License key" autocomplete="off" autofocus required>
     <button type="submit">Log in</button>

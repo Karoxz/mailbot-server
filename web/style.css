@@ -16,9 +16,9 @@
 }
 
 [data-theme="dark"] {
-  --bg:        #14161c;
-  --bg-panel:  #1b1e26;
-  --bg-card:   #21242e;
+  --bg:        #000000;
+  --bg-panel:  #0d0d0f;
+  --bg-card:   #17171a;
   --border:    #2c303c;
   --text:      #e8e9ed;
   --text-dim:  #8b8f9c;
@@ -63,7 +63,9 @@ html, body {
   padding: 32px 28px;
   box-shadow: var(--shadow);
 }
-.login-card h1 { font-size: 1.6rem; margin-bottom: 4px; }
+.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.login-logo { width: 44px; height: 44px; border-radius: 10px; object-fit: cover; }
+.login-card h1 { font-size: 1.6rem; }
 .login-card .subtitle { color: var(--text-dim); font-size: .9rem; margin-bottom: 20px; }
 .login-card input {
   width: 100%;
@@ -113,7 +115,18 @@ html, body {
   top: 0;
   z-index: 10;
 }
-.brand { font-weight: 700; font-size: 1.05rem; letter-spacing: .2px; margin-right: 28px; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: .2px;
+  margin-right: 28px;
+  color: var(--text);
+  text-decoration: none;
+}
+.brand-logo { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
 .topnav { display: flex; align-items: center; gap: 4px; flex: 1; overflow-x: auto; }

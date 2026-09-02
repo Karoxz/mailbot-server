@@ -20,7 +20,7 @@
         "word-break:break-word;";
       document.body.prepend(banner);
     }
-    banner.textContent = "MailBot error: " + msg;
+    banner.textContent = "Plutus Bot error: " + msg;
   }
   window.addEventListener("error", (e) =>
     showFatalError(`${e.message} (${e.filename}:${e.lineno})`));
@@ -167,7 +167,10 @@
       return `<a href="${item.href}"${active}>${item.label}</a>`;
     }).join("");
     mount.innerHTML = `
-      <div class="brand">MailBot</div>
+      <a href="index.html" class="brand">
+        <img src="assets/plutus_logo.jpg" alt="" class="brand-logo">
+        Plutus Bot
+      </a>
       <nav class="topnav">${links}</nav>
       <div class="topbar-actions">
         <span id="conn-dot" class="dot" title="Connection status"></span>
