@@ -161,27 +161,38 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
                 f'{m.get("subject", "")}\n{m.get("body", "")}')
         candidates.extend(sorted(found_elsewhere - set(candidates)))
 
-        matched_bid = None
+        matched_bids = []
         matched_candidate = None
         for cand in candidates:
+            # Same order number can carry multiple bid rows across
+            # separate Gmail threads (a load re-quoted, or the
+            # conversation splitting across threads) — upgrade every
+            # unresolved one for the first candidate that matches
+            # anything, not just the single most-recent row, so a win
+            # doesn't leave sibling rows for the same order stuck as
+            # stale "lost" data that would otherwise poison win-rate
+            # analytics for that broker/lane.
             unresolved = [b for b in bid_history.get_bids_for_order(cand)
                           if b["status"] != "won"]
             if unresolved:
-                matched_bid, matched_candidate = unresolved[0], cand
+                matched_bids, matched_candidate = unresolved, cand
                 break
 
-        if matched_bid:
-            bid_history.update_bid_outcome(
-                matched_bid["id"], "won", outcome_source="rc_label",
-                outcome_note=f"Correlated via RC-labeled thread {thread_id} "
-                             f"(order match: {matched_candidate})",
-            )
+        if matched_bids:
+            upgraded_ids = []
+            for b in matched_bids:
+                bid_history.update_bid_outcome(
+                    b["id"], "won", outcome_source="rc_label",
+                    outcome_note=f"Correlated via RC-labeled thread {thread_id} "
+                                 f"(order match: {matched_candidate})",
+                )
+                upgraded_ids.append(b["id"])
             bid_history.mark_thread_processed(thread_id, len(messages))
             print(f"[THREAD-LEARNER] RC thread={thread_id} matched order="
-                  f"{matched_candidate} -> upgraded bid id={matched_bid['id']} to won",
+                  f"{matched_candidate} -> upgraded bid ids={upgraded_ids} to won",
                   flush=True)
             return {"processed": True, "wrote_bid": False,
-                    "upgraded_bid_id": matched_bid["id"],
+                    "upgraded_bid_ids": upgraded_ids,
                     "order_id": matched_candidate, "outcome": "won",
                     "outcome_source": "rc_label"}
 
