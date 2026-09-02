@@ -8,89 +8,133 @@
 </head>
 <body>
 
-<!-- ── Login screen ─────────────────────────────────────────── -->
-<section id="login-screen" class="screen">
-  <form id="login-form" class="login-card" onsubmit="return false;">
-    <h1>MailBot</h1>
-    <p class="subtitle">Enter your license key to view your dashboard.</p>
-    <input id="login-key" type="text" placeholder="License key" autocomplete="off" autofocus required>
-    <button type="submit">Log in</button>
-    <p id="login-error" class="error" hidden></p>
-    <p id="login-debug" style="font:11px monospace;color:#888;margin-top:14px;white-space:pre-wrap;"></p>
-  </form>
-</section>
+<header id="app-nav" class="topbar"></header>
 
-<!-- ── Dashboard ─────────────────────────────────────────────── -->
-<section id="dashboard-screen" class="screen" hidden>
-  <header class="topbar">
-    <div class="brand">MailBot</div>
-    <div class="topbar-actions">
-      <span id="conn-dot" class="dot" title="Connection status"></span>
-      <button id="theme-toggle" class="icon-btn" title="Toggle theme" type="button">🌙</button>
-      <button id="logout-btn" class="icon-btn" title="Log out" type="button">⎋</button>
+<main class="content">
+  <section class="stats-row" aria-label="Summary stats">
+    <div class="stat-card">
+      <div class="stat-value" id="stat-total">—</div>
+      <div class="stat-label">Total bids</div>
     </div>
-  </header>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-winrate">—</div>
+      <div class="stat-label">Win rate</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-rate">—</div>
+      <div class="stat-label">Avg $/mile</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-pending">—</div>
+      <div class="stat-label">Pending</div>
+    </div>
+  </section>
 
-  <main class="content">
-    <!-- Stats -->
-    <section class="stats-row" aria-label="Summary stats">
-      <div class="stat-card">
-        <div class="stat-value" id="stat-total">—</div>
-        <div class="stat-label">Total bids</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-winrate">—</div>
-        <div class="stat-label">Win rate</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-rate">—</div>
-        <div class="stat-label">Avg $/mile</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-pending">—</div>
-        <div class="stat-label">Pending</div>
-      </div>
-    </section>
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Live feed</h2>
+      <span class="panel-hint"><a href="loads.html">See all &amp; take action →</a></span>
+    </div>
+    <div id="feed-list" class="feed-list">
+      <p class="empty-note">No matched loads yet.</p>
+    </div>
+  </section>
 
-    <!-- Live feed -->
-    <section class="panel">
-      <div class="panel-header">
-        <h2>Live feed</h2>
-        <span class="panel-hint">Recently matched loads · auto-refreshing</span>
-      </div>
-      <div id="feed-list" class="feed-list">
-        <p class="empty-note">No matched loads yet.</p>
-      </div>
-    </section>
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Bid history</h2>
+      <span class="panel-hint">Most recent bids</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Order</th><th>Lane</th><th>Vehicle</th><th>Rate</th><th>$/mi</th><th>Status</th><th>When</th></tr>
+        </thead>
+        <tbody id="bid-table-body">
+          <tr><td colspan="7" class="empty-note">No bids yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
 
-    <!-- Bid history -->
-    <section class="panel">
-      <div class="panel-header">
-        <h2>Bid history</h2>
-        <span class="panel-hint">Most recent bids</span>
-      </div>
-      <div class="table-scroll">
-        <table id="bid-table">
-          <thead>
-            <tr>
-              <th>Order</th>
-              <th>Lane</th>
-              <th>Vehicle</th>
-              <th>Rate</th>
-              <th>$/mi</th>
-              <th>Status</th>
-              <th>When</th>
-            </tr>
-          </thead>
-          <tbody id="bid-table-body">
-            <tr><td colspan="7" class="empty-note">No bids yet.</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </main>
-</section>
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("index.html");
 
-<script src="app.js"></script>
+function renderStats(stats) {
+  document.getElementById("stat-total").textContent = stats.total_bids ?? "—";
+  document.getElementById("stat-winrate").textContent = MB.fmtPct(stats.win_rate);
+  document.getElementById("stat-rate").textContent = MB.fmtRate(stats.avg_rate_per_mile);
+  document.getElementById("stat-pending").textContent = stats.pending ?? "—";
+}
+
+function renderFeed(items) {
+  const el = document.getElementById("feed-list");
+  if (!items || items.length === 0) {
+    el.innerHTML = '<p class="empty-note">No matched loads yet.</p>';
+    return;
+  }
+  el.innerHTML = items.slice(0, 8).map((it) => {
+    const decision = it.load_decision?.decision;
+    const decisionBadge = decision
+      ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}</span>`
+      : "";
+    const miles = it.google_deadhead != null ? `${it.google_deadhead}mi deadhead` : "";
+    const meta = [it.driver_name, miles].filter(Boolean).map(MB.esc).join(" · ");
+    return `
+      <div class="feed-card">
+        <div class="order">#${MB.esc(it.order)} <span style="color:var(--text-dim);font-weight:400;">${MB.esc(it.vehicle_required || "")}</span></div>
+        ${decisionBadge}
+        <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
+        ${meta ? `<div class="meta">${meta}</div>` : ""}
+      </div>`;
+  }).join("");
+}
+
+function renderBidHistory(items) {
+  const el = document.getElementById("bid-table-body");
+  if (!items || items.length === 0) {
+    el.innerHTML = '<tr><td colspan="7" class="empty-note">No bids yet.</td></tr>';
+    return;
+  }
+  el.innerHTML = items.map((b) => {
+    const status = (b.status || "pending").toLowerCase();
+    return `
+      <tr>
+        <td>#${MB.esc(b.order_id)}</td>
+        <td>${MB.esc(b.lane || "—")}</td>
+        <td>${MB.esc(b.vehicle_type || "—")}</td>
+        <td>${MB.fmtMoney(b.bid_amount)}</td>
+        <td>${MB.fmtRate(b.rate_per_mile)}</td>
+        <td><span class="status-pill status-${status}">${MB.esc(b.status || "pending")}</span></td>
+        <td>${MB.fmtWhen(b.created_at)}</td>
+      </tr>`;
+  }).join("");
+}
+
+async function refreshAll() {
+  try {
+    const [stats, feed, hist] = await Promise.all([
+      MB.apiGet("/api/web/stats"),
+      MB.apiGet("/api/web/feed", { limit: 30 }),
+      MB.apiGet("/api/web/bid_history", { limit: 15 }),
+    ]);
+    renderStats(stats);
+    renderFeed(feed.items);
+    renderBidHistory(hist.items);
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
 </body>
 </html>

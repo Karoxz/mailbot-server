@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Login</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<section class="screen" style="display:flex;align-items:center;justify-content:center;padding:24px;">
+  <form id="login-form" class="login-card" onsubmit="return false;">
+    <h1>MailBot</h1>
+    <p class="subtitle">Enter your license key to view your dashboard.</p>
+    <input id="login-key" type="text" placeholder="License key" autocomplete="off" autofocus required>
+    <button type="submit">Log in</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</section>
+
+<script src="common.js"></script>
+<script>
+const { getLicenseKey, setLicenseKey, apiPost, initTheme } = window.MailBot;
+initTheme();
+
+// Already logged in? Skip straight to the dashboard.
+if (getLicenseKey()) {
+  window.location.href = "index.html";
+}
+
+const form = document.getElementById("login-form");
+const keyInput = document.getElementById("login-key");
+const errorBox = document.getElementById("login-error");
+
+let inFlight = false;
+
+async function doLogin(key) {
+  if (inFlight) return;
+  inFlight = true;
+  errorBox.hidden = true;
+  const btn = form.querySelector("button");
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Logging in…";
+  try {
+    await apiPost("/api/web/login", { license_key: key });
+    setLicenseKey(key);
+    window.location.href = "index.html";
+  } catch (err) {
+    errorBox.textContent = err.message || "Login failed.";
+    errorBox.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    inFlight = false;
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = keyInput.value.trim();
+  if (key) doLogin(key);
+});
+</script>
+</body>
+</html>

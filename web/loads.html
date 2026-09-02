@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Loads</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Loads</h1>
+    <span class="hint">Recently matched loads · auto-refreshing · act on one with Bid PC / Phone / Draft</span>
+  </div>
+
+  <section class="panel">
+    <div id="loads-list" class="feed-list">
+      <p class="empty-note">No matched loads yet.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("loads.html");
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+async function recordBid(orderId, method, btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const result = await MB.apiPost("/api/web/record_bid", { order_id: orderId, method });
+    showToast(`Recorded ${method.toUpperCase()} bid for #${orderId} (bid #${result.bid_id})`);
+    // Mark this load's card as "recorded" so a re-click isn't ambiguous.
+    btn.closest(".feed-card").querySelectorAll("button").forEach((b) => {
+      b.disabled = true;
+    });
+    btn.textContent = "✓ Recorded";
+  } catch (err) {
+    showToast(err.message || "Failed to record bid", true);
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+function renderLoads(items) {
+  const el = document.getElementById("loads-list");
+  if (!items || items.length === 0) {
+    el.innerHTML = '<p class="empty-note">No matched loads yet.</p>';
+    return;
+  }
+  el.innerHTML = items.map((it) => {
+    const decision = it.load_decision?.decision;
+    const decisionBadge = decision
+      ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}
+           ${it.load_decision.confidence != null ? `(${Math.round(it.load_decision.confidence * 100)}%)` : ""}</span>`
+      : "";
+    const miles = it.google_deadhead != null ? `${it.google_deadhead}mi deadhead` : "";
+    const eta = it.deadhead_eta_minutes != null ? `${Math.round(it.deadhead_eta_minutes / 60)}h ETA` : "";
+    const suggested = it.bid_recommendation?.suggested_amount
+      ? `Suggested ${MB.fmtMoney(it.bid_recommendation.suggested_amount)} (${it.bid_recommendation.basis})`
+      : "";
+    const broker = it.broker_name || it.broker_email
+      ? `Broker: ${MB.esc(it.broker_name || it.broker_email)}`
+      : "";
+    const meta = [it.driver_name, miles, eta, suggested, broker].filter(Boolean).map(MB.esc).join(" · ");
+    const reasons = (it.load_decision?.reasons || []).slice(0, 3)
+      .map((r) => `<div class="meta">• ${MB.esc(r)}</div>`).join("");
+    const orderId = MB.esc(it.order || "");
+
+    return `
+      <div class="feed-card">
+        <div class="order">#${orderId} <span style="color:var(--text-dim);font-weight:400;">${MB.esc(it.vehicle_required || "")}</span></div>
+        ${decisionBadge}
+        <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
+        ${meta ? `<div class="meta">${meta}</div>` : ""}
+        ${reasons}
+        <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
+          <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc">Bid PC</button>
+          <button class="btn btn-sm" data-order="${orderId}" data-method="phone">Bid Phone</button>
+          <button class="btn btn-sm" data-order="${orderId}" data-method="draft">Draft</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.querySelectorAll("button[data-order]").forEach((btn) => {
+    btn.addEventListener("click", () =>
+      recordBid(btn.dataset.order, btn.dataset.method, btn));
+  });
+}
+
+async function refresh() {
+  try {
+    const feed = await MB.apiGet("/api/web/feed", { limit: 50 });
+    renderLoads(feed.items);
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

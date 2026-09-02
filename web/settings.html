@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Settings</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Settings</h1>
+  </div>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Thread learning</h2>
+      <span class="panel-hint">Passively reads Gmail threads to backfill bid outcomes — no auto-response, nothing sent on your behalf.</span>
+    </div>
+    <div class="form-actions" style="padding:16px 18px;align-items:center;">
+      <span id="tl-status" style="font-weight:600;">Loading…</span>
+      <button id="tl-toggle" class="btn btn-primary" type="button" disabled>…</button>
+    </div>
+    <p class="note-text">The actual backfill run (pulling and processing Gmail threads) still happens from the desktop app — it needs the Gmail OAuth connection the desktop already has. This toggle controls whether the server accepts backfill requests at all.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Bid template</h2>
+      <span class="panel-hint">Server-side default template</span>
+    </div>
+    <form id="template-form" style="padding:16px 18px;">
+      <textarea id="template-text" rows="12" style="width:100%;font-family:monospace;font-size:.85rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
+      <div class="form-actions" style="padding:14px 0 0;">
+        <button type="submit" class="btn btn-primary">Save template</button>
+      </div>
+    </form>
+    <p class="note-text">⚠️ This is the server's <em>fallback</em> template — the desktop app always sends its own locally-configured template with every load it parses, so editing this here does <strong>not</strong> change what the desktop actually uses day-to-day. It only applies when a caller doesn't supply its own.</p>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("settings.html");
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+// ── Thread learning toggle ──────────────────────────────────────────
+const tlStatus = document.getElementById("tl-status");
+const tlToggle = document.getElementById("tl-toggle");
+let tlEnabled = false;
+
+function renderTlState() {
+  tlStatus.textContent = tlEnabled ? "🧠 ON" : "🧠 OFF";
+  tlStatus.style.color = tlEnabled ? "var(--good)" : "var(--text-dim)";
+  tlToggle.textContent = tlEnabled ? "Turn off" : "Turn on";
+  tlToggle.className = tlEnabled ? "btn btn-danger" : "btn btn-primary";
+  tlToggle.disabled = false;
+}
+
+async function loadTlStatus() {
+  try {
+    const res = await MB.apiGet("/api/web/thread_learning/status");
+    tlEnabled = !!res.enabled;
+    renderTlState();
+    MB.setConn(true);
+  } catch (err) {
+    tlStatus.textContent = "Error loading status";
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+tlToggle.addEventListener("click", async () => {
+  tlToggle.disabled = true;
+  const endpoint = tlEnabled ? "/api/web/thread_learning/disable" : "/api/web/thread_learning/enable";
+  try {
+    const res = await MB.apiPost(endpoint, {});
+    tlEnabled = !!res.enabled;
+    renderTlState();
+    showToast(tlEnabled ? "Thread learning enabled" : "Thread learning disabled");
+  } catch (err) {
+    showToast(err.message || "Failed to update", true);
+    tlToggle.disabled = false;
+  }
+});
+
+loadTlStatus();
+
+// ── Bid template ─────────────────────────────────────────────────
+const templateForm = document.getElementById("template-form");
+const templateText = document.getElementById("template-text");
+
+async function loadTemplate() {
+  try {
+    const res = await MB.apiGet("/api/web/bid_template");
+    templateText.value = res.template || "";
+  } catch (err) {
+    showToast(err.message || "Failed to load template", true);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+templateForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = templateForm.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    await MB.apiPost("/api/web/bid_template", { template: templateText.value });
+    showToast("Template saved");
+  } catch (err) {
+    showToast(err.message || "Failed to save template", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+loadTemplate();
+</script>
+</body>
+</html>

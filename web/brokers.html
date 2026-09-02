@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Brokers</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Brokers</h1>
+    <span class="hint">Blacklisting a broker makes every future load from them auto-Reject in the decision engine.</span>
+  </div>
+
+  <section class="panel">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Broker</th><th>Bids</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Avg $/mi</th><th></th></tr>
+        </thead>
+        <tbody id="brokers-body">
+          <tr><td colspan="7" class="empty-note">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("brokers.html");
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+async function toggleBlacklist(email, currentlyBlacklisted, btn) {
+  btn.disabled = true;
+  try {
+    if (currentlyBlacklisted) {
+      await MB.apiDelete(`/api/web/brokers/blacklist/${encodeURIComponent(email)}`);
+      showToast(`${email} removed from blacklist`);
+    } else {
+      const note = prompt(`Blacklist ${email}? Optional note (why):`, "");
+      if (note === null) { btn.disabled = false; return; } // cancelled
+      await MB.apiPost("/api/web/brokers/blacklist", { broker_email: email, note: note || "" });
+      showToast(`${email} blacklisted`);
+    }
+    loadBrokers();
+  } catch (err) {
+    showToast(err.message || "Failed to update blacklist", true);
+    btn.disabled = false;
+  }
+}
+
+function renderBrokers(items) {
+  const body = document.getElementById("brokers-body");
+  if (!items || items.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="empty-note">No broker data yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = items.map((b) => {
+    const blacklisted = !!b.blacklisted;
+    return `
+    <tr${blacklisted ? ' style="opacity:.6;"' : ""}>
+      <td>${MB.esc(b.broker_email)}${blacklisted ? ' <span class="badge decision-reject">Blacklisted</span>' : ""}</td>
+      <td>${b.total_bids}</td>
+      <td>${b.won}</td>
+      <td>${b.lost}</td>
+      <td>${MB.fmtPct(b.win_rate)}</td>
+      <td>${MB.fmtRate(b.avg_rate_per_mile)}</td>
+      <td>
+        <button class="btn btn-sm ${blacklisted ? "" : "btn-danger"}"
+                data-email="${MB.esc(b.broker_email)}" data-blacklisted="${blacklisted}">
+          ${blacklisted ? "Un-blacklist" : "Blacklist"}
+        </button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  body.querySelectorAll("button[data-email]").forEach((btn) => {
+    btn.addEventListener("click", () =>
+      toggleBlacklist(btn.dataset.email, btn.dataset.blacklisted === "true", btn));
+  });
+}
+
+async function loadBrokers() {
+  try {
+    const res = await MB.apiGet("/api/web/brokers");
+    renderBrokers(res.items);
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+loadBrokers();
+</script>
+</body>
+</html>

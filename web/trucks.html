@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Trucks</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Trucks</h1>
+    <button id="add-truck-btn" class="btn btn-primary" type="button">+ Add truck</button>
+  </div>
+
+  <section class="panel" id="add-truck-panel" hidden>
+    <div class="panel-header"><h2>New truck</h2></div>
+    <form id="add-truck-form">
+      <div class="form-grid">
+        <div class="field"><label>Vehicle type *</label><input name="vehicle" required placeholder="e.g. LARGE STRAIGHT"></div>
+        <div class="field"><label>Driver name *</label><input name="driver_name" required></div>
+        <div class="field"><label>Zip location *</label><input name="zip_location" required></div>
+        <div class="field"><label>Dimensions</label><input name="dimensions" placeholder='e.g. 144x70x75'></div>
+        <div class="field"><label>Max payload (lbs)</label><input name="max_payload_lbs" type="number"></div>
+        <div class="field"><label>Equipment</label><input name="equipment" placeholder="e.g. E-Track, Sliding Door"></div>
+        <div class="field"><label>Allowed states (comma-separated)</label><input name="allowed_states" placeholder="e.g. CA, NV, AZ"></div>
+        <div class="field"><label>Pickup date</label><input name="pickup_date" placeholder="MM/DD/YYYY, optional"></div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save truck</button>
+        <button type="button" id="cancel-add-truck" class="btn">Cancel</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th></th></tr>
+        </thead>
+        <tbody id="trucks-body">
+          <tr><td colspan="8" class="empty-note">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("trucks.html");
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+const addBtn = document.getElementById("add-truck-btn");
+const addPanel = document.getElementById("add-truck-panel");
+const addForm = document.getElementById("add-truck-form");
+
+addBtn.addEventListener("click", () => { addPanel.hidden = false; addBtn.hidden = true; });
+document.getElementById("cancel-add-truck").addEventListener("click", () => {
+  addPanel.hidden = true; addBtn.hidden = false; addForm.reset();
+});
+
+addForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(addForm);
+  const allowedStatesRaw = (fd.get("allowed_states") || "").trim();
+  const payload = {
+    vehicle: fd.get("vehicle").trim(),
+    driver_name: fd.get("driver_name").trim(),
+    zip_location: fd.get("zip_location").trim(),
+    dimensions: (fd.get("dimensions") || "").trim(),
+    equipment: (fd.get("equipment") || "").trim(),
+    pickup_date: (fd.get("pickup_date") || "").trim(),
+    max_payload_lbs: fd.get("max_payload_lbs") ? Number(fd.get("max_payload_lbs")) : null,
+    allowed_states: allowedStatesRaw
+      ? allowedStatesRaw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
+      : null,
+  };
+  const btn = addForm.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    await MB.apiPost("/api/web/trucks", payload);
+    showToast("Truck added");
+    addForm.reset();
+    addPanel.hidden = true; addBtn.hidden = false;
+    loadTrucks();
+  } catch (err) {
+    showToast(err.message || "Failed to add truck", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function deleteTruck(id, driverName) {
+  if (!confirm(`Remove truck for ${driverName}? This can be re-added later if needed.`)) return;
+  try {
+    await MB.apiDelete(`/api/web/trucks/${id}`);
+    showToast("Truck removed");
+    loadTrucks();
+  } catch (err) {
+    showToast(err.message || "Failed to remove truck", true);
+  }
+}
+
+function renderTrucks(items) {
+  const body = document.getElementById("trucks-body");
+  if (!items || items.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
+    return;
+  }
+  body.innerHTML = items.map((t) => `
+    <tr>
+      <td>${MB.esc(t.driver_name)}</td>
+      <td>${MB.esc(t.vehicle)}</td>
+      <td>${MB.esc(t.zip_location)}</td>
+      <td>${MB.esc(t.dimensions || "—")}</td>
+      <td>${t.max_payload_lbs ? t.max_payload_lbs.toLocaleString() + " lbs" : "—"}</td>
+      <td>${MB.esc(t.equipment || "—")}</td>
+      <td>${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</td>
+      <td><div class="action-row">
+        <button class="btn btn-sm btn-danger" data-id="${t.id}" data-name="${MB.esc(t.driver_name)}">Remove</button>
+      </div></td>
+    </tr>`).join("");
+
+  body.querySelectorAll("button[data-id]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteTruck(btn.dataset.id, btn.dataset.name));
+  });
+}
+
+async function loadTrucks() {
+  try {
+    const res = await MB.apiGet("/api/web/trucks");
+    renderTrucks(res.items);
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+loadTrucks();
+</script>
+</body>
+</html>
