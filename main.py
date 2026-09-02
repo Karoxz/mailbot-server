@@ -476,6 +476,34 @@ def web_record_bid(req: WebRecordBidRequest):
     return {"success": True, "bid_id": bid_id}
 
 
+@app.get("/api/web/thread_learning/status")
+def web_thread_learning_status(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "enabled": license_db.get_thread_learning_enabled(license_key)}
+
+
+@app.post("/api/web/thread_learning/enable")
+def web_thread_learning_enable(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.set_thread_learning_enabled(req.license_key, True)
+    logger.info(f"[WEB] thread learning enabled for {req.license_key}")
+    return {"success": True, "enabled": True}
+
+
+@app.post("/api/web/thread_learning/disable")
+def web_thread_learning_disable(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.set_thread_learning_enabled(req.license_key, False)
+    logger.info(f"[WEB] thread learning disabled for {req.license_key}")
+    return {"success": True, "enabled": False}
+
+
 @app.get("/api/web/bid_template")
 def web_get_bid_template(license_key: str):
     check = validate_license_key_only(license_key)
