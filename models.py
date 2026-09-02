@@ -96,3 +96,8 @@ class BackfillThreadRequest(BaseModel):
     thread_id:   str
     order_id:    Optional[str] = None       # if the client already knows it
     messages:    List[ThreadMessageIn]
+
+
+# ── Web dashboard — license-key-only auth, no machine binding ──────────
+class WebLoginRequest(BaseModel):
+    license_key: str

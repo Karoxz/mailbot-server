@@ -87,6 +87,36 @@ def validate_license(key: str, machine_id: str) -> dict:
     return {'valid': True}
 
 
+def validate_license_key_only(key: str) -> dict:
+    """
+    Same checks as validate_license() (exists, active, not expired) but
+    WITHOUT the machine-binding check — for the web dashboard, where
+    "the machine" is whatever browser/device the dispatcher happens to
+    log in from, not a single bound install the way the desktop app is.
+    Deliberate v1 choice: anyone with the license key can view the web
+    dashboard from anywhere. Fine for a single-operator tool today;
+    real session/device-scoped auth is still an open question for a
+    multi-user version (see MAILBOT_ROADMAP.md, Phase W).
+    """
+    row = _get_row(key)
+    if not row:
+        return {'valid': False, 'reason': 'License not found'}
+
+    _, active, _, _, _, expires_at, _ = row
+
+    if not active:
+        return {'valid': False, 'reason': 'License revoked'}
+
+    if expires_at:
+        try:
+            if datetime.fromisoformat(expires_at) < datetime.now(timezone.utc):
+                return {'valid': False, 'reason': 'License expired'}
+        except Exception:
+            pass
+
+    return {'valid': True}
+
+
 def activate_license(key: str, machine_id: str, machine_name: str) -> dict:
     row = _get_row(key)
     if not row:

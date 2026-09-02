@@ -291,6 +291,58 @@ def get_pending_bids_for_thread(thread_id: str) -> list:
         conn.close()
 
 
+def get_recent_bids(limit: int = 50) -> list:
+    """Most recent bids across all orders — for the web dashboard's
+    bid-history table. Newest first."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            'SELECT * FROM bids ORDER BY created_at DESC LIMIT ?',
+            (limit,)
+        )
+        return [_row_to_dict(cur, r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def overall_summary() -> dict:
+    """Aggregate win-rate + volume across ALL bids — the web
+    dashboard's top-line stats cards. Mirrors broker_summary()'s shape
+    but with no WHERE clause; pending bids excluded from the win-rate
+    denominator since they haven't resolved yet, same as broker_summary."""
+    conn = _connect()
+    try:
+        cur = conn.execute('SELECT status, COUNT(*) FROM bids GROUP BY status')
+        counts = {status: n for status, n in cur.fetchall()}
+    finally:
+        conn.close()
+
+    won      = counts.get("won", 0)
+    lost     = counts.get("lost", 0)
+    pending  = counts.get("pending", 0)
+    resolved = won + lost + counts.get("countered", 0)
+    win_rate = round(won / resolved, 3) if resolved else None
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            'SELECT AVG(rate_per_mile), COUNT(*) FROM bids WHERE rate_per_mile IS NOT NULL'
+        ).fetchone()
+        avg_rate, rate_n = row
+    finally:
+        conn.close()
+
+    return {
+        "total_bids":       sum(counts.values()),
+        "won":              won,
+        "lost":             lost,
+        "pending":          pending,
+        "win_rate":         win_rate,
+        "avg_rate_per_mile": round(avg_rate, 3) if avg_rate else None,
+        "rate_sample_size": rate_n,
+    }
+
+
 def get_bids_for_order(order_id: str) -> list:
     conn = _connect()
     try:

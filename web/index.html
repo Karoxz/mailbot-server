@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailBot Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Login screen ─────────────────────────────────────────── -->
+<section id="login-screen" class="screen">
+  <form id="login-form" class="login-card">
+    <h1>MailBot</h1>
+    <p class="subtitle">Enter your license key to view your dashboard.</p>
+    <input id="login-key" type="text" placeholder="License key" autocomplete="off" autofocus required>
+    <button type="submit">Log in</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</section>
+
+<!-- ── Dashboard ─────────────────────────────────────────────── -->
+<section id="dashboard-screen" class="screen" hidden>
+  <header class="topbar">
+    <div class="brand">MailBot</div>
+    <div class="topbar-actions">
+      <span id="conn-dot" class="dot" title="Connection status"></span>
+      <button id="theme-toggle" class="icon-btn" title="Toggle theme" type="button">🌙</button>
+      <button id="logout-btn" class="icon-btn" title="Log out" type="button">⎋</button>
+    </div>
+  </header>
+
+  <main class="content">
+    <!-- Stats -->
+    <section class="stats-row" aria-label="Summary stats">
+      <div class="stat-card">
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-label">Total bids</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-winrate">—</div>
+        <div class="stat-label">Win rate</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-rate">—</div>
+        <div class="stat-label">Avg $/mile</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-pending">—</div>
+        <div class="stat-label">Pending</div>
+      </div>
+    </section>
+
+    <!-- Live feed -->
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Live feed</h2>
+        <span class="panel-hint">Recently matched loads · auto-refreshing</span>
+      </div>
+      <div id="feed-list" class="feed-list">
+        <p class="empty-note">No matched loads yet.</p>
+      </div>
+    </section>
+
+    <!-- Bid history -->
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Bid history</h2>
+        <span class="panel-hint">Most recent bids</span>
+      </div>
+      <div class="table-scroll">
+        <table id="bid-table">
+          <thead>
+            <tr>
+              <th>Order</th>
+              <th>Lane</th>
+              <th>Vehicle</th>
+              <th>Rate</th>
+              <th>$/mi</th>
+              <th>Status</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody id="bid-table-body">
+            <tr><td colspan="7" class="empty-note">No bids yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

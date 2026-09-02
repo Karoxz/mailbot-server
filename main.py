@@ -8,14 +8,17 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
 
 from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest,
                      RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
-                     ThreadLearningToggleRequest, BackfillThreadRequest)
+                     ThreadLearningToggleRequest, BackfillThreadRequest,
+                     WebLoginRequest)
 import thread_learner
 import license_db
-from license_db import init_db, validate_license, activate_license, heartbeat
-from parser_core import parse_email_for_api
+from license_db import init_db, validate_license, activate_license, heartbeat, \
+    validate_license_key_only
+from parser_core import parse_email_for_api, LOAD_STORE, LOAD_STORE_LOCK
 import bid_history
 import reply_classifier
 
@@ -284,3 +287,69 @@ def classify_reply(req: ClassifyReplyRequest):
                 f"(conf={result['confidence']}) bids={updated_ids}")
     return {"success": True, "matched": True, "updated": True,
             "bid_ids": updated_ids, "classification": result}
+
+
+# =============================================================
+# WEB DASHBOARD API  — read-only for now (Phase W, MVP slice 1)
+#
+# License-key-only auth (validate_license_key_only — no machine
+# binding, see that function's docstring for why). Every endpoint
+# re-validates on every call, same pattern as the rest of this file —
+# no session state kept server-side yet; the frontend just re-sends
+# the license key it already has (mirrors how the desktop client
+# works today, not a new auth model).
+# =============================================================
+
+@app.post("/api/web/login")
+def web_login(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True}
+
+
+@app.get("/api/web/feed")
+def web_feed(license_key: str, limit: int = 50):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    # LOAD_STORE only ever holds loads that got far enough to match a
+    # truck (see process_bid_email) — it's not a full "every email
+    # seen" log, and it's in-memory only (resets on server restart,
+    # not persisted, not scoped per-license — a known v1 limitation,
+    # fine while there's a single active dispatcher).
+    with LOAD_STORE_LOCK:
+        items = list(LOAD_STORE.values())
+    # LOAD_STORE is insertion-ordered (plain dict) — newest last.
+    items = items[-limit:][::-1]
+    # original_msg_full carries raw Gmail payload data — strip it,
+    # the frontend never needs it and it's not JSON-clean.
+    cleaned = [{k: v for k, v in item.items() if k != "original_msg_full"}
+               for item in items]
+    return {"success": True, "count": len(cleaned), "items": cleaned}
+
+
+@app.get("/api/web/bid_history")
+def web_bid_history(license_key: str, limit: int = 50):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "items": bid_history.get_recent_bids(limit=limit)}
+
+
+@app.get("/api/web/stats")
+def web_stats(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, **bid_history.overall_summary()}
+
+
+# Static frontend — mounted LAST and at a sub-path so it can never
+# shadow an API route above. Reachable at https://<domain>/app/
+# (Caddy already reverse-proxies everything to this server, so no
+# Caddy config change is needed for this to work.)
+_WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+if os.path.isdir(_WEB_DIR):
+    app.mount("/app", StaticFiles(directory=_WEB_DIR, html=True), name="web")
