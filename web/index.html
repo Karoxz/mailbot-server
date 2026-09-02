@@ -10,12 +10,13 @@
 
 <!-- ── Login screen ─────────────────────────────────────────── -->
 <section id="login-screen" class="screen">
-  <form id="login-form" class="login-card">
+  <form id="login-form" class="login-card" onsubmit="return false;">
     <h1>MailBot</h1>
     <p class="subtitle">Enter your license key to view your dashboard.</p>
     <input id="login-key" type="text" placeholder="License key" autocomplete="off" autofocus required>
     <button type="submit">Log in</button>
     <p id="login-error" class="error" hidden></p>
+    <p id="login-debug" style="font:11px monospace;color:#888;margin-top:14px;white-space:pre-wrap;"></p>
   </form>
 </section>
 

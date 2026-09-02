@@ -118,28 +118,68 @@ async function apiPost(path, body) {
 }
 
 // ── Login ──────────────────────────────────────────────────────────
-el.loginForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const key = el.loginKey.value.trim();
-  if (!key) return;
+// Temporary on-page debug timeline (visible under the button) — added
+// while diagnosing a report that clicking Log in visibly does nothing
+// in one specific environment we could not reproduce remotely despite
+// extensive testing. Safe to remove once that's resolved.
+function loginDebug(msg) {
+  const dbg = document.getElementById("login-debug");
+  if (!dbg) return;
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  dbg.textContent = dbg.textContent ? dbg.textContent + "\n" + line : line;
+}
+
+let loginInFlight = false;
+
+async function doLogin(key) {
+  if (loginInFlight) {
+    loginDebug("ignored — a login is already in flight");
+    return;
+  }
+  loginInFlight = true;
+  loginDebug(`handler fired, key length=${key.length}`);
   el.loginError.hidden = true;
   const btn = el.loginForm.querySelector("button");
   const originalLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Logging in…";
   try {
+    loginDebug("calling POST /api/web/login ...");
     await apiPost("/api/web/login", { license_key: key });
+    loginDebug("login request succeeded");
     licenseKey = key;
     try { localStorage.setItem(STORAGE_KEY, key); } catch (err) {}
+    loginDebug("calling showDashboard()");
     showDashboard();
+    loginDebug("showDashboard() returned normally");
   } catch (err) {
+    loginDebug("login request FAILED: " + (err && err.message));
     el.loginError.textContent = err.message || "Login failed.";
     el.loginError.hidden = false;
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
+    loginInFlight = false;
   }
+}
+
+el.loginForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  loginDebug("submit event received");
+  const key = el.loginKey.value.trim();
+  if (!key) {
+    loginDebug("key field was empty, ignoring");
+    return;
+  }
+  doLogin(key);
 });
+
+// Belt-and-suspenders: a direct click listener on the button itself,
+// independent of the form's "submit" event, in case something in a
+// specific browser/extension environment stops "submit" from firing
+// or from being intercepted correctly.
+document.querySelector("#login-form button[type=submit]")
+  .addEventListener("click", () => loginDebug("button click event received"));
 
 el.logoutBtn.addEventListener("click", () => {
   licenseKey = null;
