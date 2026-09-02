@@ -83,7 +83,16 @@ html, body {
 }
 .login-card button:hover { filter: brightness(1.08); }
 .login-card button:disabled { opacity: .6; cursor: default; }
-.error { color: var(--bad); font-size: .85rem; margin-top: 10px; }
+.error {
+  color: var(--bad);
+  font-size: .88rem;
+  font-weight: 600;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
 .error[hidden] { display: none; }
 
 /* ── Topbar ─────────────────────────────────────────────── */

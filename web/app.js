@@ -2,6 +2,25 @@
 // Talks to /api/web/* on the same origin (Caddy already routes the
 // whole domain to this FastAPI server, so relative URLs just work).
 
+// Surface ANY uncaught error directly on the page instead of failing
+// silently — "nothing happens" is the hardest kind of bug to debug
+// remotely, so make sure it can never look like that again.
+function showFatalError(msg) {
+  let banner = document.getElementById("fatal-error-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "fatal-error-banner";
+    banner.style.cssText =
+      "position:fixed;top:0;left:0;right:0;z-index:9999;background:#dc2626;" +
+      "color:#fff;padding:12px 16px;font:13px monospace;white-space:pre-wrap;" +
+      "word-break:break-word;";
+    document.body.prepend(banner);
+  }
+  banner.textContent = "MailBot dashboard error: " + msg;
+}
+window.addEventListener("error", (e) => showFatalError(e.message + " (" + e.filename + ":" + e.lineno + ")"));
+window.addEventListener("unhandledrejection", (e) => showFatalError(String(e.reason)));
+
 const API_BASE = "";
 const STORAGE_KEY = "mailbot_license_key";
 const THEME_KEY = "mailbot_theme";
@@ -54,9 +73,30 @@ el.themeToggle.addEventListener("click", () => {
 });
 
 // ── API helper ─────────────────────────────────────────────────────
+// AbortController timeout so a stalled connection (flaky wifi/mobile
+// data, a firewall silently dropping the request) surfaces as a clear
+// error instead of hanging forever — which would look exactly like
+// "nothing happens" to whoever's staring at the button.
+const FETCH_TIMEOUT_MS = 12000;
+
+async function timedFetch(url, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("Request timed out — check your connection and try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function apiGet(path, params = {}) {
   const usp = new URLSearchParams({ license_key: licenseKey, ...params });
-  const res = await fetch(`${API_BASE}${path}?${usp.toString()}`);
+  const res = await timedFetch(`${API_BASE}${path}?${usp.toString()}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail || `HTTP ${res.status}`);
@@ -65,7 +105,7 @@ async function apiGet(path, params = {}) {
 }
 
 async function apiPost(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await timedFetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -84,7 +124,9 @@ el.loginForm.addEventListener("submit", async (e) => {
   if (!key) return;
   el.loginError.hidden = true;
   const btn = el.loginForm.querySelector("button");
+  const originalLabel = btn.textContent;
   btn.disabled = true;
+  btn.textContent = "Logging in…";
   try {
     await apiPost("/api/web/login", { license_key: key });
     licenseKey = key;
@@ -95,6 +137,7 @@ el.loginForm.addEventListener("submit", async (e) => {
     el.loginError.hidden = false;
   } finally {
     btn.disabled = false;
+    btn.textContent = originalLabel;
   }
 });
 
