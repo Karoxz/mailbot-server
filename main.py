@@ -438,12 +438,21 @@ def web_unblacklist_broker(broker_email: str, license_key: str):
 def web_record_bid(req: WebRecordBidRequest):
     """
     The web equivalent of the desktop's BID PC / BID PHONE / DRAFT
-    buttons — records that the dispatcher acted on a load, using the
-    SAME bid_history.record_bid() function the desktop client's
-    _record_bid() calls, with the same field mapping. Looks the load
-    up from parser_core's LOAD_STORE (server-side already, no need to
-    round-trip load data through the browser) so this only needs an
-    order_id + which action was taken.
+    buttons. The desktop's version doesn't just log the action — it
+    copies the actual bid reply text to the clipboard and opens the
+    Gmail thread, so the dispatcher has something to paste and can
+    send it themselves (nothing is ever auto-sent, by design, same
+    principle as the rest of this project). The first web version of
+    this endpoint skipped that part and only recorded silently, which
+    left the dispatcher with nothing to actually act on — fixed here:
+    build and return the same bid text build_bid_reply_body() produces
+    for /api/build_bid, so the frontend can show/copy it.
+
+    NOTE: unlike the desktop, this can't reliably open the exact Gmail
+    thread — LOAD_STORE entries populated via /api/parse always carry
+    a placeholder original_msg_full (no real headers/threadId), so
+    thread_id and a real broker reply-to address aren't available yet
+    server-side. Documented as an open gap, not silently glossed over.
     """
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:
@@ -472,8 +481,25 @@ def web_record_bid(req: WebRecordBidRequest):
         verified_miles=maps_v.get("verified_miles"),
         verified_source=maps_v.get("verified_source"),
     )
+
+    bid_text = parser_core.build_bid_reply_body(
+        order=req.order_id,
+        vehicle_required=load.get("vehicle_required"),
+        pickup_loc=load.get("pickup_loc"),
+        pickup_dt=load.get("pickup_dt"),
+        delivery_loc=load.get("delivery_loc"),
+        delivery_dt=load.get("delivery_dt"),
+        google_deadhead=load.get("google_deadhead"),
+        driver_name=load.get("driver_name", ""),
+        truck_type=load.get("truck_type", ""),
+        truck_dimensions=load.get("truck_dimensions", ""),
+        deadhead_eta_minutes=load.get("deadhead_eta_minutes"),
+        truck_equipment=load.get("truck_equipment", ""),
+        bid_template=load.get("bid_template"),
+    )
+
     logger.info(f"[WEB] recorded bid: order={req.order_id} method={req.method} bid_id={bid_id}")
-    return {"success": True, "bid_id": bid_id}
+    return {"success": True, "bid_id": bid_id, "bid_text": bid_text, "thread_id": thread_id}
 
 
 @app.get("/api/web/thread_learning/status")

@@ -23,6 +23,25 @@
   </section>
 </main>
 
+<!-- Bid text modal — shown after a Bid PC/Phone/Draft click. Nothing is
+     ever auto-sent (same principle as the rest of this project): this
+     gives the dispatcher the actual text to copy/paste and send
+     themselves, same as the desktop's clipboard-copy behavior. -->
+<div id="bid-modal-overlay" class="modal-overlay" hidden>
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="bid-modal-title">Bid text</h2>
+      <button id="bid-modal-close" class="icon-btn" type="button" title="Close">✕</button>
+    </div>
+    <p class="note-text" id="bid-modal-hint" style="padding-top:0;"></p>
+    <textarea id="bid-modal-text" readonly rows="14"></textarea>
+    <div class="form-actions" style="padding-top:14px;">
+      <button id="bid-modal-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
+      <button id="bid-modal-close-btn" class="btn" type="button">Done</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script src="common.js"></script>
@@ -41,12 +60,57 @@ function showToast(msg, isError) {
   t._timer = setTimeout(() => t.classList.remove("show"), 2500);
 }
 
+// ── Bid text modal ───────────────────────────────────────────────
+// Nothing is ever sent automatically — same principle as the rest of
+// this project. This just gives the dispatcher the actual text to
+// copy/paste and send themselves (the desktop's equivalent copies to
+// the clipboard and opens the Gmail thread for the same reason).
+const modalOverlay = document.getElementById("bid-modal-overlay");
+const modalTitle = document.getElementById("bid-modal-title");
+const modalHint = document.getElementById("bid-modal-hint");
+const modalText = document.getElementById("bid-modal-text");
+
+const METHOD_HINT = {
+  pc: "Copied to your clipboard — paste it (Ctrl/Cmd+V) into your reply on Sylectus or in Gmail and send it yourself. Nothing is sent automatically.",
+  phone: "Copied to your clipboard — use this as your talking points for the call, then log what the broker agreed to.",
+  draft: "Copied to your clipboard — paste it into a new email or reply and send when ready. (A real Gmail draft isn't created automatically from the web yet — paste-and-send is the current path.)",
+};
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    return false; // clipboard permission denied/unavailable — modal still shows the text to copy manually
+  }
+}
+
+function openBidModal(orderId, method, bidText, copied) {
+  modalTitle.textContent = `Bid text — #${orderId} (${method.toUpperCase()})`;
+  modalHint.textContent = (copied ? "" : "⚠️ Couldn't auto-copy (clipboard permission) — select the text below manually. ")
+    + METHOD_HINT[method];
+  modalText.value = bidText;
+  modalOverlay.hidden = false;
+  modalText.focus();
+  modalText.select();
+}
+function closeBidModal() { modalOverlay.hidden = true; }
+document.getElementById("bid-modal-close").addEventListener("click", closeBidModal);
+document.getElementById("bid-modal-close-btn").addEventListener("click", closeBidModal);
+document.getElementById("bid-modal-copy").addEventListener("click", async () => {
+  const ok = await copyToClipboard(modalText.value);
+  showToast(ok ? "Copied to clipboard" : "Couldn't access clipboard — select the text manually", !ok);
+});
+modalOverlay.addEventListener("click", (e) => { if (e.target === modalOverlay) closeBidModal(); });
+
 async function recordBid(orderId, method, btn) {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "…";
   try {
     const result = await MB.apiPost("/api/web/record_bid", { order_id: orderId, method });
+    const copied = await copyToClipboard(result.bid_text || "");
+    openBidModal(orderId, method, result.bid_text || "", copied);
     showToast(`Recorded ${method.toUpperCase()} bid for #${orderId} (bid #${result.bid_id})`);
     // Mark this load's card as "recorded" so a re-click isn't ambiguous.
     btn.closest(".feed-card").querySelectorAll("button").forEach((b) => {

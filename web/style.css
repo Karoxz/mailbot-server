@@ -307,6 +307,49 @@ tbody tr:hover { background: var(--bg-card); }
 /* ── Action cell (row buttons in tables/cards) ─────────────── */
 .action-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* ── Modal (bid text) ───────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 200;
+}
+.modal-overlay[hidden] { display: none; }
+.modal {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 22px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.modal-header h2 { font-size: 1.05rem; }
+#bid-modal-text {
+  width: 100%;
+  font-family: monospace;
+  font-size: .82rem;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+  margin-top: 8px;
+}
+
 /* ── Toast (brief confirmation, e.g. "Bid recorded") ───────── */
 #toast {
   position: fixed;
