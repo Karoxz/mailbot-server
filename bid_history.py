@@ -177,7 +177,8 @@ def record_bid(order_id: str,
                 total_miles: Optional[float] = None,
                 verified_miles: Optional[float] = None,
                 verified_source: Optional[str] = None,
-                bid_amount: Optional[float] = None) -> int:
+                bid_amount: Optional[float] = None,
+                occurred_at: Optional[str] = None) -> int:
     """
     Insert one row per bid-send action (BID PC / BID PHONE / DRAFT
     click). Returns the new row's id.
@@ -186,6 +187,16 @@ def record_bid(order_id: str,
     with a blank "Rate: $" the dispatcher fills in by hand before
     sending) — pass it when known, None otherwise. rate_per_mile is
     only computed when both bid_amount and a mileage figure exist.
+
+    occurred_at: when the bid actually happened, as an ISO timestamp —
+    for a live PC/PHONE/DRAFT click this is always "now" (the default,
+    leave unset). thread_learner's backfill MUST pass the real
+    message date here instead: without it, every backfilled row's
+    created_at silently becomes "whenever the backfill script ran"
+    instead of the real historical date, which is actively misleading
+    on any UI that sorts/displays by created_at (confirmed: this is
+    exactly what happened — 148 backfilled rows all showed up dated
+    the night the backfill ran, not their real Gmail dates).
     """
     pickup_state   = _derive_state(pickup_loc)
     delivery_state = _derive_state(delivery_loc)
@@ -196,7 +207,7 @@ def record_bid(order_id: str,
     rate_per_mile = (round(bid_amount / miles_for_rate, 2)
                       if bid_amount and miles_for_rate else None)
 
-    now = _now()
+    now = occurred_at or _now()
     conn = _connect()
     try:
         cur = conn.execute(

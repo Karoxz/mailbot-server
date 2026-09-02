@@ -262,6 +262,15 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
 
     # ── Write to bid_history via the SAME functions the rest of the ────
     # app already uses — record_bid signature matches RecordBidRequest.
+    # occurred_at = the real date of the message the final rate was
+    # quoted in, NOT "now" — without this every backfilled row's
+    # created_at silently becomes "whenever the backfill ran" instead
+    # of its real historical date (confirmed: this actively happened —
+    # 148 rows all showed up dated the backfill night, not their real
+    # Gmail dates, and was reported back as "the bid history is false").
+    final_rate_occurred_at = datetime.fromtimestamp(
+        my_rates[-1]["date_ms"] / 1000, tz=timezone.utc
+    ).isoformat()
     bid_id = bid_history.record_bid(
         order_id=order_id, thread_id=thread_id, bid_method="gmail_backfill",
         vehicle_type="", driver_name="", pickup_loc="", delivery_loc="",
@@ -269,6 +278,7 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
         deadhead_miles=None, loaded_miles=None, total_miles=None,
         verified_miles=None, verified_source=None,
         bid_amount=final_rate,
+        occurred_at=final_rate_occurred_at,
     )
 
     if outcome:
