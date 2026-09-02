@@ -1038,11 +1038,20 @@ def extract_vehicle_required(t):
     vr = _find(r"Vehicle\s*required\s+([^\n]+)", t)
     if vr:
         return vr
-    return _find(
+    vr = _find(
         r"Vehicle\s*required.*?"
         r"(LARGE STRAIGHT|SMALL STRAIGHT|CARGO VAN|SPRINTER|BOX TRUCK|STRAIGHT TRUCK)",
         t
     )
+    if vr:
+        return vr
+    # ivia format ("Vehicle types:") lists every ACCEPTABLE type,
+    # comma-separated, rather than Sylectus's one REQUIRED type — e.g.
+    # "Cargo Van, Sprinter Van, Small Straight". Returned as-is: the
+    # allowed_vehicles filter below is substring-based so a list still
+    # matches correctly, and _vehicle_matches() is comma-list-aware for
+    # the truck-matching step further down.
+    return _find(r"Vehicle\s*types\s*:\s*([^\n]+)", t)
 
 
 def _bounded_section_window(text: str, label_regex: str,
@@ -1198,18 +1207,29 @@ def _vehicle_matches(truck_veh: str, required: str) -> bool:
       "LARGE STRAIGHT"  vs "LARGE STRAIGHT TRUCK"  -> match
       "VAN"             vs "SPRINTER VAN"          -> NO match
       "CARGO VAN"       vs "CARGO VAN"             -> match
+
+    `required` may be Sylectus's single required type, or ivia's
+    comma-separated LIST of acceptable types ("Cargo Van, Sprinter
+    Van, Small Straight") — matching any one item in the list counts.
+    Splitting a single-item string on comma is a no-op, so this is the
+    same comparison as before for the Sylectus case.
     """
     t_words = truck_veh.upper().split()
-    r_words = (required or "").upper().split()
-    if not t_words or not r_words:
+    if not t_words:
         return False
-    if t_words == r_words:
-        return True
-    if len(t_words) <= len(r_words):
-        shorter, longer = t_words, r_words
-    else:
-        shorter, longer = r_words, t_words
-    return longer[:len(shorter)] == shorter
+    for item in (required or "").split(","):
+        r_words = item.upper().split()
+        if not r_words:
+            continue
+        if t_words == r_words:
+            return True
+        if len(t_words) <= len(r_words):
+            shorter, longer = t_words, r_words
+        else:
+            shorter, longer = r_words, t_words
+        if longer[:len(shorter)] == shorter:
+            return True
+    return False
 
 
 # =============================================================
@@ -1673,7 +1693,10 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     _PE0 = time.perf_counter()
     t = raw_text.replace("\r\n", "\n")
-    order = _find(r"Bid on Order\s*#\s*([0-9]+)", t) or f"L{internal_date_ms // 1000}"
+    _ivia_ref = _find(r"Request for Quote Ref\.?\s*#\s*([0-9]+)", t)
+    order = (_find(r"Bid on Order\s*#\s*([0-9]+)", t)
+             or (f"IVIA-{_ivia_ref}" if _ivia_ref else None)
+             or f"L{internal_date_ms // 1000}")
 
     vehicle_required = extract_vehicle_required(t)
     if not vehicle_required:
