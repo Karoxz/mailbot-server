@@ -98,6 +98,25 @@ def _order_id_from_text(subject: str, body: str):
     return m.group(1) if m else None
 
 
+def _extract_order_candidates(text: str) -> set:
+    """
+    Every digit run of length >=4 in the text. Used ONLY to correlate a
+    Rate-Confirmation thread against an already-recorded bid by order
+    number (see the RC block in process_thread) — a Rate Confirmation
+    often arrives as its own single-message Gmail thread with a
+    completely different subject line format per broker ("Our Order
+    Number 1257371", "LDi Load #2111928", ...), so there's no single
+    reliable regex for "the order number" the way _order_id_from_text
+    assumes. Casting a wide net here is safe specifically because the
+    caller only acts on a candidate that matches a REAL existing
+    order_id already in bid_history — a stray 4+ digit number (a
+    weight, a year, part of a phone number) only causes a problem if it
+    happens to collide with an actual order_id, which is checked
+    directly against the DB, not guessed at.
+    """
+    return set(re.findall(r"\b\d{4,}\b", text or ""))
+
+
 def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> dict:
     """
     messages: list of dicts, oldest first, each:
@@ -122,6 +141,55 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
                 order_id = found
                 break
     order_id = order_id or f"THR-{thread_id[:10]}"
+
+    # ── RC-label cross-thread correlation ───────────────────────────────
+    # A Rate Confirmation is definitive proof a load was won, but it
+    # commonly arrives as its OWN single-message Gmail thread — a
+    # system-generated form, not a reply within the negotiation thread —
+    # and rarely contains a dispatcher-quoted rate itself. Handling it
+    # only via this thread's own rate/outcome logic misses it entirely
+    # (an RC thread with no rate never even reaches outcome
+    # determination below). So: correlate by order number against an
+    # ALREADY-recorded bid instead, and upgrade that bid directly.
+    if any("RC" in m.get("label_ids", []) for m in messages):
+        candidates = []
+        if order_id and not order_id.startswith("THR-"):
+            candidates.append(order_id)
+        found_elsewhere = set()
+        for m in messages:
+            found_elsewhere |= _extract_order_candidates(
+                f'{m.get("subject", "")}\n{m.get("body", "")}')
+        candidates.extend(sorted(found_elsewhere - set(candidates)))
+
+        matched_bid = None
+        matched_candidate = None
+        for cand in candidates:
+            unresolved = [b for b in bid_history.get_bids_for_order(cand)
+                          if b["status"] != "won"]
+            if unresolved:
+                matched_bid, matched_candidate = unresolved[0], cand
+                break
+
+        if matched_bid:
+            bid_history.update_bid_outcome(
+                matched_bid["id"], "won", outcome_source="rc_label",
+                outcome_note=f"Correlated via RC-labeled thread {thread_id} "
+                             f"(order match: {matched_candidate})",
+            )
+            bid_history.mark_thread_processed(thread_id, len(messages))
+            print(f"[THREAD-LEARNER] RC thread={thread_id} matched order="
+                  f"{matched_candidate} -> upgraded bid id={matched_bid['id']} to won",
+                  flush=True)
+            return {"processed": True, "wrote_bid": False,
+                    "upgraded_bid_id": matched_bid["id"],
+                    "order_id": matched_candidate, "outcome": "won",
+                    "outcome_source": "rc_label"}
+
+        print(f"[THREAD-LEARNER] RC thread={thread_id} has RC label but no "
+              f"matching existing bid found (candidates checked: {candidates})",
+              flush=True)
+        # Fall through — this RC thread might still carry its own rate
+        # data (rarer, but handled below same as any other thread).
 
     # ── Walk the thread, extracting a rate from every message ──────────
     turns = []
