@@ -38,6 +38,7 @@
     <textarea id="bid-modal-text" readonly rows="14"></textarea>
     <div class="form-actions" style="padding-top:14px;">
       <button id="bid-modal-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
+      <a id="bid-modal-gmail" class="btn" target="_blank" rel="noopener">✉️ Find thread in Gmail</a>
       <button id="bid-modal-close-btn" class="btn" type="button">Done</button>
     </div>
   </div>
@@ -70,6 +71,7 @@ const modalOverlay = document.getElementById("bid-modal-overlay");
 const modalTitle = document.getElementById("bid-modal-title");
 const modalHint = document.getElementById("bid-modal-hint");
 const modalText = document.getElementById("bid-modal-text");
+const modalGmailLink = document.getElementById("bid-modal-gmail");
 
 const METHOD_HINT = {
   pc: "Copied to your clipboard — paste it (Ctrl/Cmd+V) into your reply on Sylectus or in Gmail and send it yourself. Nothing is sent automatically.",
@@ -86,11 +88,16 @@ async function copyToClipboard(text) {
   }
 }
 
-function openBidModal(orderId, method, bidText, copied) {
+function openBidModal(orderId, method, bidText, copied, brokerEmail) {
   modalTitle.textContent = `Bid text — #${orderId} (${method.toUpperCase()})`;
   modalHint.textContent = (copied ? "" : "⚠️ Couldn't auto-copy (clipboard permission) — select the text below manually. ")
     + METHOD_HINT[method];
   modalText.value = bidText;
+  // No real Gmail thread ID reaches the frontend yet (see common.js's
+  // gmailSearchUrl comment) — this is a search link, not a guaranteed
+  // exact-thread deep link, but gets there without manual searching in
+  // the overwhelming majority of cases since order numbers are distinctive.
+  modalGmailLink.href = MB.gmailSearchUrl(orderId, brokerEmail, null);
   modalOverlay.hidden = false;
   modalText.focus();
   modalText.select();
@@ -104,14 +111,14 @@ document.getElementById("bid-modal-copy").addEventListener("click", async () => 
 });
 modalOverlay.addEventListener("click", (e) => { if (e.target === modalOverlay) closeBidModal(); });
 
-async function recordBid(orderId, method, btn) {
+async function recordBid(orderId, method, btn, brokerEmail) {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "…";
   try {
     const result = await MB.apiPost("/api/web/record_bid", { order_id: orderId, method });
     const copied = await copyToClipboard(result.bid_text || "");
-    openBidModal(orderId, method, result.bid_text || "", copied);
+    openBidModal(orderId, method, result.bid_text || "", copied, brokerEmail);
     showToast(`Recorded ${method.toUpperCase()} bid for #${orderId} (bid #${result.bid_id})`);
     // Mark this load's card as "recorded" so a re-click isn't ambiguous.
     btn.closest(".feed-card").querySelectorAll("button").forEach((b) => {
@@ -149,6 +156,8 @@ function renderLoads(items) {
     const reasons = (it.load_decision?.reasons || []).slice(0, 3)
       .map((r) => `<div class="meta">• ${MB.esc(r)}</div>`).join("");
     const orderId = MB.esc(it.order || "");
+    const brokerEmail = it.broker_email || "";
+    const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, null);
 
     return `
       <div class="feed-card">
@@ -158,16 +167,17 @@ function renderLoads(items) {
         ${meta ? `<div class="meta">${meta}</div>` : ""}
         ${reasons}
         <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
-          <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc">Bid PC</button>
-          <button class="btn btn-sm" data-order="${orderId}" data-method="phone">Bid Phone</button>
-          <button class="btn btn-sm" data-order="${orderId}" data-method="draft">Draft</button>
+          <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc" data-broker="${MB.esc(brokerEmail)}">Bid PC</button>
+          <button class="btn btn-sm" data-order="${orderId}" data-method="phone" data-broker="${MB.esc(brokerEmail)}">Bid Phone</button>
+          <button class="btn btn-sm" data-order="${orderId}" data-method="draft" data-broker="${MB.esc(brokerEmail)}">Draft</button>
+          <a class="btn btn-sm" href="${gmailUrl}" target="_blank" rel="noopener">✉️ Find in Gmail</a>
         </div>
       </div>`;
   }).join("");
 
   el.querySelectorAll("button[data-order]").forEach((btn) => {
     btn.addEventListener("click", () =>
-      recordBid(btn.dataset.order, btn.dataset.method, btn));
+      recordBid(btn.dataset.order, btn.dataset.method, btn, btn.dataset.broker));
   });
 }
 

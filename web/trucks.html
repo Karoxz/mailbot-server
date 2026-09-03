@@ -18,8 +18,9 @@
   </div>
 
   <section class="panel" id="add-truck-panel" hidden>
-    <div class="panel-header"><h2>New truck</h2></div>
+    <div class="panel-header"><h2 id="truck-form-title">New truck</h2></div>
     <form id="add-truck-form">
+      <input type="hidden" name="truck_id" value="">
       <div class="form-grid">
         <div class="field"><label>Vehicle type *</label><input name="vehicle" required placeholder="e.g. LARGE STRAIGHT"></div>
         <div class="field"><label>Driver name *</label><input name="driver_name" required></div>
@@ -31,7 +32,7 @@
         <div class="field"><label>Pickup date</label><input name="pickup_date" placeholder="MM/DD/YYYY, optional"></div>
       </div>
       <div class="form-actions">
-        <button type="submit" class="btn btn-primary">Save truck</button>
+        <button type="submit" class="btn btn-primary" id="truck-form-submit">Save truck</button>
         <button type="button" id="cancel-add-truck" class="btn">Cancel</button>
       </div>
     </form>
@@ -72,15 +73,50 @@ function showToast(msg, isError) {
 const addBtn = document.getElementById("add-truck-btn");
 const addPanel = document.getElementById("add-truck-panel");
 const addForm = document.getElementById("add-truck-form");
+const formTitle = document.getElementById("truck-form-title");
+const formSubmitBtn = document.getElementById("truck-form-submit");
 
-addBtn.addEventListener("click", () => { addPanel.hidden = false; addBtn.hidden = true; });
-document.getElementById("cancel-add-truck").addEventListener("click", () => {
+let trucksById = {}; // populated by renderTrucks, used to pre-fill the edit form
+
+function closeTruckForm() {
   addPanel.hidden = true; addBtn.hidden = false; addForm.reset();
-});
+  addForm.elements["truck_id"].value = "";
+}
+
+function openAddForm() {
+  addForm.reset();
+  addForm.elements["truck_id"].value = "";
+  formTitle.textContent = "New truck";
+  formSubmitBtn.textContent = "Save truck";
+  addPanel.hidden = false; addBtn.hidden = true;
+}
+
+function openEditForm(id) {
+  const t = trucksById[id];
+  if (!t) return;
+  addForm.reset();
+  addForm.elements["truck_id"].value = t.id;
+  addForm.elements["vehicle"].value = t.vehicle || "";
+  addForm.elements["driver_name"].value = t.driver_name || "";
+  addForm.elements["zip_location"].value = t.zip_location || "";
+  addForm.elements["dimensions"].value = t.dimensions || "";
+  addForm.elements["max_payload_lbs"].value = t.max_payload_lbs ?? "";
+  addForm.elements["equipment"].value = t.equipment || "";
+  addForm.elements["allowed_states"].value = t.allowed_states ? t.allowed_states.join(", ") : "";
+  addForm.elements["pickup_date"].value = t.pickup_date || "";
+  formTitle.textContent = `Edit truck — ${t.driver_name}`;
+  formSubmitBtn.textContent = "Save changes";
+  addPanel.hidden = false; addBtn.hidden = true;
+  addPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+addBtn.addEventListener("click", openAddForm);
+document.getElementById("cancel-add-truck").addEventListener("click", closeTruckForm);
 
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(addForm);
+  const truckId = fd.get("truck_id");
   const allowedStatesRaw = (fd.get("allowed_states") || "").trim();
   const payload = {
     vehicle: fd.get("vehicle").trim(),
@@ -97,13 +133,17 @@ addForm.addEventListener("submit", async (e) => {
   const btn = addForm.querySelector('button[type="submit"]');
   btn.disabled = true;
   try {
-    await MB.apiPost("/api/web/trucks", payload);
-    showToast("Truck added");
-    addForm.reset();
-    addPanel.hidden = true; addBtn.hidden = false;
+    if (truckId) {
+      await MB.apiPatch(`/api/web/trucks/${truckId}`, payload);
+      showToast("Truck updated");
+    } else {
+      await MB.apiPost("/api/web/trucks", payload);
+      showToast("Truck added");
+    }
+    closeTruckForm();
     loadTrucks();
   } catch (err) {
-    showToast(err.message || "Failed to add truck", true);
+    showToast(err.message || "Failed to save truck", true);
   } finally {
     btn.disabled = false;
   }
@@ -122,10 +162,12 @@ async function deleteTruck(id, driverName) {
 
 function renderTrucks(items) {
   const body = document.getElementById("trucks-body");
+  trucksById = {};
   if (!items || items.length === 0) {
     body.innerHTML = '<tr><td colspan="8" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
     return;
   }
+  items.forEach((t) => { trucksById[t.id] = t; });
   body.innerHTML = items.map((t) => `
     <tr>
       <td>${MB.esc(t.driver_name)}</td>
@@ -136,10 +178,14 @@ function renderTrucks(items) {
       <td>${MB.esc(t.equipment || "—")}</td>
       <td>${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</td>
       <td><div class="action-row">
+        <button class="btn btn-sm" data-edit-id="${t.id}">Edit</button>
         <button class="btn btn-sm btn-danger" data-id="${t.id}" data-name="${MB.esc(t.driver_name)}">Remove</button>
       </div></td>
     </tr>`).join("");
 
+  body.querySelectorAll("button[data-edit-id]").forEach((btn) => {
+    btn.addEventListener("click", () => openEditForm(btn.dataset.editId));
+  });
   body.querySelectorAll("button[data-id]").forEach((btn) => {
     btn.addEventListener("click", () => deleteTruck(btn.dataset.id, btn.dataset.name));
   });

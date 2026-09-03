@@ -49,11 +49,22 @@
   }
 
   // ── Theme ──────────────────────────────────────────────────────────
+  // Two logo variants exist because the mark itself is gold-on-black vs
+  // gold-on-white, not just a filter/invert — plutus_logo.jpg (dark bg)
+  // and plutus_logo_light.jpg (light bg), both real assets, not derived.
+  function logoSrc(theme) {
+    return theme === "light" ? "assets/plutus_logo_light.jpg" : "assets/plutus_logo.jpg";
+  }
   function applyTheme(theme) {
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", "dark");
     const btn = document.getElementById("theme-toggle");
     if (btn) btn.textContent = theme === "light" ? "🌙" : "☀️";
+
+    const src = logoSrc(theme);
+    document.querySelectorAll(".brand-logo, .login-logo").forEach((img) => { img.src = src; });
+    const favicon = document.querySelector('link[rel="icon"]');
+    if (favicon) favicon.href = src;
   }
   function initTheme() {
     let stored = null;
@@ -124,6 +135,22 @@
     return false;
   }
 
+  // ── Gmail thread lookup (Slice 3, option C — see roadmap) ───────────
+  // No real Gmail thread ID reaches the server today (/api/parse always
+  // hands process_bid_email a placeholder message with no real
+  // threadId), so an exact #all/<threadId> deep link isn't available.
+  // A Gmail SEARCH link is the automated alternative: order numbers are
+  // distinctive enough that this reliably surfaces the right thread as
+  // the top result, with zero new infrastructure needed. Upgrades
+  // transparently to a real thread link automatically once/if a real
+  // thread_id ever does reach the frontend (checked first, unused today).
+  function gmailSearchUrl(orderId, brokerEmail, threadId) {
+    if (threadId) return `https://mail.google.com/mail/u/0/#all/${threadId}`;
+    let q = String(orderId || "").trim();
+    if (brokerEmail) q += ` from:${brokerEmail}`;
+    return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(q)}`;
+  }
+
   // ── Formatters ─────────────────────────────────────────────────────
   function esc(s) {
     const d = document.createElement("div");
@@ -166,9 +193,10 @@
       const active = item.href === activeHref ? ' class="active"' : "";
       return `<a href="${item.href}"${active}>${item.label}</a>`;
     }).join("");
+    const currentTheme = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
     mount.innerHTML = `
       <a href="index.html" class="brand">
-        <img src="assets/plutus_logo.jpg" alt="" class="brand-logo">
+        <img src="${logoSrc(currentTheme)}" alt="" class="brand-logo">
         Plutus Bot
       </a>
       <nav class="topnav">${links}</nav>
@@ -195,6 +223,6 @@
     initTheme, toggleTheme,
     apiGet, apiPost, apiPatch, apiDelete, bounceIfAuthError,
     esc, fmtMoney, fmtRate, fmtPct, fmtWhen,
-    renderTopbar, setConn, showFatalError,
+    renderTopbar, setConn, showFatalError, gmailSearchUrl,
   };
 })();
