@@ -38,6 +38,31 @@ html, body {
   font-size: 15px;
 }
 
+/* ── Motion ─────────────────────────────────────────────── */
+/* One switch for everything below: honors the OS-level "reduce motion"
+   setting by collapsing every transition/animation to ~instant rather
+   than just leaving it in place at full speed. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+/* Applied once, per new element, by MB.diffRender()/render calls — never
+   re-applied to a preserved node, so existing rows don't re-flash on
+   every 10s poll, only genuinely new ones animate in. */
+.enter-anim { animation: fadeInUp .28s ease both; }
+main.content { animation: fadeIn .25s ease both; }
+
 .screen { min-height: 100vh; }
 /* !important is deliberate: [hidden] must always win over any other
    display rule (including #login-screen's own `display:flex` below —
@@ -154,7 +179,10 @@ html, body {
   align-items: center;
   justify-content: center;
 }
+.icon-btn { transition: border-color .15s ease, transform .08s ease; }
 .icon-btn:hover { border-color: var(--accent); }
+.icon-btn:active { transform: scale(.9); }
+.topnav a { transition: background .15s ease, color .15s ease; }
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-dim);
@@ -185,7 +213,9 @@ html, body {
   padding: 16px;
   text-align: center;
   box-shadow: var(--shadow);
+  transition: transform .15s ease;
 }
+.stat-value { transition: color .2s ease; }
 .stat-value { font-size: 1.5rem; font-weight: 700; }
 .stat-label { color: var(--text-dim); font-size: .8rem; margin-top: 2px; }
 
@@ -219,7 +249,9 @@ html, body {
   grid-template-columns: 1fr auto;
   gap: 4px 12px;
   align-items: start;
+  transition: background .15s ease;
 }
+.feed-card:hover { background: var(--bg-card); }
 .feed-card:last-child { border-bottom: none; }
 .feed-card .order { font-weight: 700; }
 .feed-card .route { color: var(--text-dim); font-size: .88rem; grid-column: 1 / -1; }
@@ -243,10 +275,10 @@ html, body {
 table { width: 100%; border-collapse: collapse; font-size: .88rem; min-width: 640px; }
 th, td { text-align: left; padding: 10px 18px; white-space: nowrap; }
 thead th { color: var(--text-dim); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
-tbody tr { border-bottom: 1px solid var(--border); }
+tbody tr { border-bottom: 1px solid var(--border); transition: background .15s ease; }
 tbody tr:last-child { border-bottom: none; }
 tbody tr:hover { background: var(--bg-card); }
-.status-pill { padding: 2px 9px; border-radius: 999px; font-size: .76rem; font-weight: 600; }
+.status-pill { padding: 2px 9px; border-radius: 999px; font-size: .76rem; font-weight: 600; transition: background .2s ease, color .2s ease; }
 .status-won { color: var(--good); background: color-mix(in srgb, var(--good) 15%, transparent); }
 .status-lost { color: var(--bad); background: color-mix(in srgb, var(--bad) 15%, transparent); }
 .status-pending { color: var(--text-dim); background: color-mix(in srgb, var(--text-dim) 15%, transparent); }
@@ -267,8 +299,10 @@ tbody tr:hover { background: var(--bg-card); }
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  transition: border-color .15s ease, background .15s ease, filter .15s ease, transform .08s ease, opacity .15s ease;
 }
 .btn:hover { border-color: var(--accent); }
+.btn:active:not(:disabled) { transform: scale(.96); }
 .btn:disabled { opacity: .5; cursor: default; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { filter: brightness(1.08); }
@@ -321,6 +355,10 @@ tbody tr:hover { background: var(--bg-card); }
 .action-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* ── Modal (bid text) ───────────────────────────────────── */
+/* Class-based (not [hidden]-based) so both open AND close animate — the
+   [hidden] attribute forces display:none the instant it's toggled, which
+   can't be transitioned. Overlay stays in the DOM at all times; opacity/
+   visibility/pointer-events do the showing and hiding. */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -330,8 +368,17 @@ tbody tr:hover { background: var(--bg-card); }
   justify-content: center;
   padding: 20px;
   z-index: 200;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .18s ease, visibility 0s linear .18s;
 }
-.modal-overlay[hidden] { display: none; }
+.modal-overlay.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity .18s ease;
+}
 .modal {
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -342,7 +389,10 @@ tbody tr:hover { background: var(--bg-card); }
   max-height: 90vh;
   overflow-y: auto;
   box-shadow: var(--shadow);
+  transform: scale(.96) translateY(8px);
+  transition: transform .18s ease;
 }
+.modal-overlay.open .modal { transform: none; }
 .modal-header {
   display: flex;
   align-items: center;
@@ -368,7 +418,7 @@ tbody tr:hover { background: var(--bg-card); }
   position: fixed;
   bottom: 20px;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, 10px);
   background: var(--good);
   color: #0a1f0f;
   padding: 10px 18px;
@@ -379,10 +429,30 @@ tbody tr:hover { background: var(--bg-card); }
   z-index: 100;
   opacity: 0;
   pointer-events: none;
-  transition: opacity .2s;
+  transition: opacity .22s ease, transform .22s ease;
 }
-#toast.show { opacity: 1; }
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.error { background: var(--bad); color: #fff; }
+
+/* ── Loading skeletons ──────────────────────────────────── */
+/* Swapped in by MB.skeletonRows()/skeletonCards() for the initial load of
+   any table/feed, replacing the old bare "Loading…" text — pairs with the
+   animation pass since a shimmering placeholder reads as "alive" the same
+   way the enter-transitions do, rather than the page looking frozen. */
+.skeleton-line {
+  height: .85em;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--bg-card) 25%, var(--border) 42%, var(--bg-card) 63%);
+  background-size: 400% 100%;
+  animation: skeletonShine 1.3s ease infinite;
+}
+@keyframes skeletonShine {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.skeleton-card { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.skeleton-card .skeleton-line + .skeleton-line { margin-top: 8px; }
+tr.skeleton-row td { padding: 12px 18px; }
 
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 640px) {

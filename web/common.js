@@ -178,6 +178,120 @@
     } catch (e) { return iso; }
   }
 
+  // ── Diff-render (Slice 3, animation/fluidity pass) ──────────────────
+  // Every polling list (renderFeed/renderBidHistory/renderLoads) used to
+  // blow away and rebuild its whole innerHTML on every 10s refresh — the
+  // reason the UI read as static/flat rather than alive, and why nothing
+  // could animate in (a freshly-innerHTML'd node has no "before" state to
+  // transition from). This keeps DOM nodes alive across refreshes: an
+  // item whose key persists keeps its actual element (no animation
+  // replay, no lost focus/selection), a genuinely new key gets a fresh
+  // element with .enter-anim so it visibly slides/fades in, and a key
+  // that's gone this round is removed. Content updates in place via a
+  // cheap signature check so unchanged rows aren't touched at all.
+  //
+  // container: the element whose children ARE the list (e.g. <tbody>,
+  //   a <div class="feed-list">).
+  // items: the new data array.
+  // opts.key(item)      -> stable string/number identifying the item.
+  // opts.html(item)     -> the item's *outer* HTML (the <tr>/<div>...tag
+  //   included) as a string. Must NOT include a data-key attribute —
+  //   diffRender stamps that itself so callers can't forget it.
+  // opts.isRow           -> true if container is a <tbody> (so element
+  //   creation happens inside a <table><tbody> for browser parsing rules).
+  // opts.emptyHtml       -> full HTML to show when items is empty/absent.
+  function _hashStr(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return h;
+  }
+  function _htmlToElement(html, isRow) {
+    const wrap = document.createElement(isRow ? "table" : "div");
+    wrap.innerHTML = isRow ? `<tbody>${html.trim()}</tbody>` : html.trim();
+    return isRow ? wrap.querySelector("tbody").firstElementChild : wrap.firstElementChild;
+  }
+  function diffRender(container, items, opts) {
+    if (!items || items.length === 0) {
+      if (container.dataset.mbEmpty !== "1") {
+        container.innerHTML = opts.emptyHtml;
+        container.dataset.mbEmpty = "1";
+      }
+      return true; // rendered empty state
+    }
+    container.dataset.mbEmpty = "0";
+    const existing = new Map();
+    Array.from(container.children).forEach((el) => {
+      if (el.dataset && el.dataset.key) existing.set(el.dataset.key, el);
+    });
+    const frag = document.createDocumentFragment();
+    let anyNew = false;
+    items.forEach((item) => {
+      const key = String(opts.key(item));
+      const html = opts.html(item);
+      const sig = String(_hashStr(html));
+      let el = existing.get(key);
+      if (el) {
+        existing.delete(key);
+        if (el.dataset.mbSig !== sig) {
+          const fresh = _htmlToElement(html, opts.isRow);
+          el.innerHTML = fresh.innerHTML;
+          el.dataset.mbSig = sig;
+        }
+      } else {
+        el = _htmlToElement(html, opts.isRow);
+        el.dataset.key = key;
+        el.dataset.mbSig = sig;
+        el.classList.add("enter-anim");
+        anyNew = true;
+      }
+      frag.appendChild(el);
+    });
+    existing.forEach((el) => el.remove()); // whatever's left was dropped this round
+    container.innerHTML = "";
+    container.appendChild(frag);
+    return anyNew;
+  }
+
+  // Skeleton placeholders — swapped in for the initial "Loading…" state
+  // of any list/table so the page reads as alive immediately rather than
+  // frozen, and there's a real "before" for the first real diffRender
+  // pass to transition from.
+  function skeletonCards(n = 3) {
+    return Array.from({ length: n }, () => `
+      <div class="skeleton-card">
+        <div class="skeleton-line" style="width:40%;"></div>
+        <div class="skeleton-line" style="width:70%;"></div>
+      </div>`).join("");
+  }
+  function skeletonRows(cols, n = 4) {
+    const cells = Array.from({ length: cols }, () =>
+      `<td><div class="skeleton-line" style="width:${60 + Math.round(Math.random() * 30)}%;"></div></td>`
+    ).join("");
+    return Array.from({ length: n }, () => `<tr class="skeleton-row">${cells}</tr>`).join("");
+  }
+
+  // .enter-anim uses animation-fill-mode:both, which means the animated
+  // property (opacity) stays pinned to the keyframe's end value for as
+  // long as the class is present — that would permanently fight any
+  // other opacity styling on the same element (e.g. a dimmed blacklisted-
+  // broker row) even after the animation visibly finishes. Strip the
+  // class the moment it completes so normal CSS regains control.
+  document.addEventListener("animationend", (e) => {
+    if (e.animationName === "fadeInUp") e.target.classList.remove("enter-anim");
+  });
+
+  // Re-triggers the .enter-anim keyframe on an element that's about to
+  // become visible (e.g. an add/edit form panel toggled via `hidden`) —
+  // for panels whose *open* transition matters but whose close doesn't
+  // need to animate. Forces a reflow so the class re-applies even if it
+  // was already present (e.g. the panel was opened and closed rapidly
+  // before the previous animationend cleanup ran).
+  function popIn(el) {
+    el.classList.remove("enter-anim");
+    void el.offsetWidth;
+    el.classList.add("enter-anim");
+  }
+
   // ── Nav ────────────────────────────────────────────────────────────
   const NAV_ITEMS = [
     { href: "index.html",    label: "Dashboard" },
@@ -224,5 +338,6 @@
     apiGet, apiPost, apiPatch, apiDelete, bounceIfAuthError,
     esc, fmtMoney, fmtRate, fmtPct, fmtWhen,
     renderTopbar, setConn, showFatalError, gmailSearchUrl,
+    diffRender, skeletonCards, skeletonRows, popIn,
   };
 })();

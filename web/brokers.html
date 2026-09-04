@@ -23,9 +23,7 @@
         <thead>
           <tr><th>Broker</th><th>Bids</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Avg $/mi</th><th></th></tr>
         </thead>
-        <tbody id="brokers-body">
-          <tr><td colspan="7" class="empty-note">Loading…</td></tr>
-        </tbody>
+        <tbody id="brokers-body"></tbody>
       </table>
     </div>
   </section>
@@ -77,7 +75,7 @@ function renderBrokers(items) {
   body.innerHTML = items.map((b) => {
     const blacklisted = !!b.blacklisted;
     return `
-    <tr${blacklisted ? ' style="opacity:.6;"' : ""}>
+    <tr class="enter-anim"${blacklisted ? ' style="opacity:.6;"' : ""}>
       <td>${MB.esc(b.broker_email)}${blacklisted ? ' <span class="badge decision-reject">Blacklisted</span>' : ""}</td>
       <td>${b.total_bids}</td>
       <td>${b.won}</td>
@@ -110,6 +108,7 @@ async function loadBrokers() {
   }
 }
 
+document.getElementById("brokers-body").innerHTML = MB.skeletonRows(7, 5);
 loadBrokers();
 </script>
 </body>

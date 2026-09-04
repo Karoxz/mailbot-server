@@ -36,9 +36,7 @@
       <h2>Live feed</h2>
       <span class="panel-hint"><a href="loads.html">See all &amp; take action →</a></span>
     </div>
-    <div id="feed-list" class="feed-list">
-      <p class="empty-note">No matched loads yet.</p>
-    </div>
+    <div id="feed-list" class="feed-list"></div>
   </section>
 
   <section class="panel">
@@ -51,9 +49,7 @@
         <thead>
           <tr><th>Order</th><th>Lane</th><th>Vehicle</th><th>Rate</th><th>$/mi</th><th>Status</th><th>When</th></tr>
         </thead>
-        <tbody id="bid-table-body">
-          <tr><td colspan="7" class="empty-note">No bids yet.</td></tr>
-        </tbody>
+        <tbody id="bid-table-body"></tbody>
       </table>
     </div>
   </section>
@@ -75,46 +71,48 @@ function renderStats(stats) {
 
 function renderFeed(items) {
   const el = document.getElementById("feed-list");
-  if (!items || items.length === 0) {
-    el.innerHTML = '<p class="empty-note">No matched loads yet.</p>';
-    return;
-  }
-  el.innerHTML = items.slice(0, 8).map((it) => {
-    const decision = it.load_decision?.decision;
-    const decisionBadge = decision
-      ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}</span>`
-      : "";
-    const miles = it.google_deadhead != null ? `${it.google_deadhead}mi deadhead` : "";
-    const meta = [it.driver_name, miles].filter(Boolean).map(MB.esc).join(" · ");
-    return `
-      <div class="feed-card">
-        <div class="order">#${MB.esc(it.order)} <span style="color:var(--text-dim);font-weight:400;">${MB.esc(it.vehicle_required || "")}</span></div>
-        ${decisionBadge}
-        <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
-        ${meta ? `<div class="meta">${meta}</div>` : ""}
-      </div>`;
-  }).join("");
+  MB.diffRender(el, (items || []).slice(0, 8), {
+    key: (it) => it.order,
+    isRow: false,
+    emptyHtml: '<p class="empty-note">No matched loads yet.</p>',
+    html: (it) => {
+      const decision = it.load_decision?.decision;
+      const decisionBadge = decision
+        ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}</span>`
+        : "";
+      const miles = it.google_deadhead != null ? `${it.google_deadhead}mi deadhead` : "";
+      const meta = [it.driver_name, miles].filter(Boolean).map(MB.esc).join(" · ");
+      return `
+        <div class="feed-card">
+          <div class="order">#${MB.esc(it.order)} <span style="color:var(--text-dim);font-weight:400;">${MB.esc(it.vehicle_required || "")}</span></div>
+          ${decisionBadge}
+          <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
+          ${meta ? `<div class="meta">${meta}</div>` : ""}
+        </div>`;
+    },
+  });
 }
 
 function renderBidHistory(items) {
   const el = document.getElementById("bid-table-body");
-  if (!items || items.length === 0) {
-    el.innerHTML = '<tr><td colspan="7" class="empty-note">No bids yet.</td></tr>';
-    return;
-  }
-  el.innerHTML = items.map((b) => {
-    const status = (b.status || "pending").toLowerCase();
-    return `
-      <tr>
-        <td>#${MB.esc(b.order_id)}</td>
-        <td>${MB.esc(b.lane || "—")}</td>
-        <td>${MB.esc(b.vehicle_type || "—")}</td>
-        <td>${MB.fmtMoney(b.bid_amount)}</td>
-        <td>${MB.fmtRate(b.rate_per_mile)}</td>
-        <td><span class="status-pill status-${status}">${MB.esc(b.status || "pending")}</span></td>
-        <td>${MB.fmtWhen(b.created_at)}</td>
-      </tr>`;
-  }).join("");
+  MB.diffRender(el, items, {
+    key: (b) => b.id,
+    isRow: true,
+    emptyHtml: '<tr><td colspan="7" class="empty-note">No bids yet.</td></tr>',
+    html: (b) => {
+      const status = (b.status || "pending").toLowerCase();
+      return `
+        <tr>
+          <td>#${MB.esc(b.order_id)}</td>
+          <td>${MB.esc(b.lane || "—")}</td>
+          <td>${MB.esc(b.vehicle_type || "—")}</td>
+          <td>${MB.fmtMoney(b.bid_amount)}</td>
+          <td>${MB.fmtRate(b.rate_per_mile)}</td>
+          <td><span class="status-pill status-${status}">${MB.esc(b.status || "pending")}</span></td>
+          <td>${MB.fmtWhen(b.created_at)}</td>
+        </tr>`;
+    },
+  });
 }
 
 async function refreshAll() {
@@ -133,6 +131,9 @@ async function refreshAll() {
     MB.bounceIfAuthError(err);
   }
 }
+
+document.getElementById("feed-list").innerHTML = MB.skeletonCards(3);
+document.getElementById("bid-table-body").innerHTML = MB.skeletonRows(7, 5);
 
 refreshAll();
 setInterval(refreshAll, 10000);

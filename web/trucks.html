@@ -46,9 +46,7 @@
         <thead>
           <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th></th></tr>
         </thead>
-        <tbody id="trucks-body">
-          <tr><td colspan="9" class="empty-note">Loading…</td></tr>
-        </tbody>
+        <tbody id="trucks-body"></tbody>
       </table>
     </div>
   </section>
@@ -91,6 +89,7 @@ function openAddForm() {
   formTitle.textContent = "New truck";
   formSubmitBtn.textContent = "Save truck";
   addPanel.hidden = false; addBtn.hidden = true;
+  MB.popIn(addPanel);
 }
 
 function openEditForm(id) {
@@ -110,6 +109,7 @@ function openEditForm(id) {
   formTitle.textContent = `Edit truck — ${t.driver_name}`;
   formSubmitBtn.textContent = "Save changes";
   addPanel.hidden = false; addBtn.hidden = true;
+  MB.popIn(addPanel);
   addPanel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -173,7 +173,7 @@ function renderTrucks(items) {
   }
   items.forEach((t) => { trucksById[t.id] = t; });
   body.innerHTML = items.map((t) => `
-    <tr>
+    <tr class="enter-anim">
       <td>${MB.esc(t.driver_name)}</td>
       <td>${MB.esc(t.vehicle)}</td>
       <td>${MB.esc(t.zip_location)}</td>
@@ -207,6 +207,7 @@ async function loadTrucks() {
   }
 }
 
+document.getElementById("trucks-body").innerHTML = MB.skeletonRows(9, 3);
 loadTrucks();
 </script>
 </body>
