@@ -27,6 +27,17 @@ def init_db():
         )
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Same migration pattern, opposite default: Telegram sending is
+    # EXISTING behavior (unlike thread_learning, which was a new opt-in
+    # feature) — defaulting to 0 here would silently mute every current
+    # user the moment this column exists. Default 1 so nothing changes
+    # for anyone until they explicitly turn it off.
+    try:
+        conn.execute(
+            'ALTER TABLE licenses ADD COLUMN telegram_enabled INTEGER DEFAULT 1'
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -64,6 +75,34 @@ def set_thread_learning_enabled(key: str, enabled: bool) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def get_telegram_enabled(key: str) -> bool:
+    row = _get_row(key)
+    if not row:
+        return True  # unknown license: fail open, matches the column's default
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        'SELECT telegram_enabled FROM licenses WHERE key=?', (key,)
+    ).fetchone()
+    conn.close()
+    return bool(val[0]) if val and val[0] is not None else True
+
+
+def set_telegram_enabled(key: str, enabled: bool) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE licenses SET telegram_enabled=? WHERE key=?',
+        (1 if enabled else 0, key)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def validate_license(key: str, machine_id: str) -> dict:
     row = _get_row(key)
     if not row:

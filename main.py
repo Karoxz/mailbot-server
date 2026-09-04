@@ -14,7 +14,7 @@ from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatReque
                      RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
                      ThreadLearningToggleRequest, BackfillThreadRequest,
                      WebLoginRequest, WebTruckIn, WebTruckUpdate, WebBlacklistRequest,
-                     WebRecordBidRequest, WebBidTemplateRequest)
+                     WebRecordBidRequest, WebBidTemplateRequest, TelegramToggleRequest)
 import thread_learner
 import license_db
 from license_db import init_db, validate_license, activate_license, heartbeat, \
@@ -237,6 +237,45 @@ def thread_learning_status(req: ThreadLearningToggleRequest):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     return {"enabled": license_db.get_thread_learning_enabled(req.license_key)}
+
+
+# ── Telegram on/off — same dual pattern as thread_learning above: this
+# machine-bound set is for the desktop client (which already has a real
+# machine_id and enforces the binding), a license-key-only /api/web/
+# set further down is for the browser. Unlike thread_learning,
+# telegram_enabled defaults to 1 (see license_db.init_db()'s comment) —
+# this gates EXISTING behavior, not a new opt-in feature, so nothing
+# should go silent for anyone who hasn't touched this setting.
+@app.post("/api/telegram/enable")
+def enable_telegram(req: TelegramToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    ok = license_db.set_telegram_enabled(req.license_key, True)
+    if not ok:
+        raise HTTPException(status_code=404, detail="License not found")
+    logger.info(f"[TELEGRAM] enabled for {req.license_key}")
+    return {"success": True, "enabled": True}
+
+
+@app.post("/api/telegram/disable")
+def disable_telegram(req: TelegramToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    ok = license_db.set_telegram_enabled(req.license_key, False)
+    if not ok:
+        raise HTTPException(status_code=404, detail="License not found")
+    logger.info(f"[TELEGRAM] disabled for {req.license_key}")
+    return {"success": True, "enabled": False}
+
+
+@app.post("/api/telegram/status")
+def telegram_status(req: TelegramToggleRequest):
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"enabled": license_db.get_telegram_enabled(req.license_key)}
 
 @app.post("/api/backfill_thread")
 def backfill_thread(req: BackfillThreadRequest):
@@ -527,6 +566,34 @@ def web_thread_learning_disable(req: WebLoginRequest):
         raise HTTPException(status_code=403, detail=check["reason"])
     license_db.set_thread_learning_enabled(req.license_key, False)
     logger.info(f"[WEB] thread learning disabled for {req.license_key}")
+    return {"success": True, "enabled": False}
+
+
+@app.get("/api/web/telegram/status")
+def web_telegram_status(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "enabled": license_db.get_telegram_enabled(license_key)}
+
+
+@app.post("/api/web/telegram/enable")
+def web_telegram_enable(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.set_telegram_enabled(req.license_key, True)
+    logger.info(f"[WEB] telegram enabled for {req.license_key}")
+    return {"success": True, "enabled": True}
+
+
+@app.post("/api/web/telegram/disable")
+def web_telegram_disable(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.set_telegram_enabled(req.license_key, False)
+    logger.info(f"[WEB] telegram disabled for {req.license_key}")
     return {"success": True, "enabled": False}
 
 

@@ -80,7 +80,11 @@ class UpdateBidAmountRequest(BaseModel):
 class ThreadLearningToggleRequest(BaseModel):
     license_key: str
     machine_id:  str
-    
+
+class TelegramToggleRequest(BaseModel):
+    license_key: str
+    machine_id:  str
+
 class ThreadMessageIn(BaseModel):
     message_id: str
     date_ms:    int
