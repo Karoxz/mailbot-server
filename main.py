@@ -20,10 +20,11 @@ import license_db
 from license_db import init_db, validate_license, activate_license, heartbeat, \
     validate_license_key_only
 import parser_core
-from parser_core import parse_email_for_api, LOAD_STORE, LOAD_STORE_LOCK
+from parser_core import parse_email_for_api
 import bid_history
 import reply_classifier
 import fleet_store
+import load_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -59,6 +60,7 @@ async def lifespan(app):
     bid_history.init_db()
     bid_history.init_processed_threads_table()
     fleet_store.init_db()
+    load_store.init_db()
     logger.info("Database initialized")
     yield
 
@@ -357,15 +359,13 @@ def web_feed(license_key: str, limit: int = 50):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
 
-    # LOAD_STORE only ever holds loads that got far enough to match a
+    # load_store only ever holds loads that got far enough to match a
     # truck (see process_bid_email) — it's not a full "every email
-    # seen" log, and it's in-memory only (resets on server restart,
-    # not persisted, not scoped per-license — a known v1 limitation,
-    # fine while there's a single active dispatcher).
-    with LOAD_STORE_LOCK:
-        items = list(LOAD_STORE.values())
-    # LOAD_STORE is insertion-ordered (plain dict) — newest last.
-    items = items[-limit:][::-1]
+    # seen" log. SQLite-backed as of 2026-09-05 (was an in-process
+    # dict, invisible across uvicorn's 4 worker processes — not
+    # scoped per-license still, a known limitation, fine while
+    # there's a single active dispatcher).
+    items = load_store.get_recent_loads(limit=limit)
     # original_msg_full carries raw Gmail payload data — strip it,
     # the frontend never needs it and it's not JSON-clean.
     cleaned = [{k: v for k, v in item.items() if k != "original_msg_full"}
@@ -499,8 +499,7 @@ def web_record_bid(req: WebRecordBidRequest):
     if req.method not in ("pc", "phone", "draft"):
         raise HTTPException(status_code=400, detail="method must be pc, phone, or draft")
 
-    with LOAD_STORE_LOCK:
-        load = LOAD_STORE.get(req.order_id)
+    load = load_store.get_load(req.order_id)
     if not load:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
@@ -602,25 +601,25 @@ def web_get_bid_template(license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    with parser_core.BID_TEMPLATE_LOCK:
-        return {"success": True, "template": parser_core.BID_TEMPLATE}
+    return {"success": True, "template": load_store.get_bid_template()}
 
 
 @app.post("/api/web/bid_template")
 def web_set_bid_template(req: WebBidTemplateRequest):
     """
-    NOTE: this sets the SERVER's fallback default template
-    (parser_core.BID_TEMPLATE), used only when a client's /api/parse
-    call doesn't include its own bid_template. The desktop app always
-    sends its own locally-configured template on every parse call, so
+    NOTE: this sets the SERVER's fallback default template (in
+    load_store.db as of 2026-09-05, was parser_core.BID_TEMPLATE — an
+    in-process global, invisible across uvicorn's 4 workers, the same
+    bug LOAD_STORE had), used only when a client's /api/parse call
+    doesn't include its own bid_template. The desktop app always sends
+    its own locally-configured template on every parse call, so
     editing this here does NOT change what the desktop actually uses
     day to day — the UI should say so, not imply otherwise.
     """
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    with parser_core.BID_TEMPLATE_LOCK:
-        parser_core.BID_TEMPLATE = req.template
+    load_store.set_bid_template(req.template)
     logger.info("[WEB] bid template updated (server-side default)")
     return {"success": True}
 

@@ -179,21 +179,15 @@ ROUTE_CACHE_TTL_DAYS = 30
 
 STOP_EVENT = threading.Event()
 
-LOAD_STORE      = {}
-LOAD_STORE_LOCK = threading.Lock()
-
-BID_TEMPLATE_LOCK = threading.Lock()
-BID_TEMPLATE = """Rate: $
-{vehicle_type}
-Dims: {truck_dimensions}
-MC#
-
-Truck is {google_deadhead} miles out
-{truck_equipment}
-
-ETA to PU: {deadhead_eta_str}
-
-ALL BIDS ARE VALID 15 MIN"""
+# LOAD_STORE / BID_TEMPLATE used to be plain in-process globals here —
+# invisible across uvicorn's 4 worker processes (a load matched by one
+# worker was never visible to a request served by another) and, as of
+# 2026-09-05, confirmed to be the same bug for BID_TEMPLATE too. Both
+# now live in load_store.py (SQLite, shared across processes — WAL mode
+# already handles cross-process write safety, so no in-process lock is
+# needed here any more; every call site below talks to load_store
+# directly).
+import load_store
 
 # ── FIX #1: every outbound session below has max_retries=0. ────────────
 # All retry/backoff behavior is explicit, bounded application code — no
@@ -1414,8 +1408,7 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         deadhead_miles=str(google_deadhead) if google_deadhead is not None else "",
     )
     if bid_template is None:
-        with BID_TEMPLATE_LOCK:
-            bid_template = BID_TEMPLATE
+        bid_template = load_store.get_bid_template()
     try:
         return bid_template.format(**data)
     except KeyError as e:
@@ -1688,8 +1681,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     local_trucks   = trucks if trucks is not None else []
     local_template = bid_template
     if local_template is None:
-        with BID_TEMPLATE_LOCK:
-            local_template = BID_TEMPLATE
+        local_template = load_store.get_bid_template()
 
     _PE0 = time.perf_counter()
     t = raw_text.replace("\r\n", "\n")
@@ -2093,10 +2085,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     delivery_dt_stored = "ASAP" if delivery_asap else delivery_dt
 
     if order:
-        with LOAD_STORE_LOCK:
-            if len(LOAD_STORE) >= 500:
-                del LOAD_STORE[next(iter(LOAD_STORE))]
-            LOAD_STORE[order] = {
+        load_store.put_load(order, {
                 "original_msg_full":    original_msg_full,
                 "order":                order,
                 "vehicle_required":     vehicle_required,
@@ -2121,7 +2110,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "broker_notes":         broker_notes,     # ← NEW
                 "freight_fit":          freight_fit,      # ← NEW
                 "load_decision":        load_decision,        # ← NEW   # ← NEW
-            }
+            })
 
     _PE3 = time.perf_counter()
     print(f"[TIMING]   formatting+store: {_PE3-_PE2:.3f}s", flush=True)
@@ -2252,7 +2241,7 @@ def parse_email_for_api(request_data: dict) -> dict:
     T2 = time.perf_counter()
     print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
 
-    local_bid_template = request_data.get('bid_template') or BID_TEMPLATE
+    local_bid_template = request_data.get('bid_template') or load_store.get_bid_template()
 
     dummy_msg = {'payload': {'headers': [], 'parts': []},
                  'threadId': '', 'labelIds': [], 'id': ''}
@@ -2279,12 +2268,11 @@ def parse_email_for_api(request_data: dict) -> dict:
     }
 
     if order:
-        with LOAD_STORE_LOCK:
-            ld = LOAD_STORE.get(order)
-            if ld:
-                result['route_url'] = ld.get('route_url', '')
-                result['load_data'] = {k: v for k, v in ld.items()
-                                        if k != 'original_msg_full'}
+        ld = load_store.get_load(order)
+        if ld:
+            result['route_url'] = ld.get('route_url', '')
+            result['load_data'] = {k: v for k, v in ld.items()
+                                    if k != 'original_msg_full'}
 
     return result
 
