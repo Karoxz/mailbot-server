@@ -412,7 +412,7 @@ def web_add_truck(req: WebTruckIn):
         vehicle=req.vehicle, driver_name=req.driver_name, zip_location=req.zip_location,
         dimensions=req.dimensions, max_payload_lbs=req.max_payload_lbs,
         equipment=req.equipment, allowed_states=req.allowed_states,
-        pickup_date=req.pickup_date,
+        pickup_date=req.pickup_date, radius_miles=req.radius_miles,
     )
     return {"success": True, "truck_id": truck_id}
 

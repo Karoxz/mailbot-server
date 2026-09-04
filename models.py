@@ -117,6 +117,7 @@ class WebTruckIn(BaseModel):
     equipment:       str = ""
     allowed_states:  Optional[List[str]] = None
     pickup_date:     str = ""
+    radius_miles:    Optional[int] = None  # None = use the global default
 
 
 class WebTruckUpdate(BaseModel):
@@ -129,6 +130,7 @@ class WebTruckUpdate(BaseModel):
     equipment:       Optional[str] = None
     allowed_states:  Optional[List[str]] = None
     pickup_date:     Optional[str] = None
+    radius_miles:    Optional[int] = None
     active:          Optional[bool] = None
 
 
