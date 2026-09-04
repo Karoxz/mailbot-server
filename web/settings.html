@@ -18,6 +18,18 @@
 
   <section class="panel">
     <div class="panel-header">
+      <h2>Telegram notifications</h2>
+      <span class="panel-hint">Whether the dispatcher bot sends you load notifications on Telegram at all.</span>
+    </div>
+    <div class="form-actions" style="padding:16px 18px;align-items:center;">
+      <span id="tg-status" style="font-weight:600;">Loading…</span>
+      <button id="tg-toggle" class="btn btn-primary" type="button" disabled>…</button>
+    </div>
+    <p class="note-text">The desktop app re-checks this every 5 minutes (plus on launch), so a change made here takes effect within a few minutes without needing to restart it. Turning this off does not affect the separate driver-facing bot.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
       <h2>Thread learning</h2>
       <span class="panel-hint">Passively reads Gmail threads to backfill bid outcomes — no auto-response, nothing sent on your behalf.</span>
     </div>
@@ -60,6 +72,49 @@ function showToast(msg, isError) {
   clearTimeout(t._timer);
   t._timer = setTimeout(() => t.classList.remove("show"), 2500);
 }
+
+// ── Telegram toggle ──────────────────────────────────────────────
+const tgStatus = document.getElementById("tg-status");
+const tgToggle = document.getElementById("tg-toggle");
+let tgEnabled = true; // matches the server column's default — avoids a
+                       // misleading OFF flash before the real status loads
+
+function renderTgState() {
+  tgStatus.textContent = tgEnabled ? "✈️ ON" : "✈️ OFF";
+  tgStatus.style.color = tgEnabled ? "var(--good)" : "var(--text-dim)";
+  tgToggle.textContent = tgEnabled ? "Turn off" : "Turn on";
+  tgToggle.className = tgEnabled ? "btn btn-danger" : "btn btn-primary";
+  tgToggle.disabled = false;
+}
+
+async function loadTgStatus() {
+  try {
+    const res = await MB.apiGet("/api/web/telegram/status");
+    tgEnabled = !!res.enabled;
+    renderTgState();
+    MB.setConn(true);
+  } catch (err) {
+    tgStatus.textContent = "Error loading status";
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+tgToggle.addEventListener("click", async () => {
+  tgToggle.disabled = true;
+  const endpoint = tgEnabled ? "/api/web/telegram/disable" : "/api/web/telegram/enable";
+  try {
+    const res = await MB.apiPost(endpoint, {});
+    tgEnabled = !!res.enabled;
+    renderTgState();
+    showToast(tgEnabled ? "Telegram notifications enabled" : "Telegram notifications disabled");
+  } catch (err) {
+    showToast(err.message || "Failed to update", true);
+    tgToggle.disabled = false;
+  }
+});
+
+loadTgStatus();
 
 // ── Thread learning toggle ──────────────────────────────────────────
 const tlStatus = document.getElementById("tl-status");
