@@ -731,6 +731,20 @@ def web_standalone_disable(req: WebLoginRequest):
     return {"success": True, "enabled": False}
 
 
+@app.get("/api/web/standalone/poller_status")
+def web_standalone_poller_status(license_key: str):
+    """poller.py (a separate process, not one of these 4 workers) writes
+    one heartbeat row every outer-loop tick regardless of per-license
+    outcomes — this just reads it back. Direct fix for "I can't tell if
+    it's working": the Settings UI polls this to show a real liveness
+    signal instead of silence."""
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    hb = load_store.get_poller_heartbeat()
+    return {"success": True, "heartbeat": hb}
+
+
 # Static frontend — mounted LAST and at a sub-path so it can never
 # shadow an API route above. Reachable at https://<domain>/app/
 # (Caddy already reverse-proxies everything to this server, so no

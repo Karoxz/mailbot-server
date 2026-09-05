@@ -33,6 +33,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
 ]
 
+# Gmail's fixed system label IDs — a label NOT in this set (and not a
+# CATEGORY_* one) is a real custom label a dispatcher applied (Bid,
+# Finished Loads, RC, etc.). Ported verbatim from the desktop's _SYSIDS
+# (main copy.py) — used by poller.py's thread-label guard to recognize
+# "this thread has already been handled, don't reprocess it."
+_SYSTEM_LABEL_IDS = frozenset({
+    "INBOX", "UNREAD", "SENT", "IMPORTANT", "STARRED", "TRASH", "SPAM", "DRAFT",
+    "CATEGORY_FORUMS", "CATEGORY_UPDATES", "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL", "CATEGORY_PERSONAL",
+})
+
 
 class GmailAuthError(Exception):
     """Raised when a license has no usable Gmail credential — no token
@@ -87,6 +98,49 @@ def build_service(license_key: str):
     creds = get_credentials(license_key)
     return build("gmail", "v1", credentials=creds, cache_discovery=False,
                  static_discovery=False)
+
+
+def get_label_map(service) -> dict:
+    """{label_id: label_name} — ported verbatim from the desktop's
+    get_label_map()."""
+    resp = service.users().labels().list(userId="me").execute()
+    return {lbl["id"]: lbl["name"] for lbl in resp.get("labels", [])}
+
+
+def get_thread_label_names(service, thread_id: str, label_map: dict) -> list:
+    """Every non-system label name anywhere in this thread — ported from
+    the desktop's _get_thread_info()/_get_thread_label_names(), simplified
+    to just the names (the desktop also returns the thread's subject, used
+    there only for its own Telegram "labeled thread" notification, which
+    poller.py doesn't send — see roadmap on the deliberately-simplified
+    notification scope)."""
+    try:
+        thread = service.users().threads().get(
+            userId="me", id=thread_id, format="metadata",
+            metadataHeaders=["Subject"],
+        ).execute()
+        found = set()
+        for msg in thread.get("messages", []):
+            for lid in msg.get("labelIds", []):
+                if lid not in _SYSTEM_LABEL_IDS and not lid.startswith("CATEGORY_"):
+                    found.add(lid)
+        return [label_map.get(lid, lid) for lid in found]
+    except Exception:
+        return []
+
+
+def has_custom_labels(label_ids) -> bool:
+    """Same check as parser_core._has_custom_labels() — kept here too
+    (not imported from there) so gmail_client has no dependency on
+    parser_core; poller.py is the only place that needs both."""
+    return any(lid not in _SYSTEM_LABEL_IDS and not lid.startswith("CATEGORY_")
+               for lid in label_ids)
+
+
+def mark_as_read(service, msg_id: str):
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+    ).execute()
 
 
 def validate_and_probe(token_json: str) -> dict:

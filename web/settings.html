@@ -98,6 +98,7 @@
       <button id="sa-toggle" class="btn btn-primary" type="button" disabled>…</button>
     </div>
     <p id="sa-hint" class="note-text"></p>
+    <p id="sa-poller-status" class="note-text" style="padding-top:0;"></p>
   </section>
 </main>
 
@@ -401,6 +402,43 @@ saToggle.addEventListener("click", async () => {
 });
 
 loadStandaloneSettings();
+
+// ── Poller liveness ──────────────────────────────────────────────
+// poller.py is a wholly separate process from this API server — this
+// just reads the heartbeat row it writes once per loop tick. Direct
+// fix for "I can't tell if it's working": silence here means the
+// poller process itself isn't running at all (not that nothing
+// matched), which is worth distinguishing from a normal quiet period.
+const saPollerStatus = document.getElementById("sa-poller-status");
+const POLLER_STALE_AFTER_MS = 3 * 20 * 1000; // 3x the poller's own poll interval
+
+async function loadPollerStatus() {
+  try {
+    const res = await MB.apiGet("/api/web/standalone/poller_status");
+    const hb = res.heartbeat;
+    if (!hb || !hb.last_run_at) {
+      saPollerStatus.textContent = "⚪ Poller has never reported in — the background service may not be running yet.";
+      saPollerStatus.style.color = "var(--text-dim)";
+      return;
+    }
+    const ageMs = Date.now() - new Date(hb.last_run_at).getTime();
+    const ageSec = Math.round(ageMs / 1000);
+    const stale = ageMs > POLLER_STALE_AFTER_MS;
+    saPollerStatus.textContent = stale
+      ? `⚠️ Poller hasn't reported in ${ageSec}s — check the service.`
+      : `🟢 Poller last ran ${ageSec}s ago (${hb.licenses_processed} license(s) checked).`;
+    saPollerStatus.style.color = stale ? "var(--warn)" : "var(--good)";
+    if (hb.last_error) {
+      saPollerStatus.textContent += ` Last error: ${hb.last_error.split("\n").pop()}`;
+    }
+  } catch (err) {
+    // Non-fatal — don't bounce the whole page over a status sub-panel.
+    saPollerStatus.textContent = "";
+  }
+}
+
+loadPollerStatus();
+setInterval(loadPollerStatus, 15000);
 </script>
 </body>
 </html>

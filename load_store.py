@@ -66,6 +66,16 @@ def init_db():
             template   TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )''')
+        # poller.py's heartbeat — single row, overwritten every outer-loop
+        # tick regardless of per-license outcomes. This is the direct fix
+        # for "I can't tell if it's working": the Settings UI polls this
+        # to show "poller last ran Xs ago" instead of silence.
+        conn.execute('''CREATE TABLE IF NOT EXISTS poller_heartbeat (
+            id                 INTEGER PRIMARY KEY CHECK (id = 1),
+            last_run_at        TEXT,
+            licenses_processed INTEGER DEFAULT 0,
+            last_error         TEXT
+        )''')
         # Seed the single bid_template row with the historical default,
         # exactly once — matches what BID_TEMPLATE used to default to as
         # a plain Python string before this migration. Never overwrites
@@ -154,5 +164,35 @@ def set_bid_template(template: str):
             (template, _now()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def write_poller_heartbeat(licenses_processed: int, last_error: Optional[str] = None):
+    conn = _connect()
+    try:
+        conn.execute(
+            '''INSERT INTO poller_heartbeat (id, last_run_at, licenses_processed, last_error)
+               VALUES (1, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET last_run_at=excluded.last_run_at,
+                                              licenses_processed=excluded.licenses_processed,
+                                              last_error=excluded.last_error''',
+            (_now(), licenses_processed, last_error),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_poller_heartbeat() -> Optional[dict]:
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT last_run_at, licenses_processed, last_error FROM poller_heartbeat WHERE id=1"
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"last_run_at": row[0], "licenses_processed": row[1], "last_error": row[2]}
     finally:
         conn.close()
