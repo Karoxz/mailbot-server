@@ -60,7 +60,11 @@ logger = logging.getLogger("poller")
 # loop with nobody watching a GUI in real time, not a latency-sensitive
 # interactive tool.
 POLL_INTERVAL_SECONDS = 20
-FRESH_WINDOW = "1h"           # same window as the desktop's fallback poller
+FRESH_WINDOW = "3d"           # TEMP for testing 2026-09-05, was "1h" (the desktop's
+                              # own fallback-poller window) — widened on request to
+                              # exercise the real match/notify path against the
+                              # backlog of already-unread mail. Revert to "1h" once
+                              # testing confirms the pipeline works end to end.
 MAX_RESULTS_PER_CYCLE = 10
 DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
