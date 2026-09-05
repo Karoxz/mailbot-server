@@ -38,6 +38,26 @@ def init_db():
         )
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Standalone engine (2026-09-05) — the server acting as the bot itself,
+    # with no desktop needing to be open. Every one of these defaults to
+    # off/empty: nothing here should ever silently start reading someone's
+    # inbox or sending Telegram messages just because the column now
+    # exists. standalone_mode_enabled is the actual master switch;
+    # standalone_bot_token/chat_ids are separate from the existing
+    # telegram_enabled toggle (that one gates whether the DESKTOP is
+    # allowed to send — these are the credentials the STANDALONE poller
+    # sends with, since it has no desktop config to read from at all).
+    for _col, _decl in [
+        ('standalone_mode_enabled',     'INTEGER DEFAULT 0'),
+        ('standalone_allowed_vehicles', "TEXT DEFAULT ''"),
+        ('standalone_max_radius_miles', 'INTEGER'),
+        ('standalone_chat_ids',         "TEXT DEFAULT ''"),
+        ('standalone_bot_token',        "TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(f'ALTER TABLE licenses ADD COLUMN {_col} {_decl}')
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -101,6 +121,96 @@ def set_telegram_enabled(key: str, enabled: bool) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def get_standalone_settings(key: str) -> Optional[dict]:
+    """Returns None if the license doesn't exist at all, otherwise a
+    dict of every standalone_* field (bot_token included — callers that
+    show this to a UI are responsible for masking it, this function
+    doesn't decide that)."""
+    row = _get_row(key)
+    if not row:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        '''SELECT standalone_mode_enabled, standalone_allowed_vehicles,
+                  standalone_max_radius_miles, standalone_chat_ids, standalone_bot_token
+           FROM licenses WHERE key=?''', (key,)
+    ).fetchone()
+    conn.close()
+    if not val:
+        return None
+    enabled, vehicles, radius, chat_ids, bot_token = val
+    return {
+        'standalone_mode_enabled': bool(enabled),
+        'allowed_vehicles':        vehicles or '',
+        'max_radius_miles':        radius,
+        'chat_ids':                chat_ids or '',
+        'bot_token':               bot_token or '',
+    }
+
+
+def set_standalone_settings(key: str, **fields) -> bool:
+    """Partial update — only columns present in `fields` are touched.
+    Valid keys: allowed_vehicles, max_radius_miles, chat_ids, bot_token."""
+    row = _get_row(key)
+    if not row:
+        return False
+    col_map = {
+        'allowed_vehicles': 'standalone_allowed_vehicles',
+        'max_radius_miles': 'standalone_max_radius_miles',
+        'chat_ids':         'standalone_chat_ids',
+        'bot_token':        'standalone_bot_token',
+    }
+    sets, values = [], []
+    for k, v in fields.items():
+        if k in col_map:
+            sets.append(f'{col_map[k]}=?')
+            values.append(v)
+    if not sets:
+        return True
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(f'UPDATE licenses SET {", ".join(sets)} WHERE key=?', (*values, key))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_standalone_mode_enabled(key: str) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        'SELECT standalone_mode_enabled FROM licenses WHERE key=?', (key,)
+    ).fetchone()
+    conn.close()
+    return bool(val[0]) if val and val[0] is not None else False
+
+
+def set_standalone_mode_enabled(key: str, enabled: bool) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE licenses SET standalone_mode_enabled=? WHERE key=?',
+        (1 if enabled else 0, key)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def list_standalone_enabled_licenses() -> list:
+    """Active licenses with standalone_mode_enabled=1 — what poller.py
+    (Phase C) iterates every cycle."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT key FROM licenses WHERE active=1 AND standalone_mode_enabled=1"
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 
 def validate_license(key: str, machine_id: str) -> dict:

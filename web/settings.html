@@ -53,6 +53,52 @@
     </form>
     <p class="note-text">⚠️ This is the server's <em>fallback</em> template — the desktop app always sends its own locally-configured template with every load it parses, so editing this here does <strong>not</strong> change what the desktop actually uses day-to-day. It only applies when a caller doesn't supply its own.</p>
   </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Gmail connection</h2>
+      <span class="panel-hint">Lets the server read your inbox directly — required for Standalone mode below.</span>
+    </div>
+    <div style="padding:16px 18px;">
+      <div style="margin-bottom:12px;">
+        <span id="gmail-status" style="font-weight:600;">Loading…</span>
+      </div>
+      <div id="gmail-connect-form">
+        <p class="note-text" style="padding:0 0 10px;">
+          Paste the content of your desktop app's <code>token.json</code> file below (sits next to <code>main copy.py</code> on the machine that runs it). This is a one-time upload of an <em>already-authorized</em> token, not a "Sign in with Google" button — the server reuses the same OAuth grant the desktop already has.
+          <br>⚠️ This grants the server read/send access to this Gmail inbox — treat it like a password, not a config value.
+        </p>
+        <textarea id="gmail-token-input" rows="4" placeholder='{"token": "...", "refresh_token": "...", ...}' style="width:100%;font-family:monospace;font-size:.8rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
+        <div class="form-actions" style="padding:10px 0 0;">
+          <button id="gmail-connect-btn" class="btn btn-primary" type="button">Connect</button>
+        </div>
+      </div>
+      <div id="gmail-disconnect-row" class="form-actions" style="padding-top:2px;" hidden>
+        <button id="gmail-disconnect-btn" class="btn btn-danger" type="button">Disconnect</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Standalone mode</h2>
+      <span class="panel-hint">Runs the whole bot server-side — reads Gmail, matches loads, notifies — with no desktop app needing to be open at all.</span>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Allowed vehicles (comma-separated)</label><input id="sa-vehicles" placeholder="e.g. LARGE STRAIGHT, SPRINTER"></div>
+      <div class="field"><label>Max radius (miles)</label><input id="sa-radius" type="number" placeholder="e.g. 300"></div>
+      <div class="field"><label>Telegram chat IDs (comma-separated)</label><input id="sa-chatids" placeholder="e.g. 123456789"></div>
+      <div class="field"><label>Telegram bot token</label><input id="sa-bottoken" type="password" placeholder="paste bot token"></div>
+    </div>
+    <div class="form-actions" style="padding:0 18px 16px;">
+      <button id="sa-save-btn" class="btn" type="button">Save settings</button>
+    </div>
+    <div class="form-actions" style="padding:0 18px 14px;align-items:center;">
+      <span id="sa-status" style="font-weight:600;">Loading…</span>
+      <button id="sa-toggle" class="btn btn-primary" type="button" disabled>…</button>
+    </div>
+    <p id="sa-hint" class="note-text"></p>
+  </section>
 </main>
 
 <div id="toast"></div>
@@ -187,6 +233,174 @@ templateForm.addEventListener("submit", async (e) => {
 });
 
 loadTemplate();
+
+// ── Gmail connection ─────────────────────────────────────────────
+const gmailStatus       = document.getElementById("gmail-status");
+const gmailConnectForm  = document.getElementById("gmail-connect-form");
+const gmailTokenInput   = document.getElementById("gmail-token-input");
+const gmailConnectBtn   = document.getElementById("gmail-connect-btn");
+const gmailDisconnectRow = document.getElementById("gmail-disconnect-row");
+const gmailDisconnectBtn = document.getElementById("gmail-disconnect-btn");
+
+let gmailConnected = false;
+
+function renderGmailStatus(connected, email) {
+  gmailConnected = connected;
+  if (connected) {
+    gmailStatus.textContent = `✅ Connected as ${email}`;
+    gmailStatus.style.color = "var(--good)";
+    gmailConnectForm.hidden = true;
+    gmailDisconnectRow.hidden = false;
+  } else {
+    gmailStatus.textContent = "⚪ Not connected";
+    gmailStatus.style.color = "var(--text-dim)";
+    gmailConnectForm.hidden = false;
+    gmailDisconnectRow.hidden = true;
+  }
+  renderStandaloneGate();
+}
+
+async function loadGmailStatus() {
+  try {
+    const res = await MB.apiGet("/api/web/gmail/status");
+    renderGmailStatus(res.connected, res.connected_email);
+    MB.setConn(true);
+  } catch (err) {
+    gmailStatus.textContent = "Error loading status";
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+gmailConnectBtn.addEventListener("click", async () => {
+  const tokenJson = gmailTokenInput.value.trim();
+  if (!tokenJson) { showToast("Paste token.json content first", true); return; }
+  gmailConnectBtn.disabled = true;
+  gmailConnectBtn.textContent = "Connecting…";
+  try {
+    const res = await MB.apiPost("/api/web/gmail/token", { token_json: tokenJson });
+    showToast(`Connected as ${res.connected_email}`);
+    gmailTokenInput.value = "";
+    await loadGmailStatus();
+  } catch (err) {
+    showToast(err.message || "Failed to connect", true);
+  } finally {
+    gmailConnectBtn.disabled = false;
+    gmailConnectBtn.textContent = "Connect";
+  }
+});
+
+gmailDisconnectBtn.addEventListener("click", async () => {
+  if (!confirm("Disconnect Gmail? Standalone mode will stop working until it's reconnected.")) return;
+  gmailDisconnectBtn.disabled = true;
+  try {
+    await MB.apiDelete("/api/web/gmail/token");
+    showToast("Gmail disconnected");
+    await loadGmailStatus();
+    await loadStandaloneSettings();
+  } catch (err) {
+    showToast(err.message || "Failed to disconnect", true);
+  } finally {
+    gmailDisconnectBtn.disabled = false;
+  }
+});
+
+loadGmailStatus();
+
+// ── Standalone mode ───────────────────────────────────────────────
+const saVehicles = document.getElementById("sa-vehicles");
+const saRadius   = document.getElementById("sa-radius");
+const saChatIds  = document.getElementById("sa-chatids");
+const saBotToken = document.getElementById("sa-bottoken");
+const saSaveBtn  = document.getElementById("sa-save-btn");
+const saStatus   = document.getElementById("sa-status");
+const saToggle   = document.getElementById("sa-toggle");
+const saHint     = document.getElementById("sa-hint");
+
+let saEnabled = false;
+let saHasVehicles = false;
+
+function renderStandaloneGate() {
+  // Client-side gating is a UX nicety only — /api/web/standalone/enable
+  // re-checks these same prerequisites server-side, so this can't be
+  // bypassed by calling the API directly. Always set disabled
+  // unconditionally (not just inside an "if not enabled" branch) — the
+  // toggle click handler sets disabled=true immediately on click to
+  // block double-clicks, and this is what clears it back; a
+  // conditional-only assignment here left the "Turn off" button
+  // permanently stuck disabled after a successful enable, since the
+  // "only when !saEnabled" branch never re-ran to undo it.
+  const ready = gmailConnected && saHasVehicles;
+  saToggle.disabled = saEnabled ? false : !ready;
+  if (ready) {
+    saHint.textContent = "Prerequisites met — this can run with no desktop app open at all.";
+  } else {
+    const missing = [];
+    if (!gmailConnected) missing.push("connect Gmail above");
+    if (!saHasVehicles) missing.push("set at least one allowed vehicle");
+    saHint.textContent = `Needs: ${missing.join(", ")}.`;
+  }
+}
+
+function renderSaState() {
+  saStatus.textContent = saEnabled ? "🟢 RUNNING" : "⚪ OFF";
+  saStatus.style.color = saEnabled ? "var(--good)" : "var(--text-dim)";
+  saToggle.textContent = saEnabled ? "Turn off" : "Turn on";
+  saToggle.className = saEnabled ? "btn btn-danger" : "btn btn-primary";
+  renderStandaloneGate();
+}
+
+async function loadStandaloneSettings() {
+  try {
+    const res = await MB.apiGet("/api/web/standalone/settings");
+    saVehicles.value = res.allowed_vehicles || "";
+    saRadius.value = res.max_radius_miles ?? "";
+    saChatIds.value = res.chat_ids || "";
+    saBotToken.value = res.bot_token || "";
+    saHasVehicles = !!(res.allowed_vehicles || "").trim();
+    saEnabled = !!res.standalone_mode_enabled;
+    renderSaState();
+    MB.setConn(true);
+  } catch (err) {
+    saStatus.textContent = "Error loading status";
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+saSaveBtn.addEventListener("click", async () => {
+  saSaveBtn.disabled = true;
+  try {
+    await MB.apiPost("/api/web/standalone/settings", {
+      allowed_vehicles: saVehicles.value.trim(),
+      max_radius_miles: saRadius.value ? Number(saRadius.value) : null,
+      chat_ids: saChatIds.value.trim(),
+      bot_token: saBotToken.value.trim(),
+    });
+    showToast("Standalone settings saved");
+    await loadStandaloneSettings();
+  } catch (err) {
+    showToast(err.message || "Failed to save", true);
+  } finally {
+    saSaveBtn.disabled = false;
+  }
+});
+
+saToggle.addEventListener("click", async () => {
+  saToggle.disabled = true;
+  const endpoint = saEnabled ? "/api/web/standalone/disable" : "/api/web/standalone/enable";
+  try {
+    const res = await MB.apiPost(endpoint, {});
+    saEnabled = !!res.enabled;
+    renderSaState();
+    showToast(saEnabled ? "Standalone mode enabled" : "Standalone mode disabled");
+  } catch (err) {
+    showToast(err.message || "Failed to update", true);
+    renderStandaloneGate();
+  }
+});
+
+loadStandaloneSettings();
 </script>
 </body>
 </html>

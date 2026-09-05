@@ -14,7 +14,8 @@ from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatReque
                      RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
                      ThreadLearningToggleRequest, BackfillThreadRequest,
                      WebLoginRequest, WebTruckIn, WebTruckUpdate, WebBlacklistRequest,
-                     WebRecordBidRequest, WebBidTemplateRequest, TelegramToggleRequest)
+                     WebRecordBidRequest, WebBidTemplateRequest, TelegramToggleRequest,
+                     WebGmailTokenUpload, WebStandaloneSettings)
 import thread_learner
 import license_db
 from license_db import init_db, validate_license, activate_license, heartbeat, \
@@ -25,6 +26,8 @@ import bid_history
 import reply_classifier
 import fleet_store
 import load_store
+import gmail_store
+import gmail_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -61,6 +64,7 @@ async def lifespan(app):
     bid_history.init_processed_threads_table()
     fleet_store.init_db()
     load_store.init_db()
+    gmail_store.init_db()
     logger.info("Database initialized")
     yield
 
@@ -622,6 +626,109 @@ def web_set_bid_template(req: WebBidTemplateRequest):
     load_store.set_bid_template(req.template)
     logger.info("[WEB] bid template updated (server-side default)")
     return {"success": True}
+
+
+# ── Standalone engine (Phase B, 2026-09-05) ─────────────────────────────
+# See MAILBOT_ROADMAP.md — the server acting as the bot itself, no
+# desktop needing to be open. This phase is credential/settings storage
+# only: nothing here ever polls Gmail in a loop or sends a Telegram
+# message. That's poller.py (Phase C), a separate process, shipped
+# default-off.
+
+@app.post("/api/web/gmail/token")
+def web_gmail_token_upload(req: WebGmailTokenUpload):
+    """Validates the pasted token.json content actually works against
+    Gmail (a real getProfile() call) BEFORE saving anything — an
+    upload endpoint that trusted arbitrary pasted JSON without checking
+    it first would let a dispatcher "connect" a dead/garbage token and
+    not find out until the poller silently skips them."""
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    probe = gmail_client.validate_and_probe(req.token_json)
+    if not probe["ok"]:
+        raise HTTPException(status_code=400, detail=probe["error"])
+
+    gmail_store.save_token(req.license_key, probe["token_json"], probe["email"])
+    logger.info(f"[WEB] Gmail token connected for {req.license_key} ({probe['email']})")
+    return {"success": True, "connected_email": probe["email"]}
+
+
+@app.get("/api/web/gmail/status")
+def web_gmail_status(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, **gmail_store.get_status(license_key)}
+
+
+@app.delete("/api/web/gmail/token")
+def web_gmail_token_delete(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    gmail_store.delete_token(license_key)
+    logger.info(f"[WEB] Gmail token disconnected for {license_key}")
+    return {"success": True}
+
+
+@app.get("/api/web/standalone/settings")
+def web_standalone_settings_get(license_key: str):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    settings = license_db.get_standalone_settings(license_key)
+    gmail_status = gmail_store.get_status(license_key)
+    return {"success": True, **settings, "gmail_connected": gmail_status["connected"],
+            "gmail_connected_email": gmail_status["connected_email"]}
+
+
+@app.post("/api/web/standalone/settings")
+def web_standalone_settings_set(req: WebStandaloneSettings):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    fields = req.dict(exclude={"license_key"}, exclude_none=True)
+    license_db.set_standalone_settings(req.license_key, **fields)
+    logger.info(f"[WEB] standalone settings updated for {req.license_key}: {list(fields.keys())}")
+    return {"success": True}
+
+
+@app.post("/api/web/standalone/enable")
+def web_standalone_enable(req: WebLoginRequest):
+    """Unlike the Telegram/thread-learning toggles, this one re-checks
+    real prerequisites server-side before flipping on — a raw API call
+    must not be able to bypass the safety gate even if a UI's own
+    client-side gating is bypassed or stale. Turning it OFF is always
+    unconditional (see disable, below)."""
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    gmail_status = gmail_store.get_status(req.license_key)
+    if not gmail_status["connected"]:
+        raise HTTPException(status_code=400,
+                             detail="No Gmail token connected — connect Gmail first.")
+
+    settings = license_db.get_standalone_settings(req.license_key)
+    if not (settings and settings["allowed_vehicles"].strip()):
+        raise HTTPException(status_code=400,
+                             detail="No allowed vehicles configured — set at least one first.")
+
+    license_db.set_standalone_mode_enabled(req.license_key, True)
+    logger.info(f"[WEB] standalone mode ENABLED for {req.license_key}")
+    return {"success": True, "enabled": True}
+
+
+@app.post("/api/web/standalone/disable")
+def web_standalone_disable(req: WebLoginRequest):
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.set_standalone_mode_enabled(req.license_key, False)
+    logger.info(f"[WEB] standalone mode disabled for {req.license_key}")
+    return {"success": True, "enabled": False}
 
 
 # Static frontend — mounted LAST and at a sub-path so it can never

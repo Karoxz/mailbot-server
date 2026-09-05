@@ -150,3 +150,17 @@ class WebRecordBidRequest(BaseModel):
 class WebBidTemplateRequest(BaseModel):
     license_key: str
     template:    str
+
+
+# ── Standalone engine (Phase B, 2026-09-05) ─────────────────────────────
+class WebGmailTokenUpload(BaseModel):
+    license_key: str
+    token_json:  str   # raw JSON text pasted/uploaded from token.json
+
+
+class WebStandaloneSettings(BaseModel):
+    license_key:               str
+    allowed_vehicles:          Optional[str] = None  # comma-separated
+    max_radius_miles:          Optional[int] = None
+    chat_ids:                  Optional[str] = None  # comma-separated
+    bot_token:                 Optional[str] = None
