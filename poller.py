@@ -77,31 +77,35 @@ DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
 def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = None,
                     route_url: str = None, gmail_url: str = None):
-    """BID PC is deliberately a plain `url` button, NOT callback_data
-    (2026-09-05, explicit decision) — a genuine one-tap jump straight to
-    the Gmail thread, no bot round-trip, no reply message to wait for.
-    The tradeoff, accepted: a Telegram button is url XOR callback_data,
-    never both, so this specific button no longer records a bid the way
-    it used to — BID PHONE/DRAFT still do (they stay callback_data,
-    recording the bid and replying with copyable text — long-press to
-    copy, since no bot on any platform can write to a recipient's
-    device clipboard; that's a hard platform limit, not an
-    implementation gap). If BID PC fires before a real thread_id is
-    known yet, gmail_url falls back to a search link instead — still a
-    genuine one-tap url button either way, just not a guaranteed exact
-    thread in that edge case. Row 2 is the ROUTE url button. The REPLY
-    button isn't included (desktop-only — see module docstring)."""
+    """BID PC (2026-09-05) is a plain link in the message TEXT, not an
+    inline button — Telegram shows an "Open this link?" interstitial for
+    EVERY inline url-type button, on every client, for every bot,
+    unconditionally (an anti-phishing measure: a button's label isn't
+    the URL, so Telegram confirms the real destination before
+    navigating — this can't be suppressed via the Bot API, no matter how
+    the button is built). A plain URL sitting in the message body,
+    auto-linkified by Telegram, doesn't get that treatment, since the
+    destination is already visible with nothing hidden behind a label —
+    so putting the link directly in the text is the one lever that
+    actually removes the confirmation prompt, at the cost of it not
+    looking like a proper button. BID PHONE/DRAFT are unaffected — still
+    callback_data buttons, still recording the bid + replying with
+    copyable text (long-press to copy — no bot on any platform can
+    write to a recipient's device clipboard, that's a hard platform
+    limit, not an implementation gap). ROUTE (row 1) is still a real
+    button and will show the same interstitial if tapped — not changed,
+    since only BID PC's confirmation prompt was raised as an issue."""
+    if gmail_url:
+        text = f"{text}\n\n💵 BID PC — open thread directly:\n{gmail_url}"
     payload = {"text": text}
     keyboard = []
-    if order_id:
-        row1 = [{"text": "💵 BID PC", "url": gmail_url}] if gmail_url else []
-        row1 += [
-            {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
-            {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
-        ]
-        keyboard.append(row1)
     if route_url:
         keyboard.append([{"text": "🚩 ROUTE 🚩", "url": route_url}])
+    if order_id:
+        keyboard.append([
+            {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
+            {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
+        ])
     if keyboard:
         payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     for chat_id in chat_ids:
