@@ -86,16 +86,17 @@ async function copyToClipboard(text) {
   }
 }
 
-function openBidModal(orderId, method, bidText, copied, brokerEmail) {
+function openBidModal(orderId, method, bidText, copied, brokerEmail, threadId) {
   modalTitle.textContent = `Bid text — #${orderId} (${method.toUpperCase()})`;
   modalHint.textContent = (copied ? "" : "⚠️ Couldn't auto-copy (clipboard permission) — select the text below manually. ")
     + METHOD_HINT[method];
   modalText.value = bidText;
-  // No real Gmail thread ID reaches the frontend yet (see common.js's
-  // gmailSearchUrl comment) — this is a search link, not a guaranteed
-  // exact-thread deep link, but gets there without manual searching in
-  // the overwhelming majority of cases since order numbers are distinctive.
-  modalGmailLink.href = MB.gmailSearchUrl(orderId, brokerEmail, null);
+  // Real Gmail thread ID reaches the frontend now (2026-09-05, for
+  // loads sourced from the standalone poller — it fetches the actual
+  // Gmail message, unlike the desktop's /api/parse HTTP call which
+  // never sent one). gmailSearchUrl() falls back to a search link when
+  // threadId is empty (still the case for desktop-sourced loads).
+  modalGmailLink.href = MB.gmailSearchUrl(orderId, brokerEmail, threadId);
   modalOverlay.classList.add("open");
   modalText.focus();
   modalText.select();
@@ -116,7 +117,13 @@ async function recordBid(orderId, method, btn, brokerEmail) {
   try {
     const result = await MB.apiPost("/api/web/record_bid", { order_id: orderId, method });
     const copied = await copyToClipboard(result.bid_text || "");
-    openBidModal(orderId, method, result.bid_text || "", copied, brokerEmail);
+    openBidModal(orderId, method, result.bid_text || "", copied, brokerEmail, result.thread_id);
+    // Matches the desktop's actual behavior — it doesn't just show a
+    // link, it copies the bid text AND opens the Gmail thread itself.
+    // Only fires as a real thread deep link when result.thread_id is
+    // present (poller-sourced loads); falls back to a search tab
+    // otherwise, same two-tier scheme as the modal's own link.
+    window.open(MB.gmailSearchUrl(orderId, brokerEmail, result.thread_id), "_blank", "noopener");
     showToast(`Recorded ${method.toUpperCase()} bid for #${orderId} (bid #${result.bid_id})`);
     // Mark this load's card as "recorded" so a re-click isn't ambiguous.
     btn.closest(".feed-card").querySelectorAll("button").forEach((b) => {
@@ -155,7 +162,7 @@ function renderLoads(items) {
         .map((r) => `<div class="meta">• ${MB.esc(r)}</div>`).join("");
       const orderId = MB.esc(it.order || "");
       const brokerEmail = it.broker_email || "";
-      const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, null);
+      const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, it.thread_id);
 
       return `
         <div class="feed-card">

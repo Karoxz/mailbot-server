@@ -370,10 +370,19 @@ def web_feed(license_key: str, limit: int = 50):
     # scoped per-license still, a known limitation, fine while
     # there's a single active dispatcher).
     items = load_store.get_recent_loads(limit=limit)
-    # original_msg_full carries raw Gmail payload data — strip it,
-    # the frontend never needs it and it's not JSON-clean.
-    cleaned = [{k: v for k, v in item.items() if k != "original_msg_full"}
-               for item in items]
+    # original_msg_full carries raw Gmail payload data the frontend never
+    # needs in full — strip it, but pull the one field out of it first
+    # that the frontend DOES need: the real threadId (present for
+    # poller-sourced loads as of 2026-09-05, still '' for anything
+    # sourced from the desktop's /api/parse, which never sends one) —
+    # this is what lets "Find in Gmail" land on the exact thread instead
+    # of only ever falling back to a search.
+    cleaned = []
+    for item in items:
+        thread_id = (item.get("original_msg_full") or {}).get("threadId", "")
+        entry = {k: v for k, v in item.items() if k != "original_msg_full"}
+        entry["thread_id"] = thread_id
+        cleaned.append(entry)
     return {"success": True, "count": len(cleaned), "items": cleaned}
 
 

@@ -2243,8 +2243,16 @@ def parse_email_for_api(request_data: dict) -> dict:
 
     local_bid_template = request_data.get('bid_template') or load_store.get_bid_template()
 
+    # threadId defaults to '' (the historical HTTP /api/parse behavior —
+    # the desktop's JSON request never carried this) but a caller that
+    # DOES have the real Gmail thread (poller.py, which fetches the
+    # actual message directly) can pass it through here, so the
+    # resulting load_store entry carries a real deep link instead of
+    # only ever supporting a Gmail *search* fallback. This is what lets
+    # "Find in Gmail"/BID PC land on the exact thread again.
     dummy_msg = {'payload': {'headers': [], 'parts': []},
-                 'threadId': '', 'labelIds': [], 'id': ''}
+                 'threadId': request_data.get('thread_id') or '',
+                 'labelIds': [], 'id': request_data.get('message_id') or ''}
 
     formatted, info, order, bid_url = process_bid_email(
         raw_text           = request_data['email_body'],

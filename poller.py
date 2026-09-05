@@ -120,7 +120,14 @@ _TG_METHOD_MAP = {
 }
 
 
-def _gmail_search_url(order_id, broker_email):
+def _gmail_url(order_id, broker_email, thread_id=None):
+    """Real thread deep link when we have one (poller-sourced loads now
+    carry a real threadId — see parser_core.parse_email_for_api's
+    thread_id passthrough), falling back to a search link otherwise —
+    same two-tier scheme as common.js's gmailSearchUrl() on the web
+    side, kept in sync deliberately."""
+    if thread_id:
+        return f"https://mail.google.com/mail/u/0/#all/{thread_id}"
     q = str(order_id or "").strip()
     if broker_email:
         q += f" from:{broker_email}"
@@ -153,7 +160,7 @@ def _record_bid_and_build_text(order_id: str, method: str):
     )
     return {
         "bid_id": bid_id, "bid_text": bid_text,
-        "gmail_url": _gmail_search_url(order_id, load.get("broker_email")),
+        "gmail_url": _gmail_url(order_id, load.get("broker_email"), thread_id),
     }
 
 
@@ -298,6 +305,9 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
         "max_radius_miles":  radius_miles,
         "trucks":            fleet_store.list_trucks(),
         "bid_template":      None,  # falls back to load_store's server default
+        "thread_id":         thread_id,   # real Gmail thread — this is what
+        "message_id":        msg_id,      # lets "Find in Gmail"/BID PC land
+                                           # on the exact thread, not a search
     })
 
     # "Already read" is the dedup mechanism (same as the desktop) — no
