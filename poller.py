@@ -76,20 +76,30 @@ DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
 
 def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = None,
-                    route_url: str = None):
-    """Same button layout as the desktop's send_to_telegram(): row 1 is
-    BID PC / BID PHONE / DRAFT (callback_data "bid:<order>" etc. — exact
-    same scheme the desktop uses), row 2 is a plain ROUTE url button.
-    The REPLY button isn't included (desktop-only — see module
-    docstring); everything else matches."""
+                    route_url: str = None, gmail_url: str = None):
+    """BID PC is deliberately a plain `url` button, NOT callback_data
+    (2026-09-05, explicit decision) — a genuine one-tap jump straight to
+    the Gmail thread, no bot round-trip, no reply message to wait for.
+    The tradeoff, accepted: a Telegram button is url XOR callback_data,
+    never both, so this specific button no longer records a bid the way
+    it used to — BID PHONE/DRAFT still do (they stay callback_data,
+    recording the bid and replying with copyable text — long-press to
+    copy, since no bot on any platform can write to a recipient's
+    device clipboard; that's a hard platform limit, not an
+    implementation gap). If BID PC fires before a real thread_id is
+    known yet, gmail_url falls back to a search link instead — still a
+    genuine one-tap url button either way, just not a guaranteed exact
+    thread in that edge case. Row 2 is the ROUTE url button. The REPLY
+    button isn't included (desktop-only — see module docstring)."""
     payload = {"text": text}
     keyboard = []
     if order_id:
-        keyboard.append([
-            {"text": "💵 BID PC",    "callback_data": f"bid:{order_id}"},
+        row1 = [{"text": "💵 BID PC", "url": gmail_url}] if gmail_url else []
+        row1 += [
             {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
             {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
-        ])
+        ]
+        keyboard.append(row1)
     if route_url:
         keyboard.append([{"text": "🚩 ROUTE 🚩", "url": route_url}])
     if keyboard:
@@ -106,7 +116,13 @@ def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = No
             logger.warning(f"Telegram send exception (chat {chat_id}): {e}")
 
 
-# ── Telegram button callbacks (BID PC / BID PHONE / DRAFT) ───────────
+# ── Telegram button callbacks (BID PHONE / DRAFT) ────────────────────
+# BID PC (2026-09-05) is a plain url button now, not callback_data — see
+# _telegram_send's docstring — so "bid" below is effectively unreachable
+# from any newly-sent message. Left in place only so an already-sent
+# message from before this change (if one's still sitting in a chat)
+# doesn't hit an unknown-action error if tapped.
+#
 # Mirrors main.py's web_record_bid() exactly (same bid_history.record_bid()
 # + parser_core.build_bid_reply_body() call, same fields) — duplicated
 # here rather than imported from main.py, since main.py is the FastAPI
@@ -317,9 +333,12 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
 
     if result.get("success") and result.get("formatted"):
         if bot_token and chat_ids:
-            route_url = (result.get("load_data") or {}).get("route_url")
+            load_data = result.get("load_data") or {}
+            route_url = load_data.get("route_url")
+            gmail_url = _gmail_url(result.get("order_id"), load_data.get("broker_email"), thread_id)
             _telegram_send(bot_token, chat_ids, result["formatted"],
-                           order_id=result.get("order_id"), route_url=route_url)
+                           order_id=result.get("order_id"), route_url=route_url,
+                           gmail_url=gmail_url)
         logger.info(f"[{license_key}] matched load #{result.get('order_id')}")
         return True
     return False
