@@ -22,10 +22,7 @@
 # thread_learning_enabled flag before calling process_thread() at all.
 # =============================================================
 
-import os
 import re
-import json
-import time
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
@@ -35,62 +32,45 @@ from requests.adapters import HTTPAdapter
 
 import bid_history
 import reply_classifier
+import llm_client
 
 TIMEOUT_DAYS = 3  # no broker reply after this many days -> inferred loss
 
-_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(max_retries=0))
+
+_RATE_SYSTEM_PROMPT = (
+    "You are reading one message from a freight rate negotiation "
+    "between a dispatcher and a broker. If this message states or "
+    "confirms a specific dollar rate for the load (an offer, a "
+    "counter-offer, or an acceptance of a rate), return ONLY that "
+    "number with no formatting, e.g. 1400 or 1400.50. "
+    "If no specific dollar rate is stated, return exactly: null"
+)
 
 
 def _extract_rate_from_text(body: str):
     """
-    One bounded Gemini call per message — fails soft to None on any
-    error, same fail-soft contract as broker_note_extractor and
-    _google_maps_route. A missing/unparseable rate just means that
-    message doesn't contribute a data point; it never breaks the walk.
-
-    Free-tier Gemini quota is 15 requests/minute for this model — a
-    backfill sends many calls back-to-back, so this sleeps briefly
-    before every call and retries once on a 429 rather than burning
-    the whole backfill run on quota errors.
+    One bounded LLM call per message (Groq, since 2026-09-08 — see
+    llm_client.py) — fails soft to None on any error, same fail-soft
+    contract as broker_note_extractor and _google_maps_route. A
+    missing/unparseable rate just means that message doesn't
+    contribute a data point; it never breaks the walk.
     """
-    if not _GEMINI_API_KEY or not body or not body.strip():
+    if not llm_client.has_api_key() or not body or not body.strip():
         return None
-    time.sleep(4.5)  # ~13/min, safely under the 15/min free-tier cap
-    for attempt in range(2):
-        try:
-            from google import genai
-            client = genai.Client(api_key=_GEMINI_API_KEY)
-            prompt = (
-                "You are reading one message from a freight rate negotiation "
-                "between a dispatcher and a broker. If this message states or "
-                "confirms a specific dollar rate for the load (an offer, a "
-                "counter-offer, or an acceptance of a rate), return ONLY that "
-                "number with no formatting, e.g. 1400 or 1400.50. "
-                "If no specific dollar rate is stated, return exactly: null\n\n"
-                f"MESSAGE:\n{body[:3000]}"
-            )
-            resp = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
-                contents=prompt,
-            )
-            text = (resp.text or "").strip()
-            if text.lower() == "null" or not text:
-                return None
-            m = re.search(r"(\d[\d,]*(?:\.\d{1,2})?)", text)
-            if not m:
-                return None
-            return float(m.group(1).replace(",", ""))
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if attempt == 0:
-                    print(f"[THREAD-LEARNER] rate limited, waiting 10s and retrying once...", flush=True)
-                    time.sleep(10)
-                    continue
-            print(f"[THREAD-LEARNER] rate extraction failed (non-fatal): {e}", flush=True)
+    try:
+        text = llm_client.chat(_RATE_SYSTEM_PROMPT, f"MESSAGE:\n{body[:3000]}", max_tokens=60)
+        text = text.strip()
+        if text.lower() == "null" or not text:
             return None
-    return None
+        m = re.search(r"(\d[\d,]*(?:\.\d{1,2})?)", text)
+        if not m:
+            return None
+        return float(m.group(1).replace(",", ""))
+    except Exception as e:
+        print(f"[THREAD-LEARNER] rate extraction failed (non-fatal): {e}", flush=True)
+        return None
 
 
 def _order_id_from_text(subject: str, body: str):

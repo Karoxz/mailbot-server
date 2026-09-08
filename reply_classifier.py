@@ -1,32 +1,30 @@
 # =============================================================
-# reply_classifier.py  —  server-side module  (Gemini backend)
+# reply_classifier.py  —  server-side module  (Groq backend)
 #
 # Classifies a broker's email reply on a bid thread into an outcome
-# (won / lost / countered / no_signal) using the Google Gemini API's
-# free tier. Called from the /api/classify_reply endpoint in main.py,
-# which ALWAYS checks bid_history.get_pending_bids_for_thread() first
-# — this module is never invoked unless a pending bid already exists
-# on that thread, so ordinary inbox traffic never spends a call.
+# (won / lost / countered / no_signal) using Groq's free tier
+# (replaced Gemini 2026-09-08 — see llm_client.py). Called from the
+# /api/classify_reply endpoint in main.py, which ALWAYS checks
+# bid_history.get_pending_bids_for_thread() first — this module is
+# never invoked unless a pending bid already exists on that thread,
+# so ordinary inbox traffic never spends a call.
 #
-# Uses gemini-2.5-flash with a JSON response_schema — Gemini enforces
-# the schema itself rather than us hoping the model follows a prompt
-# instruction and stripping markdown fences afterward, so this is
-# actually more robust than the old Claude-based version, not just a
-# drop-in swap.
+# Groq's JSON mode guarantees syntactically valid JSON but, unlike
+# Gemini's response_schema, does NOT enforce field names/types itself
+# — the schema is spelled out in the system prompt instead, and the
+# post-processing below stays defensive (unrecognized status ->
+# no_signal, bad confidence -> 0.0) exactly as it already was.
 #
-# Fails soft: any error (missing key, package missing, API failure,
-# unparseable response, low confidence) returns/leads to 'no_signal',
-# so a bad classification can never silently overwrite a bid's real
-# outcome with the wrong one.
+# Fails soft: any error (missing key, API failure, unparseable
+# response, low confidence) returns/leads to 'no_signal', so a bad
+# classification can never silently overwrite a bid's real outcome
+# with the wrong one.
 # =============================================================
 
-import os
 import json
-import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-_GEMINI_KEY_WARNED = False
-_CLASSIFY_MODEL = "gemini-2.5-flash"
+import llm_client
 
 _SYSTEM_PROMPT = """You are classifying a single email reply from a freight broker, in the context of a truck bid a dispatcher already sent them.
 
@@ -37,38 +35,10 @@ Read the reply and decide which ONE outcome it represents:
 - "no_signal"  — reply doesn't indicate any outcome (auto-reply, unrelated question, forwarded thread, etc.)
 
 Also include a one-sentence reason, a confidence from 0.0-1.0, and — only if the broker mentioned a specific counter rate — that number.
+
+Respond with ONLY a JSON object, no other text, in exactly this shape:
+{"status": "won" | "lost" | "countered" | "no_signal", "confidence": <number 0.0-1.0>, "reason": "<one sentence>", "counter_rate": <number or null>}
 """
-
-_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status":       {"type": "string", "enum": ["won", "lost", "countered", "no_signal"]},
-        "confidence":   {"type": "number"},
-        "reason":       {"type": "string"},
-        "counter_rate": {"type": "number"},
-    },
-    "required": ["status", "confidence", "reason"],
-}
-
-
-def _get_gemini_client():
-    global _GEMINI_KEY_WARNED
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        if not _GEMINI_KEY_WARNED:
-            print("[CLASSIFY] GEMINI_API_KEY not set — reply classification disabled.", flush=True)
-            _GEMINI_KEY_WARNED = True
-        return None
-    try:
-        from google import genai
-        from google.genai import types
-        return genai.Client(api_key=api_key,
-                             http_options=types.HttpOptions(timeout=20_000))
-    except ImportError:
-        if not _GEMINI_KEY_WARNED:
-            print("[CLASSIFY] 'google-genai' package not installed — run: pip install google-genai", flush=True)
-            _GEMINI_KEY_WARNED = True
-        return None
 
 
 def _no_signal(reason: str) -> Dict[str, Any]:
@@ -80,49 +50,25 @@ def classify_broker_reply(subject: str, body: str) -> Dict[str, Any]:
     Returns {"status", "confidence", "reason", "counter_rate"}.
     Never raises — any failure degrades to a 'no_signal' result so the
     caller can safely leave the bid's status untouched.
-
-    Throttled + retried the same way as thread_learner's rate
-    extraction: a bulk backfill calls this once per broker message
-    across many threads with no other pacing, so without this a run
-    at volume hits the free-tier rate limit and every call silently
-    degrades to "no_signal" — indistinguishable from a genuinely
-    ambiguous reply, and able to mask a real "won" outcome as quota
-    exhaustion rather than actual signal.
     """
-    client = _get_gemini_client()
-    if not client:
-        return _no_signal("classifier unavailable (no API key / package)")
+    if not llm_client.has_api_key():
+        return _no_signal("classifier unavailable (no API key)")
 
     # Cap input size — replies are short; this just bounds a
     # pathologically long thread from ballooning the request.
     trimmed_body = (body or "")[:4000]
 
-    time.sleep(4.5)  # ~13/min, safely under the 15/min free-tier cap
-    for attempt in range(2):
-        try:
-            from google.genai import types
-            resp = client.models.generate_content(
-                model=_CLASSIFY_MODEL,
-                contents=f"Subject: {subject or '(no subject)'}\n\nBody:\n{trimmed_body}",
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=_RESPONSE_SCHEMA,
-                    max_output_tokens=200,
-                ),
-            )
-            # resp.text is Optional[str] — None if Gemini returned no text
-            # part (e.g. safety-blocked). "" fails json.loads cleanly and
-            # falls into the except below, same fail-soft path either way.
-            data = json.loads(resp.text or "")
-            break
-        except Exception as e:
-            if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt == 0:
-                print("[CLASSIFY] rate limited, waiting 10s and retrying once...", flush=True)
-                time.sleep(10)
-                continue
-            print(f"[CLASSIFY] error: {e}", flush=True)
-            return _no_signal(f"classifier error: {e}")
+    try:
+        text = llm_client.chat(
+            _SYSTEM_PROMPT,
+            f"Subject: {subject or '(no subject)'}\n\nBody:\n{trimmed_body}",
+            json_mode=True,
+            max_tokens=200,
+        )
+        data = json.loads(text or "")
+    except Exception as e:
+        print(f"[CLASSIFY] error: {e}", flush=True)
+        return _no_signal(f"classifier error: {e}")
 
     status = data.get("status")
     if status not in ("won", "lost", "countered", "no_signal"):

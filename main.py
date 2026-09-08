@@ -53,7 +53,6 @@ def _load_env_file(path=".env"):
 _load_env_file()
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
-GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
 API_SECRET          = os.environ.get("API_SECRET", "dev-secret-local")
 
 
