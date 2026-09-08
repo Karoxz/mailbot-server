@@ -656,7 +656,17 @@ def _graphhopper_route(origin_latlon, dest_latlon):
         try:
             r = _gh_session.get(GRAPHHOPPER_URL, params={
                 "point": [f"{lat1},{lon1}", f"{lat2},{lon2}"],
-                "vehicle": "car",
+                # "vehicle" (was here) is REJECTED by GraphHopper 9.x with
+                # "profile parameter required" — found 2026-09-08 via the
+                # autonomous monitoring loop: confirmed live against the
+                # real running instance (v9.1) that every single request
+                # using "vehicle" was failing and silently falling back to
+                # OSRM. Very likely the actual root cause of the original
+                # "GraphHopper exception: 'paths'" finding from 2026-09-02
+                # too, not just an occasional "no coverage" case as assumed
+                # at the time — this instance's /info endpoint confirms its
+                # one configured profile is literally named "car".
+                "profile": "car",
                 "calc_points": "false",
                 "instructions": "false",
             }, timeout=4)
