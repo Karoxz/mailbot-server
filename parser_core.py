@@ -661,6 +661,20 @@ def _graphhopper_route(origin_latlon, dest_latlon):
                 "instructions": "false",
             }, timeout=4)
             data = r.json()
+            if "paths" not in data:
+                # Expected, not necessarily a bug — GraphHopper returns this
+                # when a point is outside its road-network coverage, or the
+                # local instance is briefly degraded. Previously this fell
+                # through to a bare `data["paths"][0]` KeyError caught by the
+                # generic `except Exception` below, logged only as
+                # "GraphHopper exception: 'paths'" — indistinguishable from
+                # a genuinely different failure mode. OSRM fallback already
+                # covers this case either way (not business-impacting), but
+                # logging it distinctly means a real new failure won't get
+                # lumped in and missed.
+                err_msg = data.get("message") or data.get("hints") or "no 'paths' in response"
+                print(f"[GH] no route (falling back to OSRM): {err_msg}", flush=True)
+                return None
             path = data["paths"][0]
             raw_miles  = path["distance"] / 1609.344
 
@@ -690,7 +704,7 @@ def _graphhopper_route(origin_latlon, dest_latlon):
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             return None
         except Exception as e:
-            print(f"GraphHopper exception: {e}", flush=True)
+            print(f"GraphHopper exception: {type(e).__name__}: {e}", flush=True)
             return None
 
 
