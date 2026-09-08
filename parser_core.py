@@ -2084,17 +2084,23 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             maps_verification=maps_verification,
             bid_recommendation=bid_recommendation,
         )
-        _DECISION_ICON = {
-            "Accept": "✅", "Bid": "🎯", "Negotiate": "⚠️", "Reject": "⛔",
-        }
-        lines.append("")
-        lines.append(
-            f"{_DECISION_ICON.get(load_decision['decision'], '🎯')} "
-            f"Decision: {load_decision['decision'].upper()}  "
-            f"(confidence {load_decision['confidence']*100:.0f}%)"
-        )
-        for _reason in load_decision["reasons"]:
-            lines.append(f"   • {_reason}")
+        # "Decision:" section removed from the message text on request
+        # (2026-09-08, "for now" — implies revisit later). load_decision
+        # itself is UNCHANGED and still computed/stored (LOAD_STORE,
+        # load_data, the dashboard, and decision_engine's own blacklist
+        # hard-reject all still work exactly as before) — only the
+        # lines appended to the Telegram/formatted text are gone.
+        # _DECISION_ICON = {
+        #     "Accept": "✅", "Bid": "🎯", "Negotiate": "⚠️", "Reject": "⛔",
+        # }
+        # lines.append("")
+        # lines.append(
+        #     f"{_DECISION_ICON.get(load_decision['decision'], '🎯')} "
+        #     f"Decision: {load_decision['decision'].upper()}  "
+        #     f"(confidence {load_decision['confidence']*100:.0f}%)"
+        # )
+        # for _reason in load_decision["reasons"]:
+        #     lines.append(f"   • {_reason}")
 
     delivery_dt_stored = "ASAP" if delivery_asap else delivery_dt
 
