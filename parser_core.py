@@ -2115,13 +2115,21 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     # what a reply will actually come from.
     bid_recommendation = None
     if deadhead_miles is not None:
-        _rec_miles = None
-        if maps_verification and maps_verification.get("verified_miles") is not None:
-            _rec_miles = maps_verification["verified_miles"]
-        elif total_miles is not None:
-            _rec_miles = total_miles
-        else:
-            _rec_miles = deadhead_miles
+        # MUST be the same kind of mileage bid_history's historical
+        # $/mi average is itself computed from (total_miles, or
+        # loaded_miles — see bid_history.record_bid()'s miles_for_rate
+        # docstring) — never the deadhead-only leg. Found alongside that
+        # fix, 2026-09-09: this used to prefer maps_verification's
+        # verified_miles (the truck-to-pickup deadhead ONLY) over
+        # total_miles, which is exactly why the client's flagged
+        # "$9,287" suggestion divided out to precisely 72 — this load's
+        # deadhead — instead of its real 85-mile total trip. Multiplying
+        # a total-trip-based $/mi rate by a deadhead-only mileage is
+        # apples-to-oranges regardless of whether the rate itself is
+        # correct. No fallback to deadhead here either: a missing
+        # suggestion (get_bid_recommendation returns None when miles is
+        # falsy) is honest; a mismatched one isn't.
+        _rec_miles = total_miles
 
         _pu_state = extract_state_from_location(pickup_loc) if pickup_loc else None
         _dl_state = extract_state_from_location(delivery_loc) if delivery_loc else None
