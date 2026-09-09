@@ -1937,6 +1937,31 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         # distance and are unaffected by this reassignment.
         if maps_verification and maps_verification.get("maps_miles") is not None:
             deadhead_miles = maps_verification["maps_miles"]
+
+            # ── Re-enforce the radius cap against the VERIFIED figure ──
+            # Client-reported real case, 2026-09-09: a truck matched
+            # under the 200mi cap using GraphHopper's number, but Google
+            # Maps verification came back at 225mi for the same truck/
+            # pickup pair — over the cap — and the load still got sent
+            # to Telegram anyway, because the cap was only ever checked
+            # against the pre-verification GraphHopper figure inside
+            # find_all_trucks_for_pickup(), never re-checked once the
+            # more accurate number was in hand. Reject here, the same
+            # way "no truck in range" already rejects, rather than
+            # sending a notification for a load outside the client's
+            # own configured radius.
+            if deadhead_miles > max_radius_miles:
+                print(f"[MATCH] REJECTED post-Maps-verification: "
+                      f"{best_truck['driver_name']} verified deadhead "
+                      f"{deadhead_miles}mi > {max_radius_miles}mi cap "
+                      f"(GraphHopper/fallback had estimated "
+                      f"{best_match['google_deadhead']}mi)", flush=True)
+                return (None,
+                        f"OUT OF RADIUS AFTER MAPS VERIFICATION "
+                        f"({deadhead_miles}mi verified > {max_radius_miles}mi cap; "
+                        f"GraphHopper originally estimated "
+                        f"{best_match['google_deadhead']}mi)",
+                        order, None)
     else:
         _PE2 = time.perf_counter()
 
