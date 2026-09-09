@@ -532,6 +532,8 @@ def web_record_bid(req: WebRecordBidRequest):
         broker_name=load.get("broker_name", ""),
         broker_email=load.get("broker_email", ""),
         deadhead_miles=load.get("google_deadhead"),
+        loaded_miles=load.get("loaded_miles"),
+        total_miles=load.get("total_miles"),
         verified_miles=maps_v.get("verified_miles"),
         verified_source=maps_v.get("verified_source"),
     )
