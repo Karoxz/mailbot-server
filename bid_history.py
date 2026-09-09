@@ -203,7 +203,22 @@ def record_bid(order_id: str,
     lane = (f"{pickup_state}-{delivery_state}"
             if pickup_state and delivery_state else "")
 
-    miles_for_rate = verified_miles or total_miles or deadhead_miles
+    # rate_per_mile MUST be price-per-real-trip-mile (loaded, or
+    # loaded+deadhead) — never deadhead-alone. Found live 2026-09-09: a
+    # client-visible "$9,287 suggested bid" ($128.98/mi) on an 85-mile
+    # total trip, traced to exactly this — verified_miles/deadhead_miles
+    # (the truck-to-pickup deadhead leg ALONE, typically a small slice
+    # of the real trip) was being preferred over total_miles whenever
+    # both existed, and used as a last-resort denominator even when it
+    # was the ONLY figure on hand. A $3000 bid divided by a 13-mile
+    # deadhead produces a meaningless $230/mi that has no relationship
+    # to real freight economics, and several of these had already
+    # poisoned the vehicle_type-wide average other bids get compared
+    # against. total_miles/loaded_miles are the only valid basis now;
+    # if neither is known, rate_per_mile stays None (never guessed from
+    # deadhead) rather than storing a number that will mislead every
+    # future suggestion pulling from this pool.
+    miles_for_rate = total_miles or loaded_miles
     rate_per_mile = (round(bid_amount / miles_for_rate, 2)
                       if bid_amount and miles_for_rate else None)
 
@@ -238,16 +253,19 @@ def record_bid(order_id: str,
 def update_bid_amount(bid_id: int, bid_amount: float) -> bool:
     """Attach a rate to an existing bid row once it's known (e.g. a
     later UI step where the dispatcher confirms what they actually
-    quoted). Recomputes rate_per_mile from whatever mileage is stored."""
+    quoted, or the automatic thread-learning backfill). Recomputes
+    rate_per_mile from the real trip mileage — see record_bid()'s
+    miles_for_rate docstring for why verified_miles/deadhead_miles are
+    deliberately excluded here."""
     conn = _connect()
     try:
         row = conn.execute(
-            'SELECT verified_miles, total_miles, deadhead_miles FROM bids WHERE id=?',
+            'SELECT total_miles, loaded_miles FROM bids WHERE id=?',
             (bid_id,)
         ).fetchone()
         if not row:
             return False
-        miles_for_rate = row[0] or row[1] or row[2]
+        miles_for_rate = row[0] or row[1]
         rate_per_mile = round(bid_amount / miles_for_rate, 2) if miles_for_rate else None
         conn.execute(
             'UPDATE bids SET bid_amount=?, rate_per_mile=?, updated_at=? WHERE id=?',
