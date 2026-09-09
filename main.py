@@ -28,6 +28,8 @@ import fleet_store
 import load_store
 import gmail_store
 import gmail_client
+import route_calibration
+import zip_geocode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -64,6 +66,8 @@ async def lifespan(app):
     fleet_store.init_db()
     load_store.init_db()
     gmail_store.init_db()
+    route_calibration.init_db()
+    zip_geocode.warmup()
     logger.info("Database initialized")
     yield
 

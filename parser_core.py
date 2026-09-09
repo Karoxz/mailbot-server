@@ -118,6 +118,8 @@ import decision_engine
 
 import freight_fit_checker
 import broker_note_extractor
+import route_calibration
+import zip_geocode
 def _haversine_miles(lat1, lon1, lat2, lon2) -> float:
     R = 3958.8
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -524,6 +526,21 @@ def _in_state_bbox(state, lat, lon):
     return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
 
 
+def _state_from_coords(lat, lon) -> Optional[str]:
+    """
+    Approximate reverse-geocode using the same bounding boxes already
+    kept for geocode sanity-checking — good enough for lane-calibration
+    keys (route_calibration.py), not used anywhere accuracy-critical.
+    Border overlaps mean this can occasionally pick a neighboring state;
+    that's fine here, it just means a lane's learned factor gets shared
+    with an adjacent border lane once in a while.
+    """
+    for state, box in _STATE_BBOX.items():
+        if box[0] <= lat <= box[1] and box[2] <= lon <= box[3]:
+            return state
+    return None
+
+
 def _extract_zip_state(place: str):
     """
     Pull a bare (state, zip) out of a noisy string like
@@ -564,9 +581,18 @@ def photon_geocode(place: str) -> Optional[List[float]]:
     zip_state = _extract_zip_state(place)
     if zip_state:
         _, zip_code = zip_state
-        result = _try(_geocode_nominatim, "nominatim(zip)", zip_code, zip_code)
-        if result:
-            source = "nominatim-zip"
+        # Offline lookup FIRST — no network round trip. This is the fix
+        # for the confirmed 7-8s-per-message geocoding bottleneck during
+        # a burst of new postings (see zip_geocode.py's module docstring
+        # for the production evidence). Falls straight through to the
+        # existing Nominatim zip lookup, untouched, if this misses.
+        offline = zip_geocode.lookup(zip_code)
+        if offline and (not expected_state or _in_state_bbox(expected_state, offline[0], offline[1])):
+            result, source = offline, "offline-zip"
+        if not result:
+            result = _try(_geocode_nominatim, "nominatim(zip)", zip_code, zip_code)
+            if result:
+                source = "nominatim-zip"
 
     if not result:
         result = _try(_geocode_nominatim, "nominatim", place, place_clean)
@@ -707,6 +733,22 @@ def _graphhopper_route(origin_latlon, dest_latlon):
                 offset_applied = DEADHEAD_UNDER_600_OFFSET
                 miles += offset_applied
             final_miles = max(0, miles)
+
+            # ── Lane-learned correction on top of the blanket factors ──
+            # above. Every time this same state-to-state lane has been
+            # independently checked against Google Maps, apply the
+            # running-average correction so a repeat lane converges on
+            # the real (Maps-verified) distance instead of repeating a
+            # known GraphHopper miss. No-op until a lane has at least
+            # one recorded observation (route_calibration.py).
+            state1 = _state_from_coords(lat1, lon1)
+            state2 = _state_from_coords(lat2, lon2)
+            calibrated_miles = route_calibration.apply_calibration(state1, state2, final_miles)
+            if calibrated_miles != final_miles:
+                print(f"[ROUTE-CAL] lane {state1}-{state2}: {final_miles}mi -> "
+                      f"{calibrated_miles}mi", flush=True)
+                final_miles = calibrated_miles
+
             print(f"[GH] {lat1:.3f},{lon1:.3f} -> {lat2:.3f},{lon2:.3f}  "
                   f"raw={raw_miles:.1f}mi  after_factor={base_miles:.1f}mi  "
                   f"offset={offset_applied}  final={final_miles}mi", flush=True)
@@ -879,6 +921,14 @@ def verify_route_with_google_maps(origin_latlon, dest_latlon, gh_result: dict, l
     tag = f"[MAPS-VERIFY] {label}: " if label else "[MAPS-VERIFY] "
     print(f"{tag}GH={gh_miles}mi Maps={maps_miles}mi diff={diff_miles}mi "
           f"({diff_pct * 100:.1f}%) — {'FLAGGED' if flagged else 'ok'}", flush=True)
+
+    # ── Feed this real Google-Maps-verified reading back into the ──────
+    # lane calibration store so the NEXT GraphHopper call on this same
+    # state-to-state lane is nudged toward this observed truth (see
+    # route_calibration.py + the calibration lookup in _graphhopper_route).
+    state1 = _state_from_coords(*origin_latlon)
+    state2 = _state_from_coords(*dest_latlon)
+    route_calibration.record_calibration(state1, state2, gh_miles, maps_miles)
 
     return {
         "gh_miles": gh_miles, "gh_minutes": gh_result.get("minutes"),
@@ -1932,18 +1982,15 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     lines.append("")
 
     if deadhead_miles is not None:
-        lines.append(f"Out Miles: {deadhead_miles}")
-        # ── NEW: surface the Google Maps cross-check right under the
-        # GraphHopper number, when it was computed ──────────────────────
+        # "Out Miles" shows the Google-Maps-verified figure whenever a
+        # verification ran (client-facing, request 2026-09-09: no more
+        # exposing the raw GraphHopper-vs-Maps comparison line — just
+        # the one trustworthy number). Falls back to the GraphHopper/
+        # fallback-routed figure when Maps verification didn't run.
+        _out_miles = deadhead_miles
         if maps_verification and maps_verification.get("maps_miles") is not None:
-            mv = maps_verification
-            icon = "⚠️" if mv["flagged"] else "✅"
-            toll_note = " · has tolls" if mv.get("has_tolls") else ""
-            lines.append(
-                f"{icon} Maps verified: {mv['maps_miles']}mi  "
-                f"(GH {mv['gh_miles']}mi, Δ{mv['diff_miles']}mi/{mv['diff_pct']*100:.1f}%, "
-                f"confidence {mv['confidence']}{toll_note})"
-            )
+            _out_miles = maps_verification["maps_miles"]
+        lines.append(f"Out Miles: {_out_miles}")
     if estimated_miles_from_email is not None:
         lines.append(f"Loaded Miles: {estimated_miles_from_email}")
     if total_miles is not None:
@@ -1981,10 +2028,14 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     # ── NEW: broker note extraction + freight fit — surfaced right ────
     # alongside the manually-parsed fields above, before broker info.
     if broker_notes:
-        if broker_notes.get("special_handling"):
-            lines.append(f"🧰 Special handling: {', '.join(broker_notes['special_handling'])}")
-        if broker_notes.get("equipment_restrictions"):
-            lines.append(f"🚛 Equipment needed: {', '.join(broker_notes['equipment_restrictions'])}")
+        # "Special handling" / "Equipment needed" / "Hidden" / "Note risks"
+        # lines removed from the client-facing message text on request
+        # (2026-09-09) — they were redundantly restating the same
+        # "exclusive use of trailer" phrase from the Notes field above.
+        # broker_notes itself is UNCHANGED and still stored (LOAD_STORE,
+        # the dashboard, and freight_fit_checker below all still see the
+        # full structured data) — only these 4 of 8 lines are gone from
+        # the rendered text.
         if broker_notes.get("driver_requirements"):
             lines.append(f"🪪 Driver reqs: {', '.join(broker_notes['driver_requirements'])}")
         if broker_notes.get("detention_terms"):
@@ -1993,10 +2044,6 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             lines.append(f"🛌 Layover: {broker_notes['layover_terms']}")
         if broker_notes.get("accessorials"):
             lines.append(f"💵 Accessorials: {', '.join(broker_notes['accessorials'])}")
-        if broker_notes.get("hidden_constraints"):
-            lines.append(f"🔎 Hidden: {', '.join(broker_notes['hidden_constraints'])}")
-        if broker_notes.get("risk_flags"):
-            lines.append("⚠️ Note risks: " + "; ".join(broker_notes["risk_flags"]))
 
     if freight_fit and (freight_fit.get("issues") or freight_fit.get("warnings")):
         for _iss in freight_fit["issues"]:

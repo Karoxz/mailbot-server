@@ -22,3 +22,13 @@ google-auth==2.53.0
 google-auth-oauthlib==1.4.0
 google-auth-httplib2==0.4.0
 httplib2==0.31.2
+
+# Offline US ZIP -> lat/lon lookup (added 2026-09-09, see zip_geocode.py)
+# — replaces a confirmed 7-8s-per-message network geocoding bottleneck
+# (nominatim.openstreetmap.org / photon.komoot.io, both public rate-
+# limited services) with a local dataset lookup for the common
+# "location includes a 5-digit ZIP" case. pandas/numpy come in as
+# pgeocode's own dependencies — left unpinned so pip resolves versions
+# actually compatible with the server's Python, same as this file
+# already does for every other package's transitive deps.
+pgeocode==0.5.0
