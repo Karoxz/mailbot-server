@@ -67,6 +67,20 @@ def _lane_key(state_a: Optional[str], state_b: Optional[str]) -> Optional[str]:
     if not state_a or not state_b:
         return None
     a, b = sorted([state_a.upper(), state_b.upper()])
+    if a == b:
+        # Same-state ("intra-state") pairs deliberately excluded — found
+        # live in production 2026-09-09: a "CO-CO" lane's factor, learned
+        # from one short ~15mi-vs-25mi observation, got applied to a
+        # completely different ~60mi-raw CO-CO route and inflated it to
+        # 100mi when the real Maps-verified distance was 69mi (visible in
+        # journalctl: "[ROUTE-CAL] lane CO-CO: 60mi -> 100mi", immediately
+        # followed by a MAPS-VERIFY flag on the same load) — a state can
+        # contain both a 5-mile hop and a 400-mile cross-state-sized trip,
+        # so one blended factor for "the whole state" is far noisier than
+        # a real inter-state pair, where both endpoints are pinned near
+        # the state line and the corridor length is much more consistent.
+        # Cross-state lanes are unaffected by this.
+        return None
     return f"{a}-{b}"
 
 
