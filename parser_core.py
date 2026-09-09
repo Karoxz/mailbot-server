@@ -1920,6 +1920,23 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                      "minutes": deadhead_eta["minutes"] if deadhead_eta else None},
                     label=f"deadhead:{best_truck['driver_name']}",
                 )
+
+        # ── From here on, deadhead_miles IS the Google-Maps-verified ────
+        # figure whenever verification ran — every use below this point
+        # (ETA, Total Miles, the "Out Miles" line, the bid-text
+        # {google_deadhead} placeholder client-side, bid_recommendation,
+        # decision_engine, and what gets stored for the desktop's draft/
+        # BID PC/PHONE text) reads this one variable, so they can never
+        # disagree with each other again. Found 2026-09-09: the client's
+        # own screenshot showed "Out Miles: 69" (already-fixed display
+        # line) right next to a bid draft reading "Truck is 100 miles
+        # out" and "Total Miles: 1471" (1371 loaded + the raw 100, not
+        # 69) — the display line had been corrected the day before, but
+        # nothing downstream of it had. Matching/radius-cap decisions
+        # earlier in this function already ran against the raw routed
+        # distance and are unaffected by this reassignment.
+        if maps_verification and maps_verification.get("maps_miles") is not None:
+            deadhead_miles = maps_verification["maps_miles"]
     else:
         _PE2 = time.perf_counter()
 
@@ -1982,15 +1999,11 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     lines.append("")
 
     if deadhead_miles is not None:
-        # "Out Miles" shows the Google-Maps-verified figure whenever a
-        # verification ran (client-facing, request 2026-09-09: no more
-        # exposing the raw GraphHopper-vs-Maps comparison line — just
-        # the one trustworthy number). Falls back to the GraphHopper/
-        # fallback-routed figure when Maps verification didn't run.
-        _out_miles = deadhead_miles
-        if maps_verification and maps_verification.get("maps_miles") is not None:
-            _out_miles = maps_verification["maps_miles"]
-        lines.append(f"Out Miles: {_out_miles}")
+        # deadhead_miles is already the Google-Maps-verified figure by
+        # this point when verification ran (see the reassignment right
+        # after maps_verification is computed, above) — falls back to
+        # the GraphHopper/fallback-routed figure otherwise.
+        lines.append(f"Out Miles: {deadhead_miles}")
     if estimated_miles_from_email is not None:
         lines.append(f"Loaded Miles: {estimated_miles_from_email}")
     if total_miles is not None:
