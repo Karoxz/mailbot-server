@@ -2063,31 +2063,19 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if notes:
         lines.append(f"🔔 Notes: {notes}")
 
-    # ── NEW: broker note extraction + freight fit — surfaced right ────
-    # alongside the manually-parsed fields above, before broker info.
-    if broker_notes:
-        # "Special handling" / "Equipment needed" / "Hidden" / "Note risks"
-        # lines removed from the client-facing message text on request
-        # (2026-09-09) — they were redundantly restating the same
-        # "exclusive use of trailer" phrase from the Notes field above.
-        # broker_notes itself is UNCHANGED and still stored (LOAD_STORE,
-        # the dashboard, and freight_fit_checker below all still see the
-        # full structured data) — only these 4 of 8 lines are gone from
-        # the rendered text.
-        if broker_notes.get("driver_requirements"):
-            lines.append(f"🪪 Driver reqs: {', '.join(broker_notes['driver_requirements'])}")
-        if broker_notes.get("detention_terms"):
-            lines.append(f"⏳ Detention: {broker_notes['detention_terms']}")
-        if broker_notes.get("layover_terms"):
-            lines.append(f"🛌 Layover: {broker_notes['layover_terms']}")
-        if broker_notes.get("accessorials"):
-            lines.append(f"💵 Accessorials: {', '.join(broker_notes['accessorials'])}")
-
-    if freight_fit and (freight_fit.get("issues") or freight_fit.get("warnings")):
-        for _iss in freight_fit["issues"]:
-            lines.append(f"⛔ {_iss}")
-        for _warn in freight_fit["warnings"]:
-            lines.append(f"⚠️ {_warn}")
+    # ── broker_notes / freight_fit: no longer rendered into the message ──
+    # text at all, per client request (2026-09-10): "I don't want any AI
+    # comments in general except for rate suggestion." Both fields are
+    # LLM-derived (broker_note_extractor's Groq call, and freight_fit_checker
+    # which itself runs on broker_notes' output) — the one exception is
+    # bid_recommendation ("💡 Suggested bid"), which is plain arithmetic
+    # over real historical bid_history rows, not an LLM call, and stays.
+    # broker_notes/freight_fit themselves are UNCHANGED and still computed
+    # and stored (load_data, the web dashboard) — only the lines that used
+    # to render them into this text are gone. This followed yesterday's
+    # partial removal (4 of broker_notes' 8 fields) once the client
+    # clarified the request was actually about ALL of it, not just those
+    # specific two.
 
     broker_name    = _find(r"Broker\s*Name\s*:?\s*([^\n]+)", t)
     broker_company = _find(r"Broker\s*Company\s*:?\s*([^\n]+)", t)
