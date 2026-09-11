@@ -1965,10 +1965,28 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     else:
         _PE2 = time.perf_counter()
 
-    # ── NEW: broker note extraction (LLM, fails soft to None) ──────────
-    # Runs regardless of whether a truck matched — the notes describe
-    # the load itself, not the assignment, and don't depend on one.
-    broker_notes = broker_note_extractor.extract_broker_notes(t)
+    # ── Broker note extraction — REMOVED from the live hot path ─────────
+    # (2026-09-11). Root-caused a real client-reported latency complaint
+    # (an 8-minute delay on one load, "up to 30s" on others) via direct
+    # journalctl evidence: this LLM call was hitting Groq's free-tier
+    # rate limit constantly during any burst of new postings — 395
+    # separate "[LLM] rate limited, waiting 10s and retrying once..."
+    # hits on 2026-09-10 ALONE, each one stalling that message's whole
+    # process_bid_email() call by ~11s (the 10s retry-wait plus the
+    # normal ~1s throttle) even though the retry itself then ALSO got
+    # 429'd and gave up. With only 4 uvicorn workers, a handful of these
+    # landing close together during a burst is enough to back up
+    # everything behind them in the queue by minutes.
+    # The other half of the picture: this output has had ZERO consumers
+    # since yesterday's "no AI comments" request removed every place
+    # that rendered broker_notes/freight_fit into the Telegram/draft
+    # text, and the web dashboard never displayed either field to begin
+    # with (confirmed via grep — no hits in web/*.html) — so this was
+    # pure latency cost for a result nothing ever showed anyone.
+    # freight_fit_checker.check_freight_fit() below already documents
+    # None as a valid "extraction wasn't available" input and handles it
+    # — its own (fast, non-LLM) dimension/payload checks still run.
+    broker_notes = None
 
     # ── NEW: deterministic freight-fit check against the winning truck ──
     freight_fit = None
@@ -2155,11 +2173,15 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             miles=_rec_miles,
         )
         if bid_recommendation:
+            # Shortened on request (2026-09-11): just the dollar amount
+            # and the per-mile rate — basis/sample-size breakdown dropped,
+            # it wasn't needed on the notification itself. bid_recommendation
+            # still carries 'basis'/'sample_size' for anything else that
+            # wants them (e.g. the web dashboard).
             lines.append("")
             lines.append(
                 f"💡 Suggested bid: ${bid_recommendation['suggested_amount']:,.0f}  "
-                f"(${bid_recommendation['rate_per_mile']:.2f}/mi · "
-                f"{bid_recommendation['basis']} · n={bid_recommendation['sample_size']})"
+                f"(${bid_recommendation['rate_per_mile']:.2f}/mi)"
             )
 
     # ── NEW: decision engine — Accept/Bid/Negotiate/Reject ──────────
