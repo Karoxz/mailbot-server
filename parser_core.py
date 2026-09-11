@@ -1520,7 +1520,11 @@ def find_all_trucks_for_pickup(
         max_radius_miles=500):
     """
     Every truck returned here has already been confirmed to be within
-    max_radius_miles by real routed distance (FIX #4).
+    its effective radius cap by real routed distance (FIX #4). A truck
+    with its own radius_miles override (set per-vehicle, web/desktop —
+    2026-09-11) is checked against THAT number instead of the request's
+    blanket max_radius_miles, which stays the fleet-wide default for
+    every truck that doesn't set its own.
     """
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
     pickup_coords  = photon_geocode(pickup_loc) if pickup_loc else None
@@ -1546,12 +1550,16 @@ def find_all_trucks_for_pickup(
                 continue
         # Generous haversine pre-filter (1.4x) — straight-line distance
         # underestimates real road distance. The HARD cap is enforced
-        # below in Phase 2 against the real routed distance.
+        # below in Phase 2 against the real routed distance. Per-truck
+        # radius override, when set, takes priority over the fleet-wide
+        # default here too — a truck with a smaller radius shouldn't
+        # even survive to Phase 2's real routing call.
+        truck_radius = t.get("radius_miles") or max_radius_miles
         truck_coords = photon_geocode(t["zip"])
         if truck_coords and pickup_coords:
             sl = _haversine_miles(truck_coords[0], truck_coords[1],
                                    pickup_coords[0], pickup_coords[1])
-            if sl > max_radius_miles * 1.4:
+            if sl > truck_radius * 1.4:
                 continue
         candidates.append(t)
 
@@ -1566,17 +1574,21 @@ def find_all_trucks_for_pickup(
 
     def _route_truck(t):
         name = t.get("driver_name", "?")
+        truck_radius = t.get("radius_miles") or max_radius_miles
         dist = get_distance_from_zip(t["zip"], pickup_loc)
         if not dist:
             print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
                   f"routing FAILED", flush=True)
             return
-        if dist["miles"] > max_radius_miles:
+        if dist["miles"] > truck_radius:
             print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
-                  f"REJECTED {dist['miles']}mi > cap {max_radius_miles}mi", flush=True)
+                  f"REJECTED {dist['miles']}mi > cap {truck_radius}mi"
+                  f"{' (per-truck)' if t.get('radius_miles') else ''}", flush=True)
             return
         print(f"[TRUCK-ROUTE] {name} zip={t['zip']} -> pickup={pickup_loc}  "
-              f"ACCEPTED source={dist.get('source','?')}  miles={dist['miles']}", flush=True)
+              f"ACCEPTED source={dist.get('source','?')}  miles={dist['miles']}  "
+              f"cap={truck_radius}mi"
+              f"{' (per-truck)' if t.get('radius_miles') else ''}", flush=True)
         with lock:
             matches.append({
                 "driver_name":          t.get("driver_name", ""),
@@ -1586,6 +1598,7 @@ def find_all_trucks_for_pickup(
                 "google_deadhead":      dist["miles"],
                 "deadhead_eta_minutes": dist["minutes"],
                 "truck_zip":            t["zip"],
+                "radius_miles":         truck_radius,
             })
 
     max_workers = min(len(candidates), 8)
@@ -1683,12 +1696,16 @@ def find_best_truck_for_pickup_with_date(
                 over_height_detail = detail_str
                 continue
 
+        # Per-truck radius override (2026-09-11), same as the parallel
+        # matcher — falls back to the fleet-wide default when unset.
+        truck_radius = t.get("radius_miles") or max_radius_miles
+
         truck_coords  = photon_geocode(t["zip"])
         pickup_coords = photon_geocode(pickup_loc)
         if truck_coords and pickup_coords:
             sl = _haversine_miles(truck_coords[0], truck_coords[1],
                                    pickup_coords[0], pickup_coords[1])
-            if sl > max_radius_miles * 1.4:
+            if sl > truck_radius * 1.4:
                 per_truck_log.append((name, f"too far ({int(sl)} mi)"))
                 continue
 
@@ -1698,16 +1715,16 @@ def find_best_truck_for_pickup_with_date(
             continue
 
         # ── FIX #4: hard radius enforcement — previously missing here ──
-        if dist["miles"] > max_radius_miles:
+        if dist["miles"] > truck_radius:
             per_truck_log.append(
-                (name, f"too far ({dist['miles']} mi > {max_radius_miles} mi cap)"))
+                (name, f"too far ({dist['miles']} mi > {truck_radius} mi cap)"))
             print(f"[FALLBACK-MATCH] {name} REJECTED — {dist['miles']}mi exceeds "
-                  f"{max_radius_miles}mi cap", flush=True)
+                  f"{truck_radius}mi cap", flush=True)
             continue
 
         per_truck_log.append((name, f"✓ {dist['miles']} mi deadhead"))
         print(f"[FALLBACK-MATCH] {name} ACCEPTED — {dist['miles']}mi within "
-              f"{max_radius_miles}mi cap", flush=True)
+              f"{truck_radius}mi cap", flush=True)
         if best_miles is None or dist["miles"] < best_miles:
             best, best_miles = t, dist["miles"]
 
@@ -1888,6 +1905,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                     "google_deadhead":      _best_miles,
                     "deadhead_eta_minutes": int((_best_miles / 45) * 60) if _best_miles else None,
                     "truck_zip":            _best["zip"],
+                    "radius_miles":         _best.get("radius_miles") or max_radius_miles,
                 }]
             else:
                 if reject_reason is None:
@@ -1950,15 +1968,19 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             # way "no truck in range" already rejects, rather than
             # sending a notification for a load outside the client's
             # own configured radius.
-            if deadhead_miles > max_radius_miles:
+            # Use the WINNING truck's own radius override when it has one
+            # (per-vehicle radius, 2026-09-11) — same cap it was actually
+            # matched under above, not the fleet-wide default.
+            _effective_radius = best_match.get("radius_miles") or max_radius_miles
+            if deadhead_miles > _effective_radius:
                 print(f"[MATCH] REJECTED post-Maps-verification: "
                       f"{best_truck['driver_name']} verified deadhead "
-                      f"{deadhead_miles}mi > {max_radius_miles}mi cap "
+                      f"{deadhead_miles}mi > {_effective_radius}mi cap "
                       f"(GraphHopper/fallback had estimated "
                       f"{best_match['google_deadhead']}mi)", flush=True)
                 return (None,
                         f"OUT OF RADIUS AFTER MAPS VERIFICATION "
-                        f"({deadhead_miles}mi verified > {max_radius_miles}mi cap; "
+                        f"({deadhead_miles}mi verified > {_effective_radius}mi cap; "
                         f"GraphHopper originally estimated "
                         f"{best_match['google_deadhead']}mi)",
                         order, None)
@@ -2348,6 +2370,7 @@ def parse_email_for_api(request_data: dict) -> dict:
             'pickup_date':     t.get('pickup_date', ''),
             'allowed_states':  set(t['allowed_states']) if t.get('allowed_states') else None,
             'equipment':       t.get('equipment', ''),
+            'radius_miles':    t.get('radius_miles'),  # None = use the request's global cap
         })
     T1 = time.perf_counter()
     print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)

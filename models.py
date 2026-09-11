@@ -10,7 +10,8 @@ class TruckDef(BaseModel):
     allowed_states: Optional[List[str]] = None
     zip_location: str
     pickup_date: str = ''
- 
+    radius_miles: Optional[int] = None  # None = use the request's global max_radius_miles
+
 class ParseRequest(BaseModel):
     license_key: str
     machine_id: str
