@@ -320,12 +320,25 @@ def classify_reply(req: ClassifyReplyRequest):
     if not pending:
         return {"success": True, "matched": False}
 
+    # Order/lane context for whichever bid this reply is about — added
+    # 2026-09-12 so the client can build a real "a broker replied"
+    # notification without a second round trip. Previously `matched`
+    # was returned with nothing else useful attached, and the client had
+    # no way to tell the dispatcher a reply came in at all.
+    order_context = {
+        "order_id":     pending[0].get("order_id", ""),
+        "pickup_loc":   pending[0].get("pickup_loc", ""),
+        "delivery_loc": pending[0].get("delivery_loc", ""),
+        "broker_name":  pending[0].get("broker_name", ""),
+    }
+
     result = reply_classifier.classify_broker_reply(req.subject, req.message_body)
 
     if result["status"] == "no_signal" or result["confidence"] < 0.55:
         logger.info(f"[CLASSIFY] thread={req.thread_id} no actionable signal "
                     f"(status={result['status']} conf={result['confidence']})")
-        return {"success": True, "matched": True, "updated": False, "classification": result}
+        return {"success": True, "matched": True, "updated": False,
+                "classification": result, "order": order_context}
 
     updated_ids = []
     for bid in pending:
@@ -338,7 +351,8 @@ def classify_reply(req: ClassifyReplyRequest):
     logger.info(f"[CLASSIFY] thread={req.thread_id} -> {result['status']} "
                 f"(conf={result['confidence']}) bids={updated_ids}")
     return {"success": True, "matched": True, "updated": True,
-            "bid_ids": updated_ids, "classification": result}
+            "bid_ids": updated_ids, "classification": result,
+            "order": order_context}
 
 
 # =============================================================
