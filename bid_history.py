@@ -25,6 +25,7 @@
 
 import sqlite3
 import os
+import math
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -506,21 +507,116 @@ def list_all_brokers() -> list:
 # points. As more bids accumulate this naturally starts firing.
 MIN_SAMPLE_SIZE = 10
 
+# Smaller floor for the vehicle_type+distance tier below — it's already
+# narrowed by mileage bracket on top of vehicle type, so a pool this
+# specific reaching even half of MIN_SAMPLE_SIZE is still a meaningful
+# signal, and requiring the full 10 here would mean it essentially never
+# fires until there's a LOT more history than exists today.
+_BRACKET_MIN_SAMPLE_SIZE = 5
+
+# ── Industry-baseline fallback ───────────────────────────────────────
+# Client-reported 2026-09-12: suggested bids were coming back way too
+# high on long-haul loads. Root cause: the old "vehicle_type" tier
+# averaged EVERY historical bid for that vehicle type together
+# regardless of distance — and real dispatcher economics don't work
+# that way. Expedited/hot-shot freight is priced per mile at its
+# HIGHEST on short/local runs (a truck has real minimum-charge
+# economics: driver time, fuel to get moving, dispatch overhead, none
+# of which shrink just because the trip is short) and settles to a
+# lower, roughly flat per-mile rate on long hauls as those fixed costs
+# amortize over more miles. Blending a batch of short local bids (high
+# $/mi, inherently) into a suggestion for an 800-mile lane produced
+# exactly the client's real "$9,287 for an 85-mile load" bug and this
+# same-shaped "too high on long-haul" complaint.
+#
+# A given STATE's own freight density/backhaul availability shifts
+# that long-haul floor too — a geographically peripheral/lower-density
+# market (fewer other loads to pick up nearby once you deliver) means
+# more empty-mile risk on the truck's NEXT load, so brokers price that
+# risk into the rate even at real distance. Client named FL/WA/UT
+# specifically as running ~$2.50/mi long-haul vs. ~$1.80/mi elsewhere —
+# these three are kept as an easily-extended list below, not a claim
+# that only these three states behave this way.
+#
+# This whole curve is ONLY the fallback used when real historical data
+# for a tighter, more specific pool (broker+lane, lane, or vehicle+
+# distance-bracket) doesn't meet its sample threshold yet — which is
+# nearly always true today (industry-wide, the whole system has under
+# 40 resolved bids on file). As real volume accumulates, the tiers
+# above this naturally take over on their own; nothing about this
+# fallback blocks that.
+PREMIUM_RATE_STATES = {"FL", "WA", "UT"}  # extend freely — a flat set, not tuned per-state
+
+_LOCAL_RATE_PER_MILE        = 3.00  # asymptotic rate as distance -> 0
+_LONG_HAUL_RATE_STANDARD    = 1.80  # asymptotic rate as distance -> large, typical state
+_LONG_HAUL_RATE_PREMIUM     = 2.50  # asymptotic rate as distance -> large, PREMIUM_RATE_STATES
+_RATE_DECAY_MILES           = 180   # how fast the "local premium" fades with distance
+
+
+def _industry_baseline_rate(miles: float, pickup_state: Optional[str],
+                             delivery_state: Optional[str]) -> float:
+    """
+    Smoothly blends from the local rate down to the appropriate
+    long-haul asymptote (exponential decay, not a hard cutoff at some
+    arbitrary "local vs long-haul" mile mark — real rates don't cliff-
+    edge like that). At miles=0 this returns _LOCAL_RATE_PER_MILE; by
+    a few hundred miles it's converged to within a few cents of the
+    long-haul rate for that lane's states.
+    """
+    states = {s for s in (pickup_state, delivery_state) if s}
+    long_haul_rate = (_LONG_HAUL_RATE_PREMIUM if states & PREMIUM_RATE_STATES
+                       else _LONG_HAUL_RATE_STANDARD)
+    # `miles or 0` then clamped to >= 0 rather than an early return on
+    # "falsy" — 0 is a legitimate (if unlikely) distance and the decay
+    # formula already handles it correctly on its own (decay=1.0 at
+    # miles=0, giving exactly _LOCAL_RATE_PER_MILE); a bare `if not
+    # miles` would wrongly treat a real 0 the same as a missing value
+    # and skip straight to the long-haul rate instead. get_bid_
+    # recommendation() itself already rejects a falsy `miles` before
+    # ever reaching here, so this clamp is only a defensive floor
+    # against a stray negative value overshooting the local rate.
+    miles = max(miles or 0, 0)
+    decay = math.exp(-miles / _RATE_DECAY_MILES)
+    return round(long_haul_rate + (_LOCAL_RATE_PER_MILE - long_haul_rate) * decay, 2)
+
+
+def _mileage_bracket_clause(miles: float):
+    """
+    SQL fragment restricting a rate query to bids of a similar distance
+    profile, so the vehicle_type fallback tier can't blend a short
+    local trip's naturally-higher $/mi into a long-haul suggestion (or
+    vice versa) — see the module-level comment above for why that
+    matters. Brackets: local (<150mi), medium (150-500mi), long (500mi+).
+    """
+    if miles < 150:
+        return "AND total_miles IS NOT NULL AND total_miles < 150", ()
+    elif miles < 500:
+        return ("AND total_miles IS NOT NULL AND total_miles >= 150 "
+                 "AND total_miles < 500", ())
+    else:
+        return "AND total_miles IS NOT NULL AND total_miles >= 500", ()
+
 
 def get_bid_recommendation(broker_email: str = "", lane: str = "",
                             vehicle_type: str = "",
                             miles: Optional[float] = None) -> Optional[dict]:
     """
     Returns a suggested bid amount using the most specific historical
-    pool that has enough data, falling back to broader pools when it
-    doesn't. Returns None if `miles` is unknown/zero or no pool below
-    reaches MIN_SAMPLE_SIZE.
+    pool that has enough data, falling back to progressively broader
+    pools, and finally to a calibrated industry-baseline curve
+    (_industry_baseline_rate) rather than ever guessing from a
+    distance-blind blended average. Returns None only if `miles` is
+    unknown/zero — every other case now returns SOME grounded estimate.
 
-    Fallback order (most to least specific — broad mode, per config):
+    Fallback order (most to least specific):
       1. this broker + this lane
-      2. this lane (any broker)
-      3. this vehicle type (any lane/broker)
+      2. this lane (any broker)                      — a lane is
+         already a state pair, so this stays naturally
+         distance-consistent without extra bucketing
+      3. this vehicle type, bracketed by distance (any lane/broker)
       4. this broker (any lane)
+      5. the industry-baseline curve (no real data reaches any tier
+         above with enough samples yet)
     Each level is strictly less specific than the last, so this always
     prefers the tightest match that actually has enough volume rather
     than always falling all the way to the broadest pool.
@@ -531,17 +627,21 @@ def get_bid_recommendation(broker_email: str = "", lane: str = "",
     candidates = []
     if broker_email and lane:
         candidates.append(("broker+lane", "AND broker_email=? AND lane=?",
-                            (broker_email, lane)))
+                            (broker_email, lane), MIN_SAMPLE_SIZE))
     if lane:
-        candidates.append(("lane", "AND lane=?", (lane,)))
+        candidates.append(("lane", "AND lane=?", (lane,), MIN_SAMPLE_SIZE))
     if vehicle_type:
-        candidates.append(("vehicle_type", "AND vehicle_type=?", (vehicle_type,)))
+        bracket_where, bracket_params = _mileage_bracket_clause(miles)
+        candidates.append(("vehicle_type+distance",
+                            f"AND vehicle_type=? {bracket_where}",
+                            (vehicle_type,) + bracket_params,
+                            _BRACKET_MIN_SAMPLE_SIZE))
     if broker_email:
-        candidates.append(("broker", "AND broker_email=?", (broker_email,)))
+        candidates.append(("broker", "AND broker_email=?", (broker_email,), MIN_SAMPLE_SIZE))
 
-    for basis, where, params in candidates:
+    for basis, where, params, min_samples in candidates:
         result = _avg_rate_query(where, params)
-        if result["avg_rate_per_mile"] and result["sample_size"] >= MIN_SAMPLE_SIZE:
+        if result["avg_rate_per_mile"] and result["sample_size"] >= min_samples:
             rate = result["avg_rate_per_mile"]
             return {
                 "basis":            basis,
@@ -549,4 +649,13 @@ def get_bid_recommendation(broker_email: str = "", lane: str = "",
                 "rate_per_mile":    rate,
                 "suggested_amount": round(rate * miles, 2),
             }
-    return None
+
+    pickup_state, delivery_state = (lane.split("-", 1) if lane and "-" in lane
+                                     else (None, None))
+    rate = _industry_baseline_rate(miles, pickup_state, delivery_state)
+    return {
+        "basis":            "industry_baseline",
+        "sample_size":      0,
+        "rate_per_mile":    rate,
+        "suggested_amount": round(rate * miles, 2),
+    }
