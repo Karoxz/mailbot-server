@@ -11,6 +11,13 @@ class TruckDef(BaseModel):
     zip_location: str
     pickup_date: str = ''
     radius_miles: Optional[int] = None  # None = use the request's global max_radius_miles
+    # LOADED_MILES range (2026-09-18) — per-vehicle filter on the LOAD's
+    # own loaded miles (pickup->delivery), distinct from radius_miles
+    # (truck->pickup deadhead). None/None = no restriction. Only
+    # loaded_miles_min set ("1000") = 1000 miles and up, no cap.
+    # Both set ("1000-2000") = inclusive range.
+    loaded_miles_min: Optional[int] = None
+    loaded_miles_max: Optional[int] = None
 
 class ParseRequest(BaseModel):
     license_key: str

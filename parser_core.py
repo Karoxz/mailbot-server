@@ -1511,20 +1511,48 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
 # TRUCK MATCHING — PARALLEL PATH
 # =============================================================
 
+def _loaded_miles_out_of_range(t: dict, load_miles) -> bool:
+    """
+    LOADED_MILES range filter (2026-09-18) — a per-vehicle restriction
+    on the LOAD's own loaded miles (pickup->delivery distance), distinct
+    from radius_miles (truck->pickup deadhead). "1000" (min only, no
+    max) means 1000 miles and up; "1000-2000" (both set) means an
+    inclusive range. A truck with neither bound set has no restriction
+    and always passes. When the load's own miles aren't known yet
+    (load_miles is None), a truck WITH a configured range can't be
+    confirmed to match it — better to skip a possibly-wrong match than
+    silently ignore the dispatcher's own restriction.
+    """
+    lm_min = t.get("loaded_miles_min")
+    lm_max = t.get("loaded_miles_max")
+    if lm_min is None and lm_max is None:
+        return False
+    if load_miles is None:
+        return True
+    if lm_min is not None and load_miles < lm_min:
+        return True
+    if lm_max is not None and load_miles > lm_max:
+        return True
+    return False
+
+
 def find_all_trucks_for_pickup(
         trucks, vehicle_required, pickup_loc,
         pickup_dt, raw_text,
         load_weight_lbs=None,
         load_height_in=None,
         delivery_loc=None,
-        max_radius_miles=500):
+        max_radius_miles=500,
+        load_miles=None):
     """
     Every truck returned here has already been confirmed to be within
     its effective radius cap by real routed distance (FIX #4). A truck
     with its own radius_miles override (set per-vehicle, web/desktop —
     2026-09-11) is checked against THAT number instead of the request's
     blanket max_radius_miles, which stays the fleet-wide default for
-    every truck that doesn't set its own.
+    every truck that doesn't set its own. load_miles / per-truck
+    loaded_miles_min/max (2026-09-18) filter on the load's own loaded
+    miles — see _loaded_miles_out_of_range()'s docstring.
     """
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
     pickup_coords  = photon_geocode(pickup_loc) if pickup_loc else None
@@ -1548,6 +1576,8 @@ def find_all_trucks_for_pickup(
         if load_height_in is not None and truck_height is not None:
             if load_height_in > truck_height:
                 continue
+        if _loaded_miles_out_of_range(t, load_miles):
+            continue
         # Generous haversine pre-filter (1.4x) — straight-line distance
         # underestimates real road distance. The HARD cap is enforced
         # below in Phase 2 against the real routed distance. Per-truck
@@ -1629,7 +1659,8 @@ def find_best_truck_for_pickup_with_date(
         load_weight_lbs=None,
         load_height_in=None,
         delivery_loc=None,
-        max_radius_miles=500):
+        max_radius_miles=500,
+        load_miles=None):
     """
     Serial matcher — used for (a) rejection-reason logging when the
     parallel matcher finds zero candidates, and (b) as a recovery path
@@ -1637,16 +1668,20 @@ def find_best_truck_for_pickup_with_date(
     geocode timeout). FIX #4: enforces the exact same hard radius cap
     as the parallel path, so a recovered match can never be out of
     range — this was the direct cause of the "199 mile" ghost matches.
+    load_miles / per-truck loaded_miles_min/max (2026-09-18), same
+    filter as the parallel matcher — see _loaded_miles_out_of_range().
     """
-    best, best_miles   = None, None
-    per_truck_log      = []
-    saw_vehicle_match  = False
-    saw_overweight     = False
-    saw_over_height    = False
-    saw_state_block    = False
-    overweight_detail  = ""
-    over_height_detail = ""
-    state_block_detail = ""
+    best, best_miles      = None, None
+    per_truck_log         = []
+    saw_vehicle_match     = False
+    saw_overweight        = False
+    saw_over_height       = False
+    saw_state_block       = False
+    saw_loaded_miles_block = False
+    overweight_detail     = ""
+    over_height_detail    = ""
+    state_block_detail    = ""
+    loaded_miles_detail   = ""
     delivery_state = extract_state_from_location(delivery_loc) if delivery_loc else None
 
     for t in trucks:
@@ -1696,6 +1731,17 @@ def find_best_truck_for_pickup_with_date(
                 over_height_detail = detail_str
                 continue
 
+        if _loaded_miles_out_of_range(t, load_miles):
+            lm_min, lm_max = t.get("loaded_miles_min"), t.get("loaded_miles_max")
+            range_str = (f"{lm_min}-{lm_max}" if lm_max is not None
+                         else f"{lm_min}+") if lm_min is not None else f"<={lm_max}"
+            miles_str = f"{load_miles} mi" if load_miles is not None else "unknown"
+            saw_loaded_miles_block = True
+            detail_str = f"loaded miles out of range ({miles_str}, truck wants {range_str})"
+            per_truck_log.append((name, detail_str))
+            loaded_miles_detail = detail_str
+            continue
+
         # Per-truck radius override (2026-09-11), same as the parallel
         # matcher — falls back to the fleet-wide default when unset.
         truck_radius = t.get("radius_miles") or max_radius_miles
@@ -1738,6 +1784,8 @@ def find_best_truck_for_pickup_with_date(
         return None, None, f"OVERWEIGHT ({overweight_detail})", per_truck_log
     if saw_state_block:
         return None, None, f"STATE FILTERED ({state_block_detail})", per_truck_log
+    if saw_loaded_miles_block:
+        return None, None, f"LOADED MILES FILTERED ({loaded_miles_detail})", per_truck_log
     return None, None, "NO TRUCK MATCH", per_truck_log
 
 
@@ -1877,7 +1925,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         all_matches = find_all_trucks_for_pickup(
             local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
             load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
-            max_radius_miles=max_radius_miles
+            max_radius_miles=max_radius_miles,
+            load_miles=estimated_miles_from_email
         )
         _PE2 = time.perf_counter()
         print(f"[TIMING]   find_all_trucks: {_PE2-_PE1:.3f}s", flush=True)
@@ -1887,7 +1936,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 find_best_truck_for_pickup_with_date(
                     local_trucks, vehicle_required, pickup_loc, pickup_dt, t,
                     load_weight_lbs, load_height_in, delivery_loc=delivery_loc,
-                    max_radius_miles=max_radius_miles
+                    max_radius_miles=max_radius_miles,
+                    load_miles=estimated_miles_from_email
                 )
             if _best:
                 # Parallel matcher missed it (cold cache, slow geocode, etc.)
@@ -2371,6 +2421,8 @@ def parse_email_for_api(request_data: dict) -> dict:
             'allowed_states':  set(t['allowed_states']) if t.get('allowed_states') else None,
             'equipment':       t.get('equipment', ''),
             'radius_miles':    t.get('radius_miles'),  # None = use the request's global cap
+            'loaded_miles_min': t.get('loaded_miles_min'),
+            'loaded_miles_max': t.get('loaded_miles_max'),
         })
     T1 = time.perf_counter()
     print(f"[TIMING] truck build: {T1-T0:.3f}s", flush=True)
