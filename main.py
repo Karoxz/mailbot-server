@@ -213,19 +213,39 @@ def route_map(req: dict):
     if not GOOGLE_MAPS_API_KEY:
         return {"success": False, "reason": "map not configured"}
 
+    # 2026-09-19, second same-day fix — real client feedback in this
+    # order: "map needs to be bigger" (x2) -> "make it responsive" ->
+    # "still covers everything the grey box" -> "i cant see the full
+    # map". Requesting one fixed-aspect (square) image and then either
+    # letterboxing (fit) or cropping (cover) it client-side to match
+    # the actual display area was always going to lose on one side of
+    # that tradeoff. The real fix: the client now tells us its actual
+    # display area (frame_w/frame_h), so we request an image with that
+    # SAME aspect ratio directly from Google — a plain fit then has
+    # zero letterboxing AND zero cropping, because the source already
+    # matches. Falls back to the previous fixed 640x640 when the
+    # client doesn't send dimensions (e.g. an older build).
+    frame_w = req.get("frame_w")
+    frame_h = req.get("frame_h")
+    if isinstance(frame_w, (int, float)) and isinstance(frame_h, (int, float)) \
+            and frame_w > 0 and frame_h > 0:
+        ratio = frame_w / frame_h
+        if ratio >= 1:
+            size_w, size_h = 640, max(1, round(640 / ratio))
+        else:
+            size_h, size_w = 640, max(1, round(640 * ratio))
+        size_param = f"{size_w}x{size_h}"
+    else:
+        size_param = "640x640"
+
     try:
         r = requests.get(
             "https://maps.googleapis.com/maps/api/staticmap",
             params={
-                # 2026-09-19 — the client-side dialog now resizes the
-                # map responsively to whatever size the window actually
-                # is (up to ~1400x1000), rather than one fixed display
-                # size, so this requests the maximum resolution Google
-                # allows on the free/standard tier (640x640, the
-                # pre-scale size-param ceiling) with scale=2 for
-                # 1280x1280 real pixels — as much sharpness headroom as
-                # this API offers, regardless of final display size.
-                "size":    "640x640",
+                # scale=2 keeps it sharp — real pixel dimensions are
+                # double size_param, up to Google's free/standard-tier
+                # ceiling either way.
+                "size":    size_param,
                 "scale":   "2",
                 "path":    f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}",
                 "markers": [f"color:green|label:P|{pickup_loc}",
