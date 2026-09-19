@@ -217,13 +217,15 @@ def route_map(req: dict):
         r = requests.get(
             "https://maps.googleapis.com/maps/api/staticmap",
             params={
-                # 2026-09-19 (client feedback, twice: "much more
-                # bigger", then "still needs to be bigger") — matches
-                # the client's enlarged display area (600x480) so it
-                # fills the frame instead of letterboxing. scale=2
-                # keeps it sharp at that size. 600x480 stays under
-                # Google's 640x640 max for the (pre-scale) size param.
-                "size":    "600x480",
+                # 2026-09-19 — the client-side dialog now resizes the
+                # map responsively to whatever size the window actually
+                # is (up to ~1400x1000), rather than one fixed display
+                # size, so this requests the maximum resolution Google
+                # allows on the free/standard tier (640x640, the
+                # pre-scale size-param ceiling) with scale=2 for
+                # 1280x1280 real pixels — as much sharpness headroom as
+                # this API offers, regardless of final display size.
+                "size":    "640x640",
                 "scale":   "2",
                 "path":    f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}",
                 "markers": [f"color:green|label:P|{pickup_loc}",
