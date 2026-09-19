@@ -1466,8 +1466,16 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
                           delivery, delivery_dt, google_deadhead=None,
                           driver_name="", truck_type="", truck_dims="",
                           deadhead_eta_minutes=None, truck_equipment="",
-                          bid_template=None):
-    eta_str = fmt_hours_minutes(deadhead_eta_minutes) if deadhead_eta_minutes else ""
+                          bid_template=None, price=None, rate_per_mile=None):
+    eta_str   = fmt_hours_minutes(deadhead_eta_minutes) if deadhead_eta_minutes else ""
+    # New feature, 2026-09-19: the BID PC price-entry dialog (map +
+    # price field + live rate/mile) lets the dispatcher confirm a real
+    # price before the draft opens — price/rate_per_mile are that
+    # confirmed value, plain numbers from the client. Formatted here
+    # (not client-side) so every template author gets the same $X.XX
+    # style regardless of caller.
+    price_str = f"${price:,.0f}" if price else ""
+    rate_str  = f"${rate_per_mile:.2f}/mi" if rate_per_mile else ""
     data = dict(
         order=order or "", broker_name=broker or "",
         vehicle_required=vehicle or "", pickup_loc=pickup or "",
@@ -1480,21 +1488,33 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         pickup_date_only=(pickup_dt or "").split()[0] if pickup_dt else "",
         delivery_date_only=(delivery_dt or "").split()[0] if delivery_dt else "",
         deadhead_miles=str(google_deadhead) if google_deadhead is not None else "",
+        price=price_str, rate_per_mile=rate_str,
     )
     if bid_template is None:
         bid_template = load_store.get_bid_template()
     try:
-        return bid_template.format(**data)
+        body = bid_template.format(**data)
     except KeyError as e:
         print(f"BID_TEMPLATE missing key: {e}", flush=True)
-        return bid_template
+        body = bid_template
+    # A confirmed price needs to actually reach the broker, not just
+    # sit in the dispatcher's own notification — if their own template
+    # doesn't already place {price} somewhere deliberate, append it so
+    # the offer is never silently dropped; never double it for a
+    # template that already references {price} itself.
+    if price_str and "{price}" not in (bid_template or ""):
+        offer_line = f"Offer: {price_str}"
+        if rate_str:
+            offer_line += f"  ({rate_str})"
+        body = f"{body}\n\n{offer_line}"
+    return body
 
 
 def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
                           delivery_loc, delivery_dt, google_deadhead=None,
                           driver_name="", truck_type="", truck_dimensions="",
                           deadhead_eta_minutes=None, truck_equipment="",
-                          bid_template=None):
+                          bid_template=None, price=None, rate_per_mile=None):
     return build_bid_email_body(
         order=order, broker="", vehicle=vehicle_required,
         pickup=pickup_loc, pickup_dt=pickup_dt,
@@ -1504,6 +1524,7 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
         deadhead_eta_minutes=deadhead_eta_minutes,
         truck_equipment=truck_equipment,
         bid_template=bid_template,
+        price=price, rate_per_mile=rate_per_mile,
     )
 
 

@@ -5,6 +5,7 @@ import base64 as _b64
 import threading
 import collections
 import logging
+import requests
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
@@ -176,11 +177,67 @@ def build_bid(req: dict):
             deadhead_eta_minutes = load_data.get("deadhead_eta_minutes"),
             truck_equipment  = load_data.get("truck_equipment", ""),
             bid_template     = load_data.get("bid_template"),
+            # BID PC price-entry dialog (2026-09-19) — a confirmed
+            # price/rate from the client, plain numbers, None when not
+            # provided (every other caller of /api/build_bid keeps
+            # working exactly as before).
+            price            = load_data.get("price"),
+            rate_per_mile    = load_data.get("rate_per_mile"),
         )
         return {"bid_text": bid_text}
     except Exception as e:
         logger.error(f"build_bid error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to build bid text")
+
+
+@app.post("/api/route_map")
+def route_map(req: dict):
+    """
+    New endpoint, 2026-09-19: the BID PC price-entry dialog shows a
+    route map (pickup -> delivery) alongside the price field. Proxies
+    Google's Static Maps API server-side so GOOGLE_MAPS_API_KEY (used
+    elsewhere for mileage verification) never reaches the client —
+    same reasoning as every other server-held secret in this project.
+    Fails soft: no key configured, or the fetch itself fails, returns
+    {"success": False, ...} rather than a 500 — the dialog is expected
+    to fall back to text-only route info, not break the whole flow.
+    """
+    check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    pickup_loc   = (req.get("pickup_loc") or "").strip()
+    delivery_loc = (req.get("delivery_loc") or "").strip()
+    if not pickup_loc or not delivery_loc:
+        return {"success": False, "reason": "missing pickup/delivery location"}
+    if not GOOGLE_MAPS_API_KEY:
+        return {"success": False, "reason": "map not configured"}
+
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/staticmap",
+            params={
+                "size":    "600x300",
+                "scale":   "2",
+                "path":    f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}",
+                "markers": [f"color:green|label:P|{pickup_loc}",
+                            f"color:red|label:D|{delivery_loc}"],
+                "key":     GOOGLE_MAPS_API_KEY,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        if r.headers.get("Content-Type", "").startswith("image/"):
+            return {"success": True, "image_b64": _b64.b64encode(r.content).decode("ascii")}
+        # Google returns 200 with an error image / no Content-Type for
+        # some bad-request cases (e.g. an ungeocodable address) instead
+        # of a real HTTP error — treat that as a soft failure too.
+        logger.warning(f"route_map: unexpected content-type from Static Maps API "
+                        f"(pickup={pickup_loc!r} delivery={delivery_loc!r})")
+        return {"success": False, "reason": "map fetch failed"}
+    except Exception as e:
+        logger.error(f"route_map error: {e}")
+        return {"success": False, "reason": "map fetch failed"}
 
 
 @app.post("/api/record_bid")
