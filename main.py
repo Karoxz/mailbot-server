@@ -238,6 +238,22 @@ def route_map(req: dict):
     else:
         size_param = "640x640"
 
+    # Real driving route, not a straight line — client feedback,
+    # 2026-09-19: "it should be an actual route line that the truck
+    # will take". A bare two-point `path` in Static Maps draws a
+    # straight line between the points regardless of roads; passing
+    # an ENCODED POLYLINE from the Routes API (the same API already
+    # used for deadhead mileage verification, see parser_core.py)
+    # draws the real road-following path instead. Fails soft to the
+    # old straight line if the polyline fetch fails for any reason —
+    # a straight line is still a real, usable map, just not as
+    # accurate.
+    polyline = parser_core.get_route_polyline(pickup_loc, delivery_loc)
+    if polyline:
+        path_param = f"color:0x1a7f4bff|weight:4|enc:{polyline}"
+    else:
+        path_param = f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}"
+
     try:
         r = requests.get(
             "https://maps.googleapis.com/maps/api/staticmap",
@@ -247,7 +263,7 @@ def route_map(req: dict):
                 # ceiling either way.
                 "size":    size_param,
                 "scale":   "2",
-                "path":    f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}",
+                "path":    path_param,
                 "markers": [f"color:green|label:P|{pickup_loc}",
                             f"color:red|label:D|{delivery_loc}"],
                 "key":     GOOGLE_MAPS_API_KEY,

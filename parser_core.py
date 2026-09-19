@@ -879,6 +879,131 @@ def _google_maps_route(origin_latlon, dest_latlon):
         return None
 
 
+def _decode_polyline(encoded: str) -> list:
+    """Standard Google polyline algorithm decoder (precision 1e5)."""
+    points = []
+    index = lat = lng = 0
+    length = len(encoded)
+    while index < length:
+        for is_lat in (True, False):
+            shift = result = 0
+            while True:
+                b = ord(encoded[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            delta = ~(result >> 1) if (result & 1) else (result >> 1)
+            if is_lat:
+                lat += delta
+            else:
+                lng += delta
+        points.append((lat / 1e5, lng / 1e5))
+    return points
+
+
+def _encode_polyline(points: list) -> str:
+    """Standard Google polyline algorithm encoder (precision 1e5)."""
+    def _encode_value(v):
+        v = ~(v << 1) if v < 0 else (v << 1)
+        chunks = []
+        while v >= 0x20:
+            chunks.append((v & 0x1f) | 0x20)
+            v >>= 5
+        chunks.append(v)
+        return "".join(chr(c + 63) for c in chunks)
+
+    result = []
+    prev_lat = prev_lng = 0
+    for lat, lng in points:
+        lat_i, lng_i = round(lat * 1e5), round(lng * 1e5)
+        result.append(_encode_value(lat_i - prev_lat))
+        result.append(_encode_value(lng_i - prev_lng))
+        prev_lat, prev_lng = lat_i, lng_i
+    return "".join(result)
+
+
+def _simplify_polyline_for_static_map(encoded: str, max_chars: int = 6000) -> str:
+    """
+    Real bug, found testing the route-line feature: a Static Maps
+    `path=enc:...` GET request has a real URL-length ceiling (Google
+    enforces ~8192 chars total for the whole URL) — a genuinely long
+    cross-country route's polyline can exceed that on its own (a real
+    ~600-mile Ashland KY -> Lagrange GA route came back at 14,766
+    chars, which 400'd the whole request). Downsamples the decoded
+    point list (always keeping the first/last points, so the marker
+    endpoints still line up with the drawn path) until the re-encoded
+    string fits comfortably under max_chars, trading some path
+    precision for a request that actually succeeds — still a real,
+    road-following shape, just with fewer intermediate points than
+    the full-fidelity route for a long haul.
+    """
+    if len(encoded) <= max_chars:
+        return encoded
+    points = _decode_polyline(encoded)
+    if len(points) <= 2:
+        return encoded
+    step = 2
+    while step < len(points):
+        sampled = points[::step]
+        if sampled[-1] != points[-1]:
+            sampled.append(points[-1])
+        candidate = _encode_polyline(sampled)
+        if len(candidate) <= max_chars:
+            return candidate
+        step += 1
+    return _encode_polyline([points[0], points[-1]])
+
+
+def get_route_polyline(origin_address: str, dest_address: str) -> Optional[str]:
+    """
+    Real driving-route geometry, 2026-09-19 — for the BID PC map,
+    which previously always drew a straight line between pickup and
+    delivery regardless of actual roads (client feedback: "it should
+    be an actual route line that the truck will take"). Separate from
+    _google_maps_route() (mileage verification) since that function's
+    fieldmask deliberately excludes polyline data it doesn't need for
+    its own purpose — a dedicated call here avoids growing every
+    verification request's payload for a feature that only needs this
+    in one place. Routes API's Waypoint accepts a plain address string
+    directly, so no separate geocoding call is needed first.
+
+    Fail-soft, same contract as every other Maps helper in this file:
+    returns None on any error/timeout/missing key, so the caller can
+    fall back to the plain straight-line path rather than breaking.
+    """
+    api_key = _get_maps_api_key()
+    if not api_key:
+        return None
+    try:
+        r = _maps_session.post(
+            GOOGLE_MAPS_ROUTES_URL,
+            json={
+                "origin": {"address": origin_address},
+                "destination": {"address": dest_address},
+                "travelMode": "DRIVE",
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": "routes.polyline.encodedPolyline",
+            },
+            timeout=6,
+        )
+        if r.status_code != 200:
+            print(f"[MAPS] polyline HTTP {r.status_code}: {r.text[:200]}", flush=True)
+            return None
+        routes = r.json().get("routes") or []
+        if not routes:
+            return None
+        raw = (routes[0].get("polyline") or {}).get("encodedPolyline")
+        return _simplify_polyline_for_static_map(raw) if raw else None
+    except Exception as e:
+        print(f"[MAPS] polyline fetch failed: {e}", flush=True)
+        return None
+
+
 def verify_route_with_google_maps(origin_latlon, dest_latlon, gh_result: dict, label: str = ""):
     """
     Cross-check a GraphHopper/fallback distance against Google Maps.
