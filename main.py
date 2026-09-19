@@ -217,7 +217,13 @@ def route_map(req: dict):
         r = requests.get(
             "https://maps.googleapis.com/maps/api/staticmap",
             params={
-                "size":    "600x300",
+                # 2026-09-19 (client feedback: "map needs to be much
+                # more bigger") — aspect matches the enlarged client-
+                # side display area (480x320) more closely than the
+                # original 600x300 did, so it fills the frame instead
+                # of letterboxing. scale=2 keeps it sharp when
+                # displayed at nearly full source resolution.
+                "size":    "540x320",
                 "scale":   "2",
                 "path":    f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}",
                 "markers": [f"color:green|label:P|{pickup_loc}",
