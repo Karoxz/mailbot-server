@@ -1004,6 +1004,68 @@ def get_route_polyline(origin_address: str, dest_address: str) -> Optional[str]:
         return None
 
 
+def _zoom_for_bounds(min_lat, max_lat, min_lon, max_lon,
+                      map_width_px, map_height_px, max_zoom: int = 18) -> int:
+    """
+    The standard 'fit bounds to viewport' zoom calculation (same math
+    behind Google's own JS Maps API fitBounds()) — lets the server
+    request an explicit zoom/center instead of relying on Static
+    Maps' own auto-fit, which crops as tight as possible around the
+    path/markers with no margin.
+    """
+    def _lat_rad(lat):
+        s = math.sin(lat * math.pi / 180)
+        rad_x2 = math.log((1 + s) / (1 - s)) / 2
+        return max(min(rad_x2, math.pi), -math.pi) / 2
+
+    def _zoom_for(px, world_px, fraction):
+        if fraction <= 0:
+            return max_zoom
+        return math.floor(math.log(px / world_px / fraction) / math.log(2))
+
+    lat_fraction = (_lat_rad(max_lat) - _lat_rad(min_lat)) / math.pi
+    lon_diff = max_lon - min_lon
+    lon_fraction = ((lon_diff + 360) if lon_diff < 0 else lon_diff) / 360
+
+    lat_zoom = _zoom_for(map_height_px, 256, lat_fraction)
+    lon_zoom = _zoom_for(map_width_px, 256, lon_fraction)
+    return max(1, min(lat_zoom, lon_zoom, max_zoom))
+
+
+def compute_route_view(encoded_polyline: str, map_width_px: int, map_height_px: int,
+                        pad_fraction: float = 0.9) -> Optional[tuple]:
+    """
+    Client feedback, 2026-09-21: "the map should be a little more
+    zoomed out so he can see a bigger picture of whats surrounding
+    around delivery route". Static Maps' own auto-fit (no explicit
+    center/zoom, just path+markers) crops as tightly as possible
+    around the route with zero margin — there's no built-in "padding"
+    knob for that. This decodes the route's own polyline, pads its
+    lat/lon bounding box outward by pad_fraction on every side, and
+    returns an explicit (center_lat, center_lon, zoom) the caller can
+    pass straight to the Static Maps request so the rendered map
+    genuinely shows more surrounding area, not just the tightest
+    possible crop. Returns None if the polyline decodes to nothing.
+    """
+    points = _decode_polyline(encoded_polyline)
+    if not points:
+        return None
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    lat_pad = (max_lat - min_lat) * pad_fraction or 0.05
+    lon_pad = (max_lon - min_lon) * pad_fraction or 0.05
+    min_lat -= lat_pad
+    max_lat += lat_pad
+    min_lon -= lon_pad
+    max_lon += lon_pad
+    center_lat = (min_lat + max_lat) / 2
+    center_lon = (min_lon + max_lon) / 2
+    zoom = _zoom_for_bounds(min_lat, max_lat, min_lon, max_lon, map_width_px, map_height_px)
+    return center_lat, center_lon, zoom
+
+
 def verify_route_with_google_maps(origin_latlon, dest_latlon, gh_result: dict, label: str = ""):
     """
     Cross-check a GraphHopper/fallback distance against Google Maps.
@@ -1597,9 +1659,14 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
     # price field + live rate/mile) lets the dispatcher confirm a real
     # price before the draft opens — price/rate_per_mile are that
     # confirmed value, plain numbers from the client. Formatted here
-    # (not client-side) so every template author gets the same $X.XX
-    # style regardless of caller.
+    # (not client-side) so every template author gets the same style
+    # regardless of caller. price_str keeps the "$" prefix for anyone
+    # who places {price} explicitly in a custom template (a self-
+    # contained "$1,234"); price_num is the bare number, used below to
+    # fill in an existing "Rate: $" line that already supplies its own
+    # "$".
     price_str = f"${price:,.0f}" if price else ""
+    price_num = f"{price:,.0f}" if price else ""
     rate_str  = f"${rate_per_mile:.2f}/mi" if rate_per_mile else ""
     data = dict(
         order=order or "", broker_name=broker or "",
@@ -1622,16 +1689,20 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
     except KeyError as e:
         print(f"BID_TEMPLATE missing key: {e}", flush=True)
         body = bid_template
-    # A confirmed price needs to actually reach the broker, not just
-    # sit in the dispatcher's own notification — if their own template
-    # doesn't already place {price} somewhere deliberate, append it so
-    # the offer is never silently dropped; never double it for a
-    # template that already references {price} itself.
-    if price_str and "{price}" not in (bid_template or ""):
-        offer_line = f"Offer: {price_str}"
-        if rate_str:
-            offer_line += f"  ({rate_str})"
-        body = f"{body}\n\n{offer_line}"
+    # Real fix, 2026-09-21 (client feedback): no more separate
+    # auto-appended "Offer: $X (Y/mi)" line at the end of the draft —
+    # the default template already has its own blank "Rate: $" line
+    # for exactly this, and the client wants the confirmed price to
+    # land right there instead. Only fills a line that's genuinely
+    # still blank (nothing after the "$"), and only when the template
+    # doesn't already reference {price} itself (already substituted
+    # above in that case). If neither applies — a custom template with
+    # no {price} and no bare "Rate: $" line — the price simply doesn't
+    # appear anywhere, which is the correct behavior now: reintroducing
+    # a separate line is exactly what was asked to be removed.
+    if price_num and "{price}" not in (bid_template or ""):
+        body = re.sub(r"(?m)^(Rate:\s*\$)[ \t]*$",
+                       lambda m: m.group(1) + price_num, body, count=1)
     return body
 
 

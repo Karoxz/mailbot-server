@@ -254,6 +254,24 @@ def route_map(req: dict):
     else:
         path_param = f"color:0x1a7f4bff|weight:4|{pickup_loc}|{delivery_loc}"
 
+    # Real client feedback, 2026-09-21: "the map should be a little
+    # more zoomed out so he can see a bigger picture of whats
+    # surrounding around delivery route" — Static Maps' own auto-fit
+    # (letting path+markers imply the viewport) crops as tight as
+    # possible around the route with zero margin. When we have real
+    # route geometry, compute an explicit center/zoom padded outward
+    # so the rendered map shows genuine surrounding context instead.
+    # Falls back to plain auto-fit (no center/zoom) when there's no
+    # polyline to pad, same as before.
+    extra_params = {}
+    if polyline:
+        size_w_px, size_h_px = (int(x) * 2 for x in size_param.split("x"))  # scale=2
+        view = parser_core.compute_route_view(polyline, size_w_px, size_h_px)
+        if view:
+            center_lat, center_lon, zoom = view
+            extra_params["center"] = f"{center_lat},{center_lon}"
+            extra_params["zoom"] = str(zoom)
+
     try:
         r = requests.get(
             "https://maps.googleapis.com/maps/api/staticmap",
@@ -267,6 +285,7 @@ def route_map(req: dict):
                 "markers": [f"color:green|label:P|{pickup_loc}",
                             f"color:red|label:D|{delivery_loc}"],
                 "key":     GOOGLE_MAPS_API_KEY,
+                **extra_params,
             },
             timeout=10,
         )
