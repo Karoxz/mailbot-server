@@ -234,9 +234,25 @@ def route_map(req: dict):
             size_w, size_h = 640, max(1, round(640 / ratio))
         else:
             size_h, size_w = 640, max(1, round(640 * ratio))
-        size_param = f"{size_w}x{size_h}"
     else:
-        size_param = "640x640"
+        size_w, size_h = 640, 640
+    size_param = f"{size_w}x{size_h}"
+
+    # Continuous zoom-in on top of the (integer-only) zoom level below
+    # — client, 2026-09-23: "zoom in on the map about 20%". Google
+    # Static Maps' zoom parameter is integer-only (confirmed directly:
+    # a fractional value like zoom=6.3 is silently ignored, falling
+    # back to a near-whole-world view), so a smooth adjustment can't
+    # come from zoom itself, and each integer level is a full 2x jump
+    # — far coarser than "20%". Instead, request FEWER pixels than the
+    # frame actually needs, at the SAME zoom/center — fewer pixels
+    # covers proportionally less ground at a fixed zoom, which is a
+    # true continuous zoom-in. The client already scales the received
+    # image to fill its frame, so the ~17% fewer pixels requested here
+    # just get upscaled back to display size on arrival — an
+    # imperceptible quality cost for a deliberate 20% adjustment.
+    _MAP_ZOOM_BOOST = 1.2
+    fetch_size_param = f"{max(1, round(size_w / _MAP_ZOOM_BOOST))}x{max(1, round(size_h / _MAP_ZOOM_BOOST))}"
 
     # Real driving route, not a straight line — client feedback,
     # 2026-09-19: "it should be an actual route line that the truck
@@ -277,9 +293,11 @@ def route_map(req: dict):
             "https://maps.googleapis.com/maps/api/staticmap",
             params={
                 # scale=2 keeps it sharp — real pixel dimensions are
-                # double size_param, up to Google's free/standard-tier
-                # ceiling either way.
-                "size":    size_param,
+                # double this, up to Google's free/standard-tier
+                # ceiling either way. fetch_size_param (not size_param)
+                # is what's actually requested — see the zoom-boost
+                # note above.
+                "size":    fetch_size_param,
                 "scale":   "2",
                 "path":    path_param,
                 "markers": [f"color:green|label:P|{pickup_loc}",
