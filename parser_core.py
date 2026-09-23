@@ -246,6 +246,32 @@ _US_STATES_SET = {
     "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
 }
 
+# Client feedback, 2026-09-23: a load with an embedded Canadian stop
+# ("Mississauga, ON") got matched and bid on — "canadian states
+# shouldnt be processed only US states". None of these two-letter
+# codes collide with a US state, so a plain "City, PROV" scan over the
+# WHOLE email body (not just pickup_loc/delivery_loc, which only cover
+# the load's primary leg — a Canadian waypoint can be buried in an
+# itinerary/stops section neither of those two fields ever sees) is a
+# safe, low-false-positive way to catch this regardless of where in
+# the email it shows up.
+_CANADIAN_PROVINCES = {
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+}
+_CANADIAN_LOCATION_RE = re.compile(
+    r"\b([A-Z][a-zA-Z.\-']+(?:[ \t]+[A-Z][a-zA-Z.\-']+){0,3}),\s*(" +
+    "|".join(_CANADIAN_PROVINCES) + r")\b"
+)
+
+
+def _detect_canadian_location(text: str) -> Optional[str]:
+    """Returns the first 'City, PROV' match against a Canadian province
+    code found anywhere in text, or None."""
+    if not text:
+        return None
+    m = _CANADIAN_LOCATION_RE.search(text)
+    return f"{m.group(1)}, {m.group(2)}" if m else None
+
 REGION_MAP = {
     "WEST COAST": {"AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "TX", "UT", "WA", "WY"},
     "MIDWEST":    {"IL", "IN", "IA", "KS", "KY", "MI", "MN", "MO", "NE", "ND", "OH", "SD", "TN", "WI"},
@@ -1033,7 +1059,7 @@ def _zoom_for_bounds(min_lat, max_lat, min_lon, max_lon,
 
 
 def compute_route_view(encoded_polyline: str, map_width_px: int, map_height_px: int,
-                        pad_fraction: float = 0.9) -> Optional[tuple]:
+                        pad_fraction: float = 2.0) -> Optional[tuple]:
     """
     Client feedback, 2026-09-21: "the map should be a little more
     zoomed out so he can see a bigger picture of whats surrounding
@@ -1665,8 +1691,10 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
     # contained "$1,234"); price_num is the bare number, used below to
     # fill in an existing "Rate: $" line that already supplies its own
     # "$".
-    price_str = f"${price:,.0f}" if price else ""
-    price_num = f"{price:,.0f}" if price else ""
+    # No thousands separator — client feedback, 2026-09-23: "in the bid
+    # message there shouldnt be a comma in the rate, just $2000".
+    price_str = f"${price:.0f}" if price else ""
+    price_num = f"{price:.0f}" if price else ""
     rate_str  = f"${rate_per_mile:.2f}/mi" if rate_per_mile else ""
     data = dict(
         order=order or "", broker_name=broker or "",
@@ -2098,6 +2126,10 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if delivery_loc and _dl_coords[0] and not _in_us(*_dl_coords[0]):
         return None, f"NON-US DELIVERY ({delivery_loc})", order, None
 
+    _ca_loc = _detect_canadian_location(t)
+    if _ca_loc:
+        return None, f"NON-US LOCATION (Canadian: {_ca_loc})", order, None
+
     if allowed_delivery_states:
         delivery_state = extract_state_from_location(delivery_loc)
         if delivery_state and delivery_state not in allowed_delivery_states:
@@ -2105,6 +2137,25 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
 
     weight          = _find(r"Weight:\s*([0-9,.\s]+(?:lb|lbs|pounds)?)", t)
     load_weight_lbs = parse_weight_lbs(weight)
+    if not load_weight_lbs:
+        # Real bug, reported 2026-09-23: a broker left the structured
+        # "Weight:" field at "0 lb" (effectively unset) but stated the
+        # real weight in freeform Notes text ("5 pallets @ 8200 lbs 4
+        # drums per pallet") — the overweight safety check silently
+        # passed because 0 <= any truck's max_payload_lbs. When the
+        # structured field is missing/zero, fall back to scanning
+        # Notes for an explicit "<number> lb(s)" mention, taking the
+        # LARGEST one found — erring toward catching a genuine
+        # overweight load over under-detecting one from an ambiguous
+        # per-unit phrasing. Display text (the `weight` var above)
+        # stays exactly what the broker wrote; only the safety-check
+        # number gets this fallback.
+        _notes_for_weight = _find(r"Notes:\s*([^\n]+)", t)
+        if _notes_for_weight:
+            _wcands = [int(m.replace(",", "")) for m in
+                       re.findall(r"(\d[\d,]*)\s*(?:lbs?|pounds)\b", _notes_for_weight, re.I)]
+            if _wcands:
+                load_weight_lbs = max(_wcands)
     dims_raw        = _find(r"Dimensions:\s*([^\n]+)", t)
     load_height_in  = parse_load_height_from_dims(dims_raw) if dims_raw else None
 
