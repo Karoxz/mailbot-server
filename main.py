@@ -7,9 +7,11 @@ import collections
 import logging
 import requests
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
 from models import (ParseRequest, ParseResponse, ActivateRequest, HeartbeatRequest,
                      RecordBidRequest, ClassifyReplyRequest, UpdateBidAmountRequest,
@@ -61,6 +63,12 @@ _load_env_file()
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 API_SECRET          = os.environ.get("API_SECRET", "dev-secret-local")
+# Same constant poller.py defines for its own outbound links (BID PC) —
+# needed here too now for the Gmail OAuth redirect_uri and the
+# post-consent bounce back to settings.html. No default: an unset
+# value fails the OAuth endpoints closed (see web_gmail_oauth_start)
+# rather than building a broken redirect_uri.
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
 
 
 @asynccontextmanager
@@ -926,7 +934,11 @@ def web_gmail_status(license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, **gmail_store.get_status(license_key)}
+    # oauth_available tells the frontend whether to offer the real
+    # "Sign in with Google" button at all — false until GOOGLE_OAUTH_
+    # CLIENT_ID/SECRET are configured (see gmail_client.oauth_configured).
+    return {"success": True, **gmail_store.get_status(license_key),
+            "oauth_available": gmail_client.oauth_configured()}
 
 
 @app.delete("/api/web/gmail/token")
@@ -937,6 +949,78 @@ def web_gmail_token_delete(license_key: str):
     gmail_store.delete_token(license_key)
     logger.info(f"[WEB] Gmail token disconnected for {license_key}")
     return {"success": True}
+
+
+@app.get("/api/web/gmail/oauth/start")
+def web_gmail_oauth_start(license_key: str):
+    """The actual "Sign in with Google" entry point — a plain browser
+    navigation (not a fetch/XHR call), since completing it means
+    physically redirecting the dispatcher's browser to Google's own
+    consent screen and back. license_key is carried through via the
+    signed `state` param (map_token.make_oauth_state), not a server
+    session, matching this project's stateless-where-possible pattern.
+    """
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    if not WEB_BASE_URL:
+        raise HTTPException(status_code=500, detail="Server misconfigured: WEB_BASE_URL not set.")
+
+    redirect_uri = f"{WEB_BASE_URL}/api/web/gmail/oauth/callback"
+    flow = gmail_client.build_oauth_flow(redirect_uri)
+    if not flow:
+        raise HTTPException(status_code=500,
+                             detail="Google sign-in isn't configured on the server yet — "
+                                    "use the paste-token option below instead.")
+
+    state = map_token.make_oauth_state(license_key)
+    # access_type=offline + prompt=consent: without both, Google won't
+    # reliably hand back a refresh_token on a repeat consent (e.g. a
+    # dispatcher reconnecting after a revoke) — the whole point of this
+    # flow is a token that keeps working unattended, so a refresh_token
+    # is not optional here.
+    auth_url, _ = flow.authorization_url(
+        access_type="offline", prompt="consent", include_granted_scopes="true", state=state)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/api/web/gmail/oauth/callback")
+def web_gmail_oauth_callback(code: str = None, state: str = None, error: str = None):
+    """Google redirects here after the dispatcher approves (or denies)
+    consent. Always ends by bouncing back to settings.html — this is a
+    page the dispatcher is looking at in their browser, not a JSON API
+    caller, so errors are reported via a query param + toast there,
+    not an HTTP error response."""
+    settings_url = f"{WEB_BASE_URL}/app/settings.html"
+
+    def _fail(reason: str):
+        return RedirectResponse(f"{settings_url}?gmail_oauth=error&reason={quote(reason)}")
+
+    if error:
+        return _fail(f"Google sign-in was cancelled or denied ({error}).")
+    if not code or not state:
+        return _fail("Incomplete response from Google.")
+
+    license_key = map_token.verify_oauth_state(state)
+    if not license_key:
+        return _fail("This sign-in link expired — try connecting Gmail again.")
+
+    redirect_uri = f"{WEB_BASE_URL}/api/web/gmail/oauth/callback"
+    flow = gmail_client.build_oauth_flow(redirect_uri)
+    if not flow:
+        return _fail("Google sign-in isn't configured on the server.")
+
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        email = gmail_client.get_profile_email(creds)
+    except Exception as e:
+        logger.error(f"gmail oauth callback failed for {license_key}: {e}", exc_info=True)
+        return _fail("Couldn't complete sign-in with Google — try again.")
+
+    gmail_store.save_token(license_key, creds.to_json(), email)
+    logger.info(f"[WEB] Gmail connected via OAuth for {license_key} ({email})")
+    return RedirectResponse(f"{settings_url}?gmail_oauth=success&email={quote(email)}")
 
 
 @app.get("/api/web/standalone/settings")

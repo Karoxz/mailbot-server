@@ -15,10 +15,12 @@
 # =============================================================
 
 import json
+import os
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -176,3 +178,56 @@ def validate_and_probe(token_json: str) -> dict:
     # happened) — the caller saves this, not the original pasted text,
     # so what's stored is always the freshest version.
     return {"ok": True, "email": email, "token_json": creds.to_json()}
+
+
+# ── Real "Sign in with Google" OAuth flow, added 2026-09-25 ────────────
+# The existing token-upload path (validate_and_probe, above) requires a
+# dispatcher to already have an authorized token.json sitting next to
+# the desktop app and to paste its raw content — fine as a one-time
+# bootstrap for the account this project was built against, but not
+# something a real customer of this product should ever have to do.
+# This is the actual self-serve replacement: a "Sign in with Google"
+# button that redirects to Google's own consent screen and comes back
+# with a token, same as any normal web app's Google login.
+#
+# Needs its OWN OAuth client — client/credentials.json is a "installed"
+# (desktop) app client (redirect_uris: ["http://localhost"]), which
+# Google only allows to complete via a local loopback server on the
+# SAME machine running the flow. That's what the desktop app itself
+# uses (authenticate_gmail()'s InstalledAppFlow.run_local_server()) and
+# it cannot serve a remote browser redirecting back to OUR server. A
+# "Web application" type OAuth client (its own client_id/client_secret,
+# an explicit HTTPS redirect URI Google is told to allow in advance) is
+# required for this — see GOOGLE_OAUTH_CLIENT_ID/SECRET below.
+def _oauth_client_config() -> Optional[dict]:
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return None
+    return {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+
+
+def oauth_configured() -> bool:
+    return _oauth_client_config() is not None
+
+
+def build_oauth_flow(redirect_uri: str) -> Optional[Flow]:
+    config = _oauth_client_config()
+    if not config:
+        return None
+    return Flow.from_client_config(config, scopes=SCOPES, redirect_uri=redirect_uri)
+
+
+def get_profile_email(creds: Credentials) -> str:
+    """Used right after completing the OAuth callback — creds are
+    freshly minted from the code exchange, not yet stored anywhere."""
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False,
+                    static_discovery=False)
+    return service.users().getProfile(userId="me").execute().get("emailAddress", "")

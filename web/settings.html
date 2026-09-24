@@ -89,13 +89,21 @@
       </div>
       <div id="gmail-connect-form">
         <p class="note-text" style="padding:0 0 10px;">
-          Paste the content of your desktop app's <code>token.json</code> file below (sits next to <code>main copy.py</code> on the machine that runs it). This is a one-time upload of an <em>already-authorized</em> token, not a "Sign in with Google" button — the server reuses the same OAuth grant the desktop already has.
-          <br>⚠️ This grants the server read/send access to this Gmail inbox — treat it like a password, not a config value.
+          Connect the Gmail inbox this account should read/send from. ⚠️ This grants the server read/send access to that inbox — only sign in with the account you actually want the bot using.
         </p>
-        <textarea id="gmail-token-input" rows="4" placeholder='{"token": "...", "refresh_token": "...", ...}' style="width:100%;font-family:monospace;font-size:.8rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
-        <div class="form-actions" style="padding:10px 0 0;">
-          <button id="gmail-connect-btn" class="btn btn-primary" type="button">Connect</button>
+        <div id="gmail-oauth-row" class="form-actions" style="padding:0 0 14px;" hidden>
+          <a id="gmail-oauth-btn" class="btn btn-primary" href="#">🔐 Sign in with Google</a>
         </div>
+        <details id="gmail-token-details">
+          <summary style="cursor:pointer;color:var(--text-dim);font-size:.85rem;">Advanced: paste a token.json instead</summary>
+          <p class="note-text" style="padding:8px 0;">
+            Paste the content of a desktop app's <code>token.json</code> file (sits next to <code>main copy.py</code> on the machine that runs it) — an already-authorized token from that same Google account.
+          </p>
+          <textarea id="gmail-token-input" rows="4" placeholder='{"token": "...", "refresh_token": "...", ...}' style="width:100%;font-family:monospace;font-size:.8rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
+          <div class="form-actions" style="padding:10px 0 0;">
+            <button id="gmail-connect-btn" class="btn" type="button">Connect</button>
+          </div>
+        </details>
       </div>
       <div id="gmail-disconnect-row" class="form-actions" style="padding-top:2px;" hidden>
         <button id="gmail-disconnect-btn" class="btn btn-danger" type="button">Disconnect</button>
@@ -279,6 +287,8 @@ loadTemplate();
 // ── Gmail connection ─────────────────────────────────────────────
 const gmailStatus       = document.getElementById("gmail-status");
 const gmailConnectForm  = document.getElementById("gmail-connect-form");
+const gmailOauthRow     = document.getElementById("gmail-oauth-row");
+const gmailOauthBtn     = document.getElementById("gmail-oauth-btn");
 const gmailTokenInput   = document.getElementById("gmail-token-input");
 const gmailConnectBtn   = document.getElementById("gmail-connect-btn");
 const gmailDisconnectRow = document.getElementById("gmail-disconnect-row");
@@ -286,8 +296,18 @@ const gmailDisconnectBtn = document.getElementById("gmail-disconnect-btn");
 
 let gmailConnected = false;
 
-function renderGmailStatus(connected, email) {
+// The real "Sign in with Google" button is a plain link (not a click
+// handler that does a fetch) — completing OAuth means the BROWSER
+// itself has to navigate to Google's consent screen and back, not an
+// XHR call. license_key travels through via the server-signed `state`
+// param on the way there (see /api/web/gmail/oauth/start), so it isn't
+// needed in this URL at all beyond identifying which account is
+// connecting.
+gmailOauthBtn.href = `/api/web/gmail/oauth/start?license_key=${encodeURIComponent(MB.getLicenseKey() || "")}`;
+
+function renderGmailStatus(connected, email, oauthAvailable) {
   gmailConnected = connected;
+  gmailOauthRow.hidden = !oauthAvailable;
   if (connected) {
     gmailStatus.textContent = `✅ Connected as ${email}`;
     gmailStatus.style.color = "var(--good)";
@@ -305,7 +325,7 @@ function renderGmailStatus(connected, email) {
 async function loadGmailStatus() {
   try {
     const res = await MB.apiGet("/api/web/gmail/status");
-    renderGmailStatus(res.connected, res.connected_email);
+    renderGmailStatus(res.connected, res.connected_email, res.oauth_available);
     MB.setConn(true);
   } catch (err) {
     gmailStatus.textContent = "Error loading status";
@@ -313,6 +333,25 @@ async function loadGmailStatus() {
     MB.bounceIfAuthError(err);
   }
 }
+
+// Google bounces back here after consent (or a cancel/deny) — see
+// /api/web/gmail/oauth/callback. Report it via a toast and strip the
+// query params so a page refresh doesn't re-show the same toast.
+(function handleOauthRedirectResult() {
+  const qp = new URLSearchParams(location.search);
+  const result = qp.get("gmail_oauth");
+  if (!result) return;
+  if (result === "success") {
+    showToast(`Connected as ${qp.get("email") || "your Google account"}`);
+  } else if (result === "error") {
+    showToast(qp.get("reason") || "Google sign-in failed", true);
+  }
+  qp.delete("gmail_oauth");
+  qp.delete("reason");
+  qp.delete("email");
+  const clean = qp.toString();
+  history.replaceState(null, "", location.pathname + (clean ? `?${clean}` : ""));
+})();
 
 gmailConnectBtn.addEventListener("click", async () => {
   const tokenJson = gmailTokenInput.value.trim();

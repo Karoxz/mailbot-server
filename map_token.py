@@ -56,3 +56,34 @@ def verify_bid_token(token: str):
         return {"license_key": claims["lk"], "order_id": claims["oid"]}
     except (JWTError, KeyError):
         return None
+
+
+# ── OAuth "state" param, added 2026-09-25 for the real "Sign in with
+# Google" Gmail-connect flow — same signed/stateless approach as the
+# bid tokens above (own functions rather than overloading
+# make_bid_token's "order_id" field for an unrelated purpose, since a
+# license_key is all this needs to carry through the redirect to
+# Google and back). A short TTL is enough — a dispatcher either
+# completes the consent screen within a few minutes or starts over. ──
+_OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
+
+
+def make_oauth_state(license_key: str) -> str:
+    payload = {"lk": license_key, "purpose": "gmail_oauth",
+               "exp": int(time.time()) + _OAUTH_STATE_TTL_SECONDS}
+    return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
+
+
+def verify_oauth_state(token: str):
+    """Returns the license_key, or None (expired/tampered/malformed/
+    wrong purpose). Never raises."""
+    secret = _secret()
+    if not secret or not token:
+        return None
+    try:
+        claims = jwt.decode(token, secret, algorithms=[_ALGORITHM])
+        if claims.get("purpose") != "gmail_oauth":
+            return None
+        return claims["lk"]
+    except (JWTError, KeyError):
+        return None
