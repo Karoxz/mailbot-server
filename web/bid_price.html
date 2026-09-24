@@ -256,12 +256,23 @@ async function submitBid() {
     });
     let copied = true;
     try { await navigator.clipboard.writeText(res.bid_text || ""); } catch (e) { copied = false; }
+    const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
     document.getElementById("result-text").value = res.bid_text || "";
-    document.getElementById("result-gmail").href =
-      MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
+    document.getElementById("result-gmail").href = gmailUrl;
     document.getElementById("result-panel").style.display = "";
-    document.getElementById("result-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-    showToast(copied ? "Bid recorded — text copied to clipboard" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
+    showToast(copied ? "Bid recorded — text copied, opening the thread…" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
+    // Desktop parity, 2026-09-25 (client: "it should redirect to the
+    // exact thread im bidding to", matching _open_bid_thread's
+    // auto-open on desktop) — navigate the CURRENT tab straight to the
+    // thread rather than window.open()-ing a new one: a new-tab open
+    // this far after the click (past an async fetch + clipboard write)
+    // gets silently popup-blocked on iOS Safari, which is exactly
+    // where this page is mostly opened from (a Telegram-sent link). A
+    // plain location change isn't subject to that. The result panel
+    // above is still rendered first as a fallback — if the redirect
+    // is somehow interrupted, the copy button and thread link are
+    // still right there.
+    window.location.href = gmailUrl;
   } catch (err) {
     showError(err.message || "Failed to submit bid");
     btn.disabled = false;
