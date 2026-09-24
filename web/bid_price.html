@@ -6,52 +6,107 @@
 <title>Plutus Bot — Bid PC</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/plutus_logo.jpg">
+<style>
+  /* Mobile-first: map is the dominant element, big and full-width,
+     price form stacked below it — client feedback, 2026-09-24: "make
+     this map cover full screen no need to be that small". Desktop gets
+     a genuinely different layout (not just a wider version of mobile):
+     side-by-side, map filling nearly the full viewport height next to
+     a fixed-width sidebar, matching how the desktop app's own BID PC
+     dialog treats the map as the single dominant element. */
+  .bid-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .bid-map-frame {
+    /* position:relative + the fetched <img> absolutely positioned
+       inside it (see loadMap()) — defensive: keeps the image's own
+       intrinsic aspect ratio from ever being able to influence this
+       frame's flex sizing, regardless of what size Google returns. */
+    position: relative;
+    height: 62vh;
+    min-height: 320px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  /* min-width:0 + explicit word-wrapping: defensive flexbox hygiene
+     (a flex item's default min-width:auto can refuse to shrink below
+     its content's natural width) — not something actually observed
+     going wrong here, just cheap insurance for a long order id/address
+     on a narrow sidebar. */
+  .bid-sidebar { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  #order-title, #order-route, #order-meta {
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  @media (min-width: 900px) {
+    main.content { max-width: 1400px; }
+    .bid-layout { flex-direction: row; align-items: stretch; }
+    .bid-map-frame {
+      flex: 1 1 auto;
+      min-width: 0;
+      height: auto;
+      min-height: calc(100vh - 150px);
+    }
+    .bid-sidebar { flex: 0 0 400px; }
+  }
+</style>
 </head>
 <body>
 
-<main class="content" style="max-width:480px;">
+<main class="content">
   <div class="page-toolbar">
     <h1>Bid PC</h1>
     <a id="back-link" href="loads.html" class="hint">← Loads</a>
   </div>
 
-  <section class="panel" id="order-panel">
-    <div class="panel-header">
-      <h2 id="order-title">Loading…</h2>
-    </div>
-    <div style="padding:16px 18px;">
-      <div id="order-route" class="hint" style="font-size:.95rem;"></div>
-      <div id="order-meta" class="hint" style="margin-top:4px;"></div>
-    </div>
-
-    <div id="map-frame" style="height:260px;background:var(--bg);border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+  <div class="bid-layout">
+    <div id="map-frame" class="bid-map-frame">
       <span id="map-status" class="hint">Loading map…</span>
     </div>
 
-    <div style="padding:16px 18px;">
-      <div class="field">
-        <label>Total Price</label>
-        <input id="price-input" type="number" inputmode="decimal" min="1" step="1" placeholder="Enter your price" autofocus>
-      </div>
-      <div class="hint" style="margin-top:8px;">Rate per mile: <span id="rate-per-mile">—</span></div>
-      <div class="form-actions" style="padding-top:16px;">
-        <button id="submit-btn" class="btn btn-primary" type="button" disabled>💵 Make a Bid</button>
-      </div>
-      <p id="error-box" class="hint" style="color:var(--bad);display:none;"></p>
-    </div>
-  </section>
+    <div class="bid-sidebar">
+      <section class="panel" id="order-panel">
+        <div class="panel-header">
+          <h2 id="order-title">Loading…</h2>
+        </div>
+        <div style="padding:16px 18px;">
+          <div id="order-route" class="hint" style="font-size:.95rem;"></div>
+          <div id="order-meta" class="hint" style="margin-top:4px;"></div>
+        </div>
+        <div style="padding:16px 18px;border-top:1px solid var(--border);">
+          <div class="field">
+            <label>Total Price</label>
+            <input id="price-input" type="number" inputmode="decimal" min="1" step="1" placeholder="Enter your price" autofocus>
+          </div>
+          <div class="hint" style="margin-top:8px;">Rate per mile: <span id="rate-per-mile">—</span></div>
+          <div class="form-actions" style="padding-top:16px;">
+            <button id="submit-btn" class="btn btn-primary" type="button" disabled>💵 Make a Bid</button>
+          </div>
+          <p id="error-box" class="hint" style="color:var(--bad);display:none;"></p>
+        </div>
+      </section>
 
-  <section class="panel" id="result-panel" style="display:none;margin-top:16px;">
-    <div class="panel-header"><h2>Bid text</h2></div>
-    <div style="padding:16px 18px;">
-      <p class="note-text" style="padding:0 0 10px;">Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.</p>
-      <textarea id="result-text" readonly rows="12" style="width:100%;font-family:monospace;font-size:.85rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
-      <div class="form-actions" style="padding-top:14px;">
-        <button id="result-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
-        <a id="result-gmail" class="btn" target="_blank" rel="noopener">✉️ Find thread in Gmail</a>
-      </div>
+      <section class="panel" id="result-panel" style="display:none;">
+        <div class="panel-header"><h2>Bid text</h2></div>
+        <div style="padding:16px 18px;">
+          <p class="note-text" style="padding:0 0 10px;">Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.</p>
+          <textarea id="result-text" readonly rows="10" style="width:100%;font-family:monospace;font-size:.85rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
+          <div class="form-actions" style="padding-top:14px;">
+            <button id="result-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
+            <a id="result-gmail" class="btn" target="_blank" rel="noopener">✉️ Find thread in Gmail</a>
+          </div>
+        </div>
+      </section>
     </div>
-  </section>
+  </div>
 </main>
 
 <div id="toast"></div>
@@ -128,29 +183,49 @@ function renderOrder(order) {
   document.getElementById("order-meta").textContent = bits.join(" · ");
 }
 
+// Re-fetches at the frame's CURRENT size — called on load and (debounced)
+// on resize, so rotating a phone or resizing a desktop window across the
+// mobile/desktop breakpoint actually gets a freshly-aspect-matched image
+// instead of stretching the one fetched for the old layout.
+let _lastMapSize = null;
 async function loadMap(order) {
   const frame = document.getElementById("map-frame");
   const status = document.getElementById("map-status");
+  const w = frame.clientWidth, h = frame.clientHeight;
+  if (w < 10 || h < 10) return;
+  const sizeKey = `${w}x${h}`;
+  if (sizeKey === _lastMapSize) return;
+  _lastMapSize = sizeKey;
   try {
     const res = await bidFetch("POST", "/api/web/bid_price/route_map", {
       order_id: order.order_id,
       pickup_loc: order.pickup_loc,
       delivery_loc: order.delivery_loc,
-      frame_w: frame.clientWidth,
-      frame_h: frame.clientHeight,
+      frame_w: w,
+      frame_h: h,
     });
     if (!res.success) {
       status.textContent = "Map unavailable";
       return;
     }
     const img = new Image();
-    img.style.cssText = "width:100%;height:100%;object-fit:contain;";
+    // position:absolute -- see .bid-map-frame's comment: keeps the
+    // image's own intrinsic aspect ratio from ever feeding back into
+    // the frame's flex sizing.
+    img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:contain;";
     img.onload = () => { frame.innerHTML = ""; frame.appendChild(img); };
     img.src = `data:image/png;base64,${res.image_b64}`;
   } catch (err) {
     status.textContent = "Map unavailable";
   }
 }
+
+let _resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!ORDER) return;
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => loadMap(ORDER), 300);
+});
 
 function recalcRatePerMile() {
   const price = parseFloat(document.getElementById("price-input").value);
