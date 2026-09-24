@@ -190,6 +190,15 @@ function renderLoads(items) {
 document.getElementById("loads-list").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-order]");
   if (!btn || btn.disabled) return;
+  // Bid PC (2026-09-24) now opens the price+map page (same map/price/
+  // rate-per-mile the desktop's BID PC dialog has) instead of recording
+  // a bid with no price straight away — that page calls record_bid
+  // itself once a price is confirmed. Phone/Draft are unchanged; there's
+  // no price concept for those.
+  if (btn.dataset.method === "pc") {
+    window.location.href = `bid_price.html?order_id=${encodeURIComponent(btn.dataset.order)}`;
+    return;
+  }
   recordBid(btn.dataset.order, btn.dataset.method, btn, btn.dataset.broker);
 });
 

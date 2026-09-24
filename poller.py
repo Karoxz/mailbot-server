@@ -40,6 +40,7 @@
 #     of the first working version.
 # =============================================================
 
+import os
 import json
 import time
 import logging
@@ -55,28 +56,59 @@ import load_store
 import gmail_store
 import bid_history
 import gmail_client
-import parser_core
+import bid_actions
+import map_token
 from gmail_client import GmailAuthError
 from parser_core import parse_email_for_api, FREIGHT_MARKERS, extract_text_from_full_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [poller] %(message)s")
 logger = logging.getLogger("poller")
 
+
+# ── Load .env manually — kept independent from main.py's own copy of
+# this (not imported from there) so this process doesn't pull in
+# FastAPI/pydantic just for a few env vars, matching this file's
+# existing no-cross-import-from-main.py design (see this file's top
+# docstring). In production both systemd units already have
+# EnvironmentFile=.env, so this only actually matters when running
+# poller.py directly (local dev) without systemd. ─────────────────────
+def _load_env_file(path=".env"):
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip().strip("'\"")
+            os.environ.setdefault(key.strip(), val)
+
+
+_load_env_file()
+
+# Origin for the BID PC price+map link sent over Telegram (bid_price.html
+# is served from the same web/ StaticFiles mount as the rest of the
+# dashboard). No default — if unset, _process_message falls back to the
+# plain gmail_url link instead of a broken URL.
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
+
 # Not the desktop's aggressive 3s — this is an unattended background
 # loop with nobody watching a GUI in real time, not a latency-sensitive
 # interactive tool.
 POLL_INTERVAL_SECONDS = 20
-FRESH_WINDOW = "3d"           # TEMP for testing 2026-09-05, was "1h" (the desktop's
-                              # own fallback-poller window) — widened on request to
-                              # exercise the real match/notify path against the
-                              # backlog of already-unread mail. Revert to "1h" once
-                              # testing confirms the pipeline works end to end.
+FRESH_WINDOW = "1h"           # Reverted 2026-09-24 — was widened to "3d" on
+                              # 2026-09-05 to exercise the match/notify path
+                              # against a backlog of already-unread mail while
+                              # testing; the pipeline's been stable in
+                              # production for 2+ weeks since, so back to the
+                              # desktop's own fallback-poller window.
 MAX_RESULTS_PER_CYCLE = 10
 DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
 
 def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = None,
-                    route_url: str = None, gmail_url: str = None):
+                    route_url: str = None, gmail_url: str = None, bid_price_url: str = None):
     """BID PC (2026-09-05) is a plain link in the message TEXT, not an
     inline button — Telegram shows an "Open this link?" interstitial for
     EVERY inline url-type button, on every client, for every bot,
@@ -94,8 +126,18 @@ def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = No
     write to a recipient's device clipboard, that's a hard platform
     limit, not an implementation gap). ROUTE (row 1) is still a real
     button and will show the same interstitial if tapped — not changed,
-    since only BID PC's confirmation prompt was raised as an issue."""
-    if gmail_url:
+    since only BID PC's confirmation prompt was raised as an issue.
+
+    bid_price_url (2026-09-24) replaces the plain gmail_url line for
+    BID PC — this is the price+map page (route map, price field, live
+    rate/mile, same as the desktop's BID PC dialog), which ends its own
+    flow with a link to the exact Gmail thread anyway, so nothing is
+    lost by not also linking it directly here. Falls back to gmail_url
+    if bid_price_url isn't available for any reason (e.g. MAP_TOKEN_SECRET
+    isn't configured) — always leaves BID PC actionable somehow."""
+    if bid_price_url:
+        text = f"{text}\n\n💵 BID PC — enter your price:\n{bid_price_url}"
+    elif gmail_url:
         text = f"{text}\n\n💵 BID PC — open thread directly:\n{gmail_url}"
     payload = {"text": text}
     keyboard = []
@@ -127,12 +169,10 @@ def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = No
 # message from before this change (if one's still sitting in a chat)
 # doesn't hit an unknown-action error if tapped.
 #
-# Mirrors main.py's web_record_bid() exactly (same bid_history.record_bid()
-# + parser_core.build_bid_reply_body() call, same fields) — duplicated
-# here rather than imported from main.py, since main.py is the FastAPI
-# app's entry point and this process isn't that app (same reasoning as
-# gmail_client.py keeping its own has_custom_labels() instead of
-# importing parser_core's).
+# The actual record+build logic (_record_bid_and_build_text, below) goes
+# through the shared bid_actions.record_bid_and_build_text() — the same
+# one main.py's web_record_bid() and the BID PC price+map page use — not
+# duplicated here anymore (2026-09-24).
 _TG_METHOD_MAP = {
     "bid":   ("pc",    "💵 BID PC"),
     "phone": ("phone", "💵 BID PHONE"),
@@ -154,34 +194,18 @@ def _gmail_url(order_id, broker_email, thread_id=None):
     return f"https://mail.google.com/mail/u/0/#search/{quote(q)}"
 
 
-def _record_bid_and_build_text(order_id: str, method: str):
-    load = load_store.get_load(order_id)
-    if not load:
+def _record_bid_and_build_text(order_id: str, method: str,
+                                price: float = None, rate_per_mile: float = None):
+    """Thin wrapper around the shared bid_actions helper (also used by
+    main.py's /api/web/record_bid and the BID PC price+map page) — adds
+    the gmail_url this caller specifically needs, built from poller.py's
+    own _gmail_url (uses the real thread_id poller.py's Gmail access
+    provides, unlike desktop-sourced loads)."""
+    result = bid_actions.record_bid_and_build_text(order_id, method, price, rate_per_mile)
+    if not result:
         return None
-    maps_v = load.get("maps_verification") or {}
-    thread_id = (load.get("original_msg_full") or {}).get("threadId", "")
-    bid_id = bid_history.record_bid(
-        order_id=order_id, thread_id=thread_id, bid_method=method,
-        vehicle_type=load.get("truck_type") or load.get("vehicle_required", ""),
-        driver_name=load.get("driver_name", ""),
-        pickup_loc=load.get("pickup_loc", ""), delivery_loc=load.get("delivery_loc", ""),
-        broker_name=load.get("broker_name", ""), broker_email=load.get("broker_email", ""),
-        deadhead_miles=load.get("google_deadhead"),
-        verified_miles=maps_v.get("verified_miles"), verified_source=maps_v.get("verified_source"),
-    )
-    bid_text = parser_core.build_bid_reply_body(
-        order=order_id, vehicle_required=load.get("vehicle_required"),
-        pickup_loc=load.get("pickup_loc"), pickup_dt=load.get("pickup_dt"),
-        delivery_loc=load.get("delivery_loc"), delivery_dt=load.get("delivery_dt"),
-        google_deadhead=load.get("google_deadhead"), driver_name=load.get("driver_name", ""),
-        truck_type=load.get("truck_type", ""), truck_dimensions=load.get("truck_dimensions", ""),
-        deadhead_eta_minutes=load.get("deadhead_eta_minutes"),
-        truck_equipment=load.get("truck_equipment", ""), bid_template=load.get("bid_template"),
-    )
-    return {
-        "bid_id": bid_id, "bid_text": bid_text,
-        "gmail_url": _gmail_url(order_id, load.get("broker_email"), thread_id),
-    }
+    result["gmail_url"] = _gmail_url(order_id, result["broker_email"], result["thread_id"])
+    return result
 
 
 def _answer_callback_query(bot_token: str, callback_query_id: str, text: str = None):
@@ -304,7 +328,16 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
             subject = h.get("value", "")
             break
 
-    is_freight = any(m in subject.upper() for m in FREIGHT_MARKERS)
+    # Real bug, reported 2026-09-23 (desktop side) and confirmed here
+    # 2026-09-24: a reply keeps the original subject verbatim (most mail
+    # clients do this), so a broker's reply in an already-labeled thread
+    # ("Re: LARGE STRAIGHT from...") matched a freight marker and got
+    # routed to the fresh-posting parse below instead of the thread-label
+    # guard, producing no notification at all. Ported from the desktop's
+    # same-day fix (client/main copy.py, _process_email).
+    subject_upper = subject.upper()
+    is_reply_subject = subject_upper.strip().startswith(("RE:", "FW:", "FWD:"))
+    is_freight = (not is_reply_subject) and any(m in subject_upper for m in FREIGHT_MARKERS)
     thread_id = full.get("threadId", "")
     if not is_freight and thread_id:
         thread_labels = gmail_client.get_thread_label_names(service, thread_id, label_map)
@@ -339,10 +372,15 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
         if bot_token and chat_ids:
             load_data = result.get("load_data") or {}
             route_url = load_data.get("route_url")
-            gmail_url = _gmail_url(result.get("order_id"), load_data.get("broker_email"), thread_id)
+            order_id = result.get("order_id")
+            gmail_url = _gmail_url(order_id, load_data.get("broker_email"), thread_id)
+            bid_price_url = None
+            if order_id and WEB_BASE_URL:
+                tok = map_token.make_bid_token(license_key, order_id)
+                bid_price_url = f"{WEB_BASE_URL}/app/bid_price.html?t={tok}"
             _telegram_send(bot_token, chat_ids, result["formatted"],
-                           order_id=result.get("order_id"), route_url=route_url,
-                           gmail_url=gmail_url)
+                           order_id=order_id, route_url=route_url,
+                           gmail_url=gmail_url, bid_price_url=bid_price_url)
         logger.info(f"[{license_key}] matched load #{result.get('order_id')}")
         return True
     return False

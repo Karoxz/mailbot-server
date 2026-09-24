@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plutus Bot — Bid PC</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/plutus_logo.jpg">
+</head>
+<body>
+
+<main class="content" style="max-width:480px;">
+  <div class="page-toolbar">
+    <h1>Bid PC</h1>
+    <a id="back-link" href="loads.html" class="hint">← Loads</a>
+  </div>
+
+  <section class="panel" id="order-panel">
+    <div class="panel-header">
+      <h2 id="order-title">Loading…</h2>
+    </div>
+    <div style="padding:16px 18px;">
+      <div id="order-route" class="hint" style="font-size:.95rem;"></div>
+      <div id="order-meta" class="hint" style="margin-top:4px;"></div>
+    </div>
+
+    <div id="map-frame" style="height:260px;background:var(--bg);border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+      <span id="map-status" class="hint">Loading map…</span>
+    </div>
+
+    <div style="padding:16px 18px;">
+      <div class="field">
+        <label>Total Price</label>
+        <input id="price-input" type="number" inputmode="decimal" min="1" step="1" placeholder="Enter your price" autofocus>
+      </div>
+      <div class="hint" style="margin-top:8px;">Rate per mile: <span id="rate-per-mile">—</span></div>
+      <div class="form-actions" style="padding-top:16px;">
+        <button id="submit-btn" class="btn btn-primary" type="button" disabled>💵 Make a Bid</button>
+      </div>
+      <p id="error-box" class="hint" style="color:var(--bad);display:none;"></p>
+    </div>
+  </section>
+
+  <section class="panel" id="result-panel" style="display:none;margin-top:16px;">
+    <div class="panel-header"><h2>Bid text</h2></div>
+    <div style="padding:16px 18px;">
+      <p class="note-text" style="padding:0 0 10px;">Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.</p>
+      <textarea id="result-text" readonly rows="12" style="width:100%;font-family:monospace;font-size:.85rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
+      <div class="form-actions" style="padding-top:14px;">
+        <button id="result-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
+        <a id="result-gmail" class="btn" target="_blank" rel="noopener">✉️ Find thread in Gmail</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.initTheme();
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+function showError(msg) {
+  const box = document.getElementById("error-box");
+  box.textContent = msg;
+  box.style.display = msg ? "block" : "none";
+}
+
+// ── Auth: a signed token (?t=, Telegram/phone — no prior dashboard
+// session on that device) OR the dashboard's normal license_key flow
+// (already in localStorage, linked from loads.html with ?order_id=). ──
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get("t");
+const URL_ORDER_ID = params.get("order_id");
+
+if (!TOKEN) {
+  // No token — this is the dashboard path. Same as every other page.
+  MB.requireAuth();
+  document.getElementById("back-link").style.display = "";
+} else {
+  // Token path — this page may be the very first thing opened on this
+  // device/browser. Don't force a license-key login for a one-shot
+  // action link.
+  document.getElementById("back-link").style.display = "none";
+}
+
+async function bidFetch(method, path, bodyOrParams) {
+  const auth = TOKEN ? { t: TOKEN } : { license_key: MB.getLicenseKey() };
+  if (method === "GET") {
+    const usp = new URLSearchParams({ ...auth, ...(bodyOrParams || {}) });
+    const res = await fetch(`${path}?${usp.toString()}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+  const res = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...auth, ...(bodyOrParams || {}) }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+let ORDER = null;
+
+function renderOrder(order) {
+  document.getElementById("order-title").textContent = `Order #${order.order_id}`;
+  document.getElementById("order-route").textContent =
+    `${order.pickup_loc || "?"} → ${order.delivery_loc || "?"}`;
+  const bits = [];
+  if (order.total_miles != null) bits.push(`${order.total_miles} mi total`);
+  if (order.google_deadhead != null) bits.push(`${order.google_deadhead} mi deadhead`);
+  document.getElementById("order-meta").textContent = bits.join(" · ");
+}
+
+async function loadMap(order) {
+  const frame = document.getElementById("map-frame");
+  const status = document.getElementById("map-status");
+  try {
+    const res = await bidFetch("POST", "/api/web/bid_price/route_map", {
+      order_id: order.order_id,
+      pickup_loc: order.pickup_loc,
+      delivery_loc: order.delivery_loc,
+      frame_w: frame.clientWidth,
+      frame_h: frame.clientHeight,
+    });
+    if (!res.success) {
+      status.textContent = "Map unavailable";
+      return;
+    }
+    const img = new Image();
+    img.style.cssText = "width:100%;height:100%;object-fit:contain;";
+    img.onload = () => { frame.innerHTML = ""; frame.appendChild(img); };
+    img.src = `data:image/png;base64,${res.image_b64}`;
+  } catch (err) {
+    status.textContent = "Map unavailable";
+  }
+}
+
+function recalcRatePerMile() {
+  const price = parseFloat(document.getElementById("price-input").value);
+  const el = document.getElementById("rate-per-mile");
+  const submitBtn = document.getElementById("submit-btn");
+  if (!price || price <= 0 || !ORDER || !ORDER.total_miles) {
+    el.textContent = "—";
+    submitBtn.disabled = !(price > 0);
+    return;
+  }
+  el.textContent = `$${(price / ORDER.total_miles).toFixed(2)}/mi`;
+  submitBtn.disabled = false;
+}
+document.getElementById("price-input").addEventListener("input", recalcRatePerMile);
+
+async function submitBid() {
+  const price = parseFloat(document.getElementById("price-input").value);
+  if (!price || price <= 0) { showError("Enter a valid price first."); return; }
+  showError("");
+  const btn = document.getElementById("submit-btn");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "…";
+  try {
+    const rate = ORDER.total_miles ? price / ORDER.total_miles : null;
+    const res = await bidFetch("POST", "/api/web/bid_price/submit", {
+      order_id: ORDER.order_id, price, rate_per_mile: rate,
+    });
+    let copied = true;
+    try { await navigator.clipboard.writeText(res.bid_text || ""); } catch (e) { copied = false; }
+    document.getElementById("result-text").value = res.bid_text || "";
+    document.getElementById("result-gmail").href =
+      MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
+    document.getElementById("result-panel").style.display = "";
+    document.getElementById("result-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    showToast(copied ? "Bid recorded — text copied to clipboard" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
+  } catch (err) {
+    showError(err.message || "Failed to submit bid");
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+document.getElementById("submit-btn").addEventListener("click", submitBid);
+document.getElementById("result-copy").addEventListener("click", async () => {
+  const text = document.getElementById("result-text").value;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Copied to clipboard");
+  } catch (e) {
+    showToast("Couldn't access clipboard — select the text manually", true);
+  }
+});
+
+async function init() {
+  if (!TOKEN && !URL_ORDER_ID) {
+    showError("No order specified.");
+    return;
+  }
+  try {
+    const res = await bidFetch("GET", "/api/web/bid_price/context",
+      TOKEN ? {} : { order_id: URL_ORDER_ID });
+    ORDER = res.order;
+    renderOrder(ORDER);
+    loadMap(ORDER);
+  } catch (err) {
+    document.getElementById("order-title").textContent = "Error";
+    showError(err.message || "Couldn't load this order — the link may have expired.");
+  }
+}
+
+init();
+</script>
+</body>
+</html>

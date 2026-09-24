@@ -16,7 +16,7 @@
     <h1>Trucks</h1>
     <button id="add-truck-btn" class="btn btn-primary" type="button">+ Add truck</button>
   </div>
-  <p class="hint" style="margin-top:-6px;">⚠️ This fleet list isn't wired into live load-matching yet — the desktop app still sends its own separately-configured truck list with every parse. Radius, and everything else here, is real stored data but doesn't affect real matching decisions until that integration happens.</p>
+  <p class="hint" style="margin-top:-6px;">ℹ️ This fleet list is what standalone mode (the server-side poller, and this dashboard) matches loads against. The desktop app still sends its own separately-configured truck list with every parse, so edits here don't affect the desktop's own matching — only standalone/web-triggered matching.</p>
 
   <section class="panel" id="add-truck-panel" hidden>
     <div class="panel-header"><h2 id="truck-form-title">New truck</h2></div>
@@ -32,6 +32,8 @@
         <div class="field"><label>Allowed states (comma-separated)</label><input name="allowed_states" placeholder="e.g. CA, NV, AZ"></div>
         <div class="field"><label>Pickup date</label><input name="pickup_date" placeholder="MM/DD/YYYY, optional"></div>
         <div class="field"><label>Max radius (miles)</label><input name="radius_miles" type="number" placeholder="blank = use the fleet default"></div>
+        <div class="field"><label>Loaded miles — min</label><input name="loaded_miles_min" type="number" placeholder="blank = no minimum"></div>
+        <div class="field"><label>Loaded miles — max</label><input name="loaded_miles_max" type="number" placeholder="blank = no maximum"></div>
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary" id="truck-form-submit">Save truck</button>
@@ -44,7 +46,7 @@
     <div class="table-scroll">
       <table>
         <thead>
-          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th></th></tr>
+          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th>Loaded miles</th><th></th></tr>
         </thead>
         <tbody id="trucks-body"></tbody>
       </table>
@@ -106,6 +108,8 @@ function openEditForm(id) {
   addForm.elements["allowed_states"].value = t.allowed_states ? t.allowed_states.join(", ") : "";
   addForm.elements["pickup_date"].value = t.pickup_date || "";
   addForm.elements["radius_miles"].value = t.radius_miles ?? "";
+  addForm.elements["loaded_miles_min"].value = t.loaded_miles_min ?? "";
+  addForm.elements["loaded_miles_max"].value = t.loaded_miles_max ?? "";
   formTitle.textContent = `Edit truck — ${t.driver_name}`;
   formSubmitBtn.textContent = "Save changes";
   addPanel.hidden = false; addBtn.hidden = true;
@@ -130,6 +134,8 @@ addForm.addEventListener("submit", async (e) => {
     pickup_date: (fd.get("pickup_date") || "").trim(),
     max_payload_lbs: fd.get("max_payload_lbs") ? Number(fd.get("max_payload_lbs")) : null,
     radius_miles: fd.get("radius_miles") ? Number(fd.get("radius_miles")) : null,
+    loaded_miles_min: fd.get("loaded_miles_min") ? Number(fd.get("loaded_miles_min")) : null,
+    loaded_miles_max: fd.get("loaded_miles_max") ? Number(fd.get("loaded_miles_max")) : null,
     allowed_states: allowedStatesRaw
       ? allowedStatesRaw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
       : null,
@@ -164,11 +170,18 @@ async function deleteTruck(id, driverName) {
   }
 }
 
+function fmtLoadedMiles(min, max) {
+  if (min == null && max == null) return "any";
+  if (min != null && max != null) return `${min}–${max} mi`;
+  if (min != null) return `${min}+ mi`;
+  return `up to ${max} mi`;
+}
+
 function renderTrucks(items) {
   const body = document.getElementById("trucks-body");
   trucksById = {};
   if (!items || items.length === 0) {
-    body.innerHTML = '<tr><td colspan="9" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
     return;
   }
   items.forEach((t) => { trucksById[t.id] = t; });
@@ -182,6 +195,7 @@ function renderTrucks(items) {
       <td>${MB.esc(t.equipment || "—")}</td>
       <td>${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</td>
       <td>${t.radius_miles ? t.radius_miles + " mi" : "fleet default"}</td>
+      <td>${fmtLoadedMiles(t.loaded_miles_min, t.loaded_miles_max)}</td>
       <td><div class="action-row">
         <button class="btn btn-sm" data-edit-id="${t.id}">Edit</button>
         <button class="btn btn-sm btn-danger" data-id="${t.id}" data-name="${MB.esc(t.driver_name)}">Remove</button>
@@ -207,7 +221,7 @@ async function loadTrucks() {
   }
 }
 
-document.getElementById("trucks-body").innerHTML = MB.skeletonRows(9, 3);
+document.getElementById("trucks-body").innerHTML = MB.skeletonRows(10, 3);
 loadTrucks();
 </script>
 </body>

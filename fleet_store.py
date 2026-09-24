@@ -66,6 +66,20 @@ def init_db():
             conn.execute('ALTER TABLE trucks ADD COLUMN radius_miles INTEGER')
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Same migration pattern, 2026-09-24 — the desktop app's per-truck
+        # config already has loaded_miles_min/max (a filter on the LOAD's
+        # own loaded-miles distance, distinct from radius_miles which is
+        # deadhead), but this server-side store never gained the columns,
+        # so the web dashboard couldn't set them for standalone-mode
+        # matching. NULL means "no bound" either way.
+        try:
+            conn.execute('ALTER TABLE trucks ADD COLUMN loaded_miles_min INTEGER')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute('ALTER TABLE trucks ADD COLUMN loaded_miles_max INTEGER')
+        except sqlite3.OperationalError:
+            pass
         conn.execute('''CREATE TABLE IF NOT EXISTS broker_blacklist (
             broker_email  TEXT PRIMARY KEY,
             broker_name   TEXT DEFAULT '',
@@ -107,19 +121,22 @@ def list_trucks(active_only: bool = True) -> list:
 def add_truck(vehicle: str, driver_name: str, zip_location: str,
               dimensions: str = "", max_payload_lbs: Optional[int] = None,
               equipment: str = "", allowed_states: Optional[list] = None,
-              pickup_date: str = "", radius_miles: Optional[int] = None) -> int:
+              pickup_date: str = "", radius_miles: Optional[int] = None,
+              loaded_miles_min: Optional[int] = None,
+              loaded_miles_max: Optional[int] = None) -> int:
     now = _now()
     conn = _connect()
     try:
         cur = conn.execute(
             '''INSERT INTO trucks (vehicle, driver_name, dimensions, max_payload_lbs,
                 equipment, allowed_states, zip_location, pickup_date, radius_miles,
-                active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,1,?,?)''',
+                loaded_miles_min, loaded_miles_max, active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)''',
             (vehicle.upper().strip(), driver_name.strip(), dimensions.strip(),
              max_payload_lbs, equipment.strip(),
              json.dumps(allowed_states) if allowed_states else None,
-             zip_location.strip(), pickup_date.strip(), radius_miles, now, now)
+             zip_location.strip(), pickup_date.strip(), radius_miles,
+             loaded_miles_min, loaded_miles_max, now, now)
         )
         conn.commit()
         assert cur.lastrowid is not None
@@ -135,7 +152,7 @@ def update_truck(truck_id: int, **fields) -> bool:
         return False
     allowed_cols = {"vehicle", "driver_name", "dimensions", "max_payload_lbs",
                      "equipment", "allowed_states", "zip_location", "pickup_date",
-                     "radius_miles", "active"}
+                     "radius_miles", "loaded_miles_min", "loaded_miles_max", "active"}
     sets, params = [], []
     for k, v in fields.items():
         if k not in allowed_cols:

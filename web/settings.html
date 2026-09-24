@@ -36,8 +36,9 @@
     <div class="form-actions" style="padding:16px 18px;align-items:center;">
       <span id="tl-status" style="font-weight:600;">Loading…</span>
       <button id="tl-toggle" class="btn btn-primary" type="button" disabled>…</button>
+      <button id="tl-backfill-btn" class="btn" type="button">Run backfill now</button>
     </div>
-    <p class="note-text">The actual backfill run (pulling and processing Gmail threads) still happens from the desktop app — it needs the Gmail OAuth connection the desktop already has. This toggle controls whether the server accepts backfill requests at all.</p>
+    <p class="note-text">"Run backfill now" walks the last 45 days of Gmail threads (bid/Finished Loads/BROKERS/RC/in route) using the Gmail connection below and records any rate/outcome it finds — needs Gmail connected and thread learning on. Running it here uses the server's own Gmail access; the desktop app can also still trigger the same thing from its own connection.</p>
   </section>
 
   <section class="panel">
@@ -50,8 +51,31 @@
       <div class="form-actions" style="padding:14px 0 0;">
         <button type="submit" class="btn btn-primary">Save template</button>
       </div>
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Available variables</summary>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:2px;">
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{truck_dimensions}</code><span class="note-text" style="padding:0;">Truck dimensions — e.g. 264x97x103</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{google_deadhead}</code><span class="note-text" style="padding:0;">Miles from truck to pickup</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{truck_equipment}</code><span class="note-text" style="padding:0;">Equipment — e.g. Dock High, Air Ride</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{deadhead_eta_str}</code><span class="note-text" style="padding:0;">Estimated travel time to pickup</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{vehicle_type}</code><span class="note-text" style="padding:0;">Vehicle type — e.g. LARGE STRAIGHT</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{driver_name}</code><span class="note-text" style="padding:0;">Driver's name</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{pickup_loc}</code><span class="note-text" style="padding:0;">Pickup location</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{pickup_dt}</code><span class="note-text" style="padding:0;">Pickup date and time</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{pickup_date_only}</code><span class="note-text" style="padding:0;">Pickup date without time</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{delivery_loc}</code><span class="note-text" style="padding:0;">Delivery location</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{delivery_dt}</code><span class="note-text" style="padding:0;">Delivery date and time</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{delivery_date_only}</code><span class="note-text" style="padding:0;">Delivery date without time</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{deadhead_miles}</code><span class="note-text" style="padding:0;">Deadhead miles (same as google_deadhead)</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{order}</code><span class="note-text" style="padding:0;">Order number</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{broker_name}</code><span class="note-text" style="padding:0;">Broker name</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{vehicle_required}</code><span class="note-text" style="padding:0;">Vehicle required from email</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{price}</code><span class="note-text" style="padding:0;">Confirmed price from the Bid PC flow, e.g. $1234 — blank if a price was never confirmed. If you don't place this yourself, a blank "Rate: $" line already in the template gets it filled in automatically instead.</span></div>
+          <div style="display:flex;gap:10px;padding:2px 10px;"><code style="width:180px;flex-shrink:0;color:var(--accent);font-family:monospace;font-size:.82rem;">{rate_per_mile}</code><span class="note-text" style="padding:0;">Rate per mile from the Bid PC flow, e.g. $1.79/mi</span></div>
+        </div>
+      </details>
     </form>
-    <p class="note-text">⚠️ This is the server's <em>fallback</em> template — the desktop app always sends its own locally-configured template with every load it parses, so editing this here does <strong>not</strong> change what the desktop actually uses day-to-day. It only applies when a caller doesn't supply its own.</p>
+    <p class="note-text">⚠️ This is the server's <em>fallback</em> template — the desktop app always sends its own locally-configured template with every load it parses, so editing this here does <strong>not</strong> change what the desktop actually uses day-to-day. It's what standalone mode and Bid PC (web/Telegram) actually use, though, since neither of those has a desktop process to supply its own.</p>
   </section>
 
   <section class="panel">
@@ -204,6 +228,23 @@ tlToggle.addEventListener("click", async () => {
 });
 
 loadTlStatus();
+
+const tlBackfillBtn = document.getElementById("tl-backfill-btn");
+tlBackfillBtn.addEventListener("click", async () => {
+  tlBackfillBtn.disabled = true;
+  const originalText = tlBackfillBtn.textContent;
+  tlBackfillBtn.textContent = "Running…";
+  try {
+    const res = await MB.apiPost("/api/web/thread_learning/run_backfill", {});
+    showToast(`Backfill done — ${res.processed}/${res.total} threads processed` +
+              (res.errors ? `, ${res.errors} errors` : ""));
+  } catch (err) {
+    showToast(err.message || "Backfill run failed", true);
+  } finally {
+    tlBackfillBtn.disabled = false;
+    tlBackfillBtn.textContent = originalText;
+  }
+});
 
 // ── Bid template ─────────────────────────────────────────────────
 const templateForm = document.getElementById("template-form");

@@ -29,6 +29,10 @@ import fleet_store
 import load_store
 import gmail_store
 import gmail_client
+from gmail_client import GmailAuthError
+import thread_backfill
+import bid_actions
+import map_token
 import route_calibration
 import zip_geocode
 
@@ -190,24 +194,21 @@ def build_bid(req: dict):
         raise HTTPException(status_code=500, detail="Failed to build bid text")
 
 
-@app.post("/api/route_map")
-def route_map(req: dict):
+def _fetch_route_map(pickup_loc: str, delivery_loc: str, frame_w=None, frame_h=None) -> dict:
     """
-    New endpoint, 2026-09-19: the BID PC price-entry dialog shows a
-    route map (pickup -> delivery) alongside the price field. Proxies
-    Google's Static Maps API server-side so GOOGLE_MAPS_API_KEY (used
-    elsewhere for mileage verification) never reaches the client —
-    same reasoning as every other server-held secret in this project.
-    Fails soft: no key configured, or the fetch itself fails, returns
-    {"success": False, ...} rather than a 500 — the dialog is expected
-    to fall back to text-only route info, not break the whole flow.
+    Shared by /api/route_map (desktop, machine-bound auth) and
+    /api/web/bid_price/route_map (the BID PC price+map mobile page,
+    license/token auth — added 2026-09-24) — one Static-Maps-fetch
+    implementation, not two forks that drift. Proxies Google's Static
+    Maps API server-side so GOOGLE_MAPS_API_KEY (used elsewhere for
+    mileage verification) never reaches the client — same reasoning as
+    every other server-held secret in this project. Fails soft: no key
+    configured, or the fetch itself fails, returns
+    {"success": False, ...} rather than raising — every caller is
+    expected to fall back to text-only route info, not break its flow.
     """
-    check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
-    if not check["valid"]:
-        raise HTTPException(status_code=403, detail=check["reason"])
-
-    pickup_loc   = (req.get("pickup_loc") or "").strip()
-    delivery_loc = (req.get("delivery_loc") or "").strip()
+    pickup_loc   = (pickup_loc or "").strip()
+    delivery_loc = (delivery_loc or "").strip()
     if not pickup_loc or not delivery_loc:
         return {"success": False, "reason": "missing pickup/delivery location"}
     if not GOOGLE_MAPS_API_KEY:
@@ -225,8 +226,6 @@ def route_map(req: dict):
     # zero letterboxing AND zero cropping, because the source already
     # matches. Falls back to the previous fixed 640x640 when the
     # client doesn't send dimensions (e.g. an older build).
-    frame_w = req.get("frame_w")
-    frame_h = req.get("frame_h")
     if isinstance(frame_w, (int, float)) and isinstance(frame_h, (int, float)) \
             and frame_w > 0 and frame_h > 0:
         ratio = frame_w / frame_h
@@ -319,6 +318,19 @@ def route_map(req: dict):
     except Exception as e:
         logger.error(f"route_map error: {e}")
         return {"success": False, "reason": "map fetch failed"}
+
+
+@app.post("/api/route_map")
+def route_map(req: dict):
+    """New endpoint, 2026-09-19: the BID PC price-entry dialog shows a
+    route map (pickup -> delivery) alongside the price field. Desktop-
+    only (machine-bound auth) — see /api/web/bid_price/route_map for
+    the phone/dashboard equivalent, which shares _fetch_route_map above."""
+    check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return _fetch_route_map(req.get("pickup_loc", ""), req.get("delivery_loc", ""),
+                             req.get("frame_w"), req.get("frame_h"))
 
 
 @app.post("/api/record_bid")
@@ -581,6 +593,7 @@ def web_add_truck(req: WebTruckIn):
         dimensions=req.dimensions, max_payload_lbs=req.max_payload_lbs,
         equipment=req.equipment, allowed_states=req.allowed_states,
         pickup_date=req.pickup_date, radius_miles=req.radius_miles,
+        loaded_miles_min=req.loaded_miles_min, loaded_miles_max=req.loaded_miles_max,
     )
     return {"success": True, "truck_id": truck_id}
 
@@ -649,11 +662,9 @@ def web_record_bid(req: WebRecordBidRequest):
     copies the actual bid reply text to the clipboard and opens the
     Gmail thread, so the dispatcher has something to paste and can
     send it themselves (nothing is ever auto-sent, by design, same
-    principle as the rest of this project). The first web version of
-    this endpoint skipped that part and only recorded silently, which
-    left the dispatcher with nothing to actually act on — fixed here:
-    build and return the same bid text build_bid_reply_body() produces
-    for /api/build_bid, so the frontend can show/copy it.
+    principle as the rest of this project). Build/return that same
+    text (via the shared bid_actions helper, also used by poller.py
+    and the BID PC price+map page) so the frontend can show/copy it.
 
     NOTE: unlike the desktop, this can't reliably open the exact Gmail
     thread — LOAD_STORE entries populated via /api/parse always carry
@@ -667,47 +678,100 @@ def web_record_bid(req: WebRecordBidRequest):
     if req.method not in ("pc", "phone", "draft"):
         raise HTTPException(status_code=400, detail="method must be pc, phone, or draft")
 
-    load = load_store.get_load(req.order_id)
-    if not load:
+    result = bid_actions.record_bid_and_build_text(req.order_id, req.method)
+    if not result:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
-    thread_id = (load.get("original_msg_full") or {}).get("threadId", "")
-    maps_v = load.get("maps_verification") or {}
-    bid_id = bid_history.record_bid(
-        order_id=req.order_id,
-        thread_id=thread_id,
-        bid_method=req.method,
-        vehicle_type=load.get("truck_type") or load.get("vehicle_required", ""),
-        driver_name=load.get("driver_name", ""),
-        pickup_loc=load.get("pickup_loc", ""),
-        delivery_loc=load.get("delivery_loc", ""),
-        broker_name=load.get("broker_name", ""),
-        broker_email=load.get("broker_email", ""),
-        deadhead_miles=load.get("google_deadhead"),
-        loaded_miles=load.get("loaded_miles"),
-        total_miles=load.get("total_miles"),
-        verified_miles=maps_v.get("verified_miles"),
-        verified_source=maps_v.get("verified_source"),
-    )
+    logger.info(f"[WEB] recorded bid: order={req.order_id} method={req.method} bid_id={result['bid_id']}")
+    return {"success": True, "bid_id": result["bid_id"], "bid_text": result["bid_text"],
+            "thread_id": result["thread_id"]}
 
-    bid_text = parser_core.build_bid_reply_body(
-        order=req.order_id,
-        vehicle_required=load.get("vehicle_required"),
-        pickup_loc=load.get("pickup_loc"),
-        pickup_dt=load.get("pickup_dt"),
-        delivery_loc=load.get("delivery_loc"),
-        delivery_dt=load.get("delivery_dt"),
-        google_deadhead=load.get("google_deadhead"),
-        driver_name=load.get("driver_name", ""),
-        truck_type=load.get("truck_type", ""),
-        truck_dimensions=load.get("truck_dimensions", ""),
-        deadhead_eta_minutes=load.get("deadhead_eta_minutes"),
-        truck_equipment=load.get("truck_equipment", ""),
-        bid_template=load.get("bid_template"),
-    )
 
-    logger.info(f"[WEB] recorded bid: order={req.order_id} method={req.method} bid_id={bid_id}")
-    return {"success": True, "bid_id": bid_id, "bid_text": bid_text, "thread_id": thread_id}
+# ── BID PC price+map mobile page (bid_price.html), added 2026-09-24 ────
+# The desktop's BID PC dialog (map + price + live rate/mile) never had
+# a web/Telegram equivalent — poller.py's BID PC was a plain Gmail
+# link, and loads.html's Bid PC button built a draft with no price.
+# These three endpoints serve bid_price.html, reachable either from a
+# Telegram-sent link (a short-lived signed token, ?t=, since a phone
+# has no prior dashboard session and the raw license_key should never
+# go into a Telegram message) or from the dashboard's own Bid PC button
+# (already-authenticated via common.js's normal license_key flow).
+def _resolve_bid_price_auth(t: str, license_key: str, order_id: str = None):
+    """Returns (license_key, order_id), preferring the token when
+    present. Raises HTTPException on any auth/validation failure —
+    every /api/web/bid_price/* endpoint calls this first."""
+    if t:
+        claims = map_token.verify_bid_token(t)
+        if not claims:
+            raise HTTPException(status_code=403, detail="This link has expired or is invalid — ask for a new one.")
+        license_key = claims["license_key"]
+        order_id = claims["order_id"]
+    if not license_key:
+        raise HTTPException(status_code=403, detail="Not authenticated")
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+    return license_key, order_id
+
+
+@app.get("/api/web/bid_price/context")
+def web_bid_price_context(t: str = None, license_key: str = None, order_id: str = None):
+    """Everything bid_price.html needs to render: route/order info for
+    the header, plus the fields /api/web/bid_price/route_map needs."""
+    license_key, order_id = _resolve_bid_price_auth(t, license_key, order_id)
+    load = load_store.get_load(order_id)
+    if not load:
+        raise HTTPException(status_code=404, detail="Order not found in the current live feed")
+    order = {k: v for k, v in load.items() if k != "original_msg_full"}
+    order["order_id"] = order_id
+    return {"success": True, "order": order}
+
+
+@app.post("/api/web/bid_price/route_map")
+def web_bid_price_route_map(req: dict):
+    """Same map fetch /api/route_map does (shares _fetch_route_map),
+    minus the desktop's machine-bound auth — a phone has no machine_id."""
+    _resolve_bid_price_auth(req.get("t"), req.get("license_key"), req.get("order_id"))
+    return _fetch_route_map(req.get("pickup_loc", ""), req.get("delivery_loc", ""),
+                             req.get("frame_w"), req.get("frame_h"))
+
+
+@app.post("/api/web/bid_price/submit")
+def web_bid_price_submit(req: dict):
+    """Builds the bid draft WITH the confirmed price via the shared
+    bid_actions helper (the same one poller.py and /api/web/record_bid
+    use) — this is the one place a price actually reaches the draft
+    text from a web/Telegram-triggered BID PC. No Gmail draft is
+    created here (same as poller.py's/loads.html's existing BID PC —
+    neither has ever done that, even on the desktop's own Telegram-
+    triggered path — see build_bid_reply_body's docstring); the
+    frontend shows the built text to copy plus a link to the thread,
+    same pattern loads.html's own bid modal already uses."""
+    license_key, order_id = _resolve_bid_price_auth(
+        req.get("t"), req.get("license_key"), req.get("order_id"))
+
+    try:
+        price = float(req.get("price"))
+        if price <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A valid price is required")
+
+    rate_per_mile = req.get("rate_per_mile")
+    try:
+        rate_per_mile = float(rate_per_mile) if rate_per_mile is not None else None
+    except (TypeError, ValueError):
+        rate_per_mile = None
+
+    result = bid_actions.record_bid_and_build_text(order_id, "pc", price, rate_per_mile)
+    if not result:
+        raise HTTPException(status_code=404, detail="Order not found in the current live feed")
+
+    logger.info(f"[WEB] bid_price submit: order={order_id} price={price} bid_id={result['bid_id']}")
+    return {"success": True, "bid_text": result["bid_text"],
+            "thread_id": result["thread_id"], "broker_email": result["broker_email"]}
 
 
 @app.get("/api/web/thread_learning/status")
@@ -736,6 +800,42 @@ def web_thread_learning_disable(req: WebLoginRequest):
     license_db.set_thread_learning_enabled(req.license_key, False)
     logger.info(f"[WEB] thread learning disabled for {req.license_key}")
     return {"success": True, "enabled": False}
+
+
+@app.post("/api/web/thread_learning/run_backfill")
+def web_thread_learning_run_backfill(req: WebLoginRequest):
+    """New, 2026-09-24 — the desktop app has had a manual "run backfill
+    now" button since thread learning existed, but it required the
+    desktop's own Gmail OAuth connection to actually walk threads, so
+    the web dashboard could only ever toggle the feature on/off, never
+    run it. Gated the same way /api/web/standalone/enable is (real
+    prerequisites, not just a UI nicety a raw API call could bypass):
+    thread learning must be on, and a Gmail token must be connected.
+    Runs synchronously — a full 45-day backfill is a one-off manual
+    action, not something needing a background job for a first version.
+    """
+    check = validate_license_key_only(req.license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+
+    if not license_db.get_thread_learning_enabled(req.license_key):
+        raise HTTPException(status_code=400,
+                             detail="Thread learning is OFF — enable it first.")
+
+    gmail_status = gmail_store.get_status(req.license_key)
+    if not gmail_status["connected"]:
+        raise HTTPException(status_code=400,
+                             detail="No Gmail token connected — connect Gmail first.")
+
+    try:
+        result = thread_backfill.run_backfill(req.license_key)
+        logger.info(f"[WEB] backfill run for {req.license_key}: {result}")
+        return {"success": True, **result}
+    except GmailAuthError as e:
+        raise HTTPException(status_code=400, detail=f"Gmail auth error: {e}")
+    except Exception as e:
+        logger.error(f"backfill run failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Backfill run failed")
 
 
 @app.get("/api/web/telegram/status")

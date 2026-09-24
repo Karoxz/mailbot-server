@@ -126,6 +126,12 @@ class WebTruckIn(BaseModel):
     allowed_states:  Optional[List[str]] = None
     pickup_date:     str = ""
     radius_miles:    Optional[int] = None  # None = use the global default
+    # Same loaded-miles range as TruckDef above (2026-09-24 — this store
+    # had radius_miles but never gained these, so the web dashboard
+    # couldn't set them even though desktop-side matching already reads
+    # them per truck).
+    loaded_miles_min: Optional[int] = None
+    loaded_miles_max: Optional[int] = None
 
 
 class WebTruckUpdate(BaseModel):
@@ -139,6 +145,8 @@ class WebTruckUpdate(BaseModel):
     allowed_states:  Optional[List[str]] = None
     pickup_date:     Optional[str] = None
     radius_miles:    Optional[int] = None
+    loaded_miles_min: Optional[int] = None
+    loaded_miles_max: Optional[int] = None
     active:          Optional[bool] = None
 
 
