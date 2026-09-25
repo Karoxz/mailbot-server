@@ -31,6 +31,7 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from migration_defaults import LEGACY_DATA_LICENSE_KEY
+import zip_geocode
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "fleet_store.db")
@@ -102,6 +103,26 @@ def init_db():
             'UPDATE trucks SET license_key=? WHERE license_key IS NULL',
             (LEGACY_DATA_LICENSE_KEY,)
         )
+
+        # Map of truck locations, 2026-09-25 — plain ADD COLUMN again, same
+        # reasoning as license_key above (no primary-key change needed).
+        # Geocoded from zip_location via the already-built offline
+        # zip_geocode.lookup() (no network call). NULL means "couldn't be
+        # resolved" (bad/foreign ZIP) — the map simply skips that truck,
+        # not an error.
+        for _col in ("lat", "lon"):
+            try:
+                conn.execute(f'ALTER TABLE trucks ADD COLUMN {_col} REAL')
+            except sqlite3.OperationalError:
+                pass
+        rows = conn.execute(
+            "SELECT id, zip_location FROM trucks WHERE lat IS NULL AND zip_location IS NOT NULL AND zip_location != ''"
+        ).fetchall()
+        for truck_id, zip_loc in rows:
+            coords = zip_geocode.lookup(zip_loc)
+            if coords:
+                conn.execute("UPDATE trucks SET lat=?, lon=? WHERE id=?",
+                             (coords[0], coords[1], truck_id))
 
         # broker_blacklist's primary key changes from broker_email alone
         # to (license_key, broker_email) — a broker one account
@@ -175,18 +196,19 @@ def add_truck(license_key: str, vehicle: str, driver_name: str, zip_location: st
               loaded_miles_min: Optional[int] = None,
               loaded_miles_max: Optional[int] = None) -> int:
     now = _now()
+    coords = zip_geocode.lookup(zip_location.strip()) or [None, None]
     conn = _connect()
     try:
         cur = conn.execute(
             '''INSERT INTO trucks (license_key, vehicle, driver_name, dimensions, max_payload_lbs,
                 equipment, allowed_states, zip_location, pickup_date, radius_miles,
-                loaded_miles_min, loaded_miles_max, active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)''',
+                loaded_miles_min, loaded_miles_max, lat, lon, active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)''',
             (license_key, vehicle.upper().strip(), driver_name.strip(), dimensions.strip(),
              max_payload_lbs, equipment.strip(),
              json.dumps(allowed_states) if allowed_states else None,
              zip_location.strip(), pickup_date.strip(), radius_miles,
-             loaded_miles_min, loaded_miles_max, now, now)
+             loaded_miles_min, loaded_miles_max, coords[0], coords[1], now, now)
         )
         conn.commit()
         assert cur.lastrowid is not None
@@ -215,6 +237,12 @@ def update_truck(license_key: str, truck_id: int, **fields) -> bool:
             v = v.upper().strip()
         sets.append(f"{k}=?")
         params.append(v)
+        if k == "zip_location" and v:
+            coords = zip_geocode.lookup(v) or [None, None]
+            sets.append("lat=?")
+            params.append(coords[0])
+            sets.append("lon=?")
+            params.append(coords[1])
     if not sets:
         return False
     sets.append("updated_at=?")

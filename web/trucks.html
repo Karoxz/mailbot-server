@@ -6,6 +6,7 @@
 <title>Plutus Bot — Trucks</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/plutus_logo.jpg">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body>
 
@@ -14,7 +15,10 @@
 <main class="content">
   <div class="page-toolbar">
     <h1>Trucks</h1>
-    <button id="add-truck-btn" class="btn btn-primary" type="button">+ Add truck</button>
+    <div class="action-row">
+      <button id="map-toggle-btn" class="btn" type="button">🗺️ Show map</button>
+      <button id="add-truck-btn" class="btn btn-primary" type="button">+ Add truck</button>
+    </div>
   </div>
   <p class="hint" style="margin-top:-6px;">ℹ️ This fleet list is what standalone mode (the server-side poller, and this dashboard) matches loads against. The desktop app still sends its own separately-configured truck list with every parse, so edits here don't affect the desktop's own matching — only standalone/web-triggered matching.</p>
 
@@ -42,6 +46,12 @@
     </form>
   </section>
 
+  <section class="panel" id="map-panel" hidden>
+    <div class="panel-header"><h2>Fleet map</h2></div>
+    <div id="truck-map" style="height:400px;border-radius:0 0 var(--radius,10px) var(--radius,10px);"></div>
+    <p class="note-text" id="map-empty-note" style="display:none;">No trucks with a resolvable ZIP location yet.</p>
+  </section>
+
   <section class="panel">
     <div class="table-scroll">
       <table>
@@ -56,6 +66,7 @@
 
 <div id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="common.js"></script>
 <script>
 const MB = window.MailBot;
@@ -177,7 +188,63 @@ function fmtLoadedMiles(min, max) {
   return `up to ${max} mi`;
 }
 
+// ── Fleet map ─────────────────────────────────────────────────────
+// Lazy-initialized on first "Show map" click, not on page load — a
+// Leaflet map created inside a hidden (display:none) container ends up
+// with zero size and renders blank tiles, so init only happens once the
+// panel is actually visible.
+let latestTrucks = [];
+let mapInstance = null;
+let markerLayer = null;
+
+function renderMapMarkers(items) {
+  if (!markerLayer) return;
+  markerLayer.clearLayers();
+  const withCoords = (items || []).filter((t) => t.lat != null && t.lon != null);
+  document.getElementById("map-empty-note").style.display = withCoords.length ? "none" : "";
+  withCoords.forEach((t) => {
+    L.marker([t.lat, t.lon])
+      .bindPopup(`<b>${MB.esc(t.driver_name)}</b><br>${MB.esc(t.vehicle)}`
+        + (t.equipment ? ` · ${MB.esc(t.equipment)}` : "")
+        + `<br>${MB.esc(t.zip_location)}`)
+      .addTo(markerLayer);
+  });
+  if (withCoords.length) {
+    mapInstance.fitBounds(L.featureGroup(markerLayer.getLayers()).getBounds().pad(0.2));
+  }
+}
+
+function ensureMap() {
+  if (mapInstance) return;
+  mapInstance = L.map("truck-map").setView([39.5, -98.35], 4); // center of the continental US
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors",
+    maxZoom: 18,
+  }).addTo(mapInstance);
+  markerLayer = L.layerGroup().addTo(mapInstance);
+  renderMapMarkers(latestTrucks);
+}
+
+document.getElementById("map-toggle-btn").addEventListener("click", () => {
+  const panel = document.getElementById("map-panel");
+  const btn = document.getElementById("map-toggle-btn");
+  if (!panel.hidden) {
+    panel.hidden = true;
+    btn.textContent = "🗺️ Show map";
+    return;
+  }
+  panel.hidden = false;
+  btn.textContent = "🗺️ Hide map";
+  MB.popIn(panel);
+  ensureMap();
+  // Leaflet computes tile layout from the container's size at init time —
+  // give the panel's reveal transition a beat to finish before that.
+  setTimeout(() => mapInstance && mapInstance.invalidateSize(), 50);
+});
+
 function renderTrucks(items) {
+  latestTrucks = items || [];
+  if (mapInstance) renderMapMarkers(latestTrucks);
   const body = document.getElementById("trucks-body");
   trucksById = {};
   if (!items || items.length === 0) {

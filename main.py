@@ -77,6 +77,10 @@ async def lifespan(app):
     init_db()
     bid_history.init_db()
     bid_history.init_processed_threads_table()
+    # zip_geocode warmed up BEFORE fleet_store — fleet_store.init_db()'s
+    # truck-location backfill (2026-09-25) needs the offline geocoder
+    # already loaded, not warmed up after the fact.
+    zip_geocode.warmup()
     fleet_store.init_db()
     load_store.init_db()
     gmail_store.init_db()
@@ -84,7 +88,6 @@ async def lifespan(app):
     push_queue.init_db()
     route_cache_store.init_db()
     activity_log.init_db()
-    zip_geocode.warmup()
     logger.info("Database initialized")
     yield
 

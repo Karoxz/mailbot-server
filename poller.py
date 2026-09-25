@@ -60,6 +60,7 @@ import bid_actions
 import map_token
 import route_cache_store
 import activity_log
+import zip_geocode
 from gmail_client import GmailAuthError
 from parser_core import parse_email_for_api, FREIGHT_MARKERS, extract_text_from_full_message
 
@@ -435,6 +436,9 @@ def run_one_license_cycle(license_key: str):
 def main():
     logger.info(f"poller starting — poll interval {POLL_INTERVAL_SECONDS}s")
     license_db.init_db()
+    # zip_geocode warmed up before fleet_store — its truck-location
+    # backfill (2026-09-25) needs the offline geocoder already loaded.
+    zip_geocode.warmup()
     fleet_store.init_db()
     load_store.init_db()
     gmail_store.init_db()
