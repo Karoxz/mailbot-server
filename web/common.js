@@ -292,6 +292,130 @@
     el.classList.add("enter-anim");
   }
 
+  // ── Table search / sort / pagination ────────────────────────────────
+  // Pure function — every page still fetches its full result set (data
+  // volumes here don't need server-side paging); this just narrows/
+  // orders/slices it client-side before the page's own render call.
+  function filterSortPaginate(items, opts = {}) {
+    const { searchTerm = "", searchFields = [], sortKey = null,
+            sortDir = "asc", page = 1, pageSize = 0 } = opts;
+    let out = items || [];
+    if (searchTerm && searchFields.length) {
+      const term = searchTerm.toLowerCase();
+      out = out.filter((it) =>
+        searchFields.some((f) => String(it[f] ?? "").toLowerCase().includes(term)));
+    }
+    if (sortKey) {
+      out = out.slice().sort((a, b) => {
+        let av = a[sortKey], bv = b[sortKey];
+        if (av == null) av = "";
+        if (bv == null) bv = "";
+        if (typeof av === "string") av = av.toLowerCase();
+        if (typeof bv === "string") bv = bv.toLowerCase();
+        if (av < bv) return sortDir === "asc" ? -1 : 1;
+        if (av > bv) return sortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+    }
+    const total = out.length;
+    const totalPages = pageSize ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+    const page_ = Math.min(Math.max(1, page), totalPages);
+    const pageItems = pageSize ? out.slice((page_ - 1) * pageSize, page_ * pageSize) : out;
+    return { items: pageItems, total, totalPages, page: page_ };
+  }
+
+  // Builds a search + sort + pager toolbar once into `el`, keeps its own
+  // {searchTerm, sortKey, sortDir, page} state, and calls `onChange`
+  // (passed that state) whenever any control changes — the page's own
+  // onChange handler re-runs filterSortPaginate + its render function.
+  // sortOptions: [{key, label}, ...] or omitted for search-only.
+  function mountListControls(el, { searchPlaceholder = "Search…", sortOptions = null,
+                                     pageSize = 0, onChange }) {
+    const state = { searchTerm: "", sortKey: sortOptions ? sortOptions[0].key : null,
+                     sortDir: "asc", page: 1 };
+    const sortHtml = sortOptions ? `
+      <select class="list-sort">
+        ${sortOptions.map((o) => `<option value="${o.key}">${esc(o.label)}</option>`).join("")}
+      </select>
+      <button type="button" class="btn btn-sm list-sort-dir" title="Reverse sort order">↑</button>` : "";
+    const pagerHtml = pageSize ? `
+      <div class="list-pager">
+        <button type="button" class="btn btn-sm list-prev">‹</button>
+        <span class="list-page-info"></span>
+        <button type="button" class="btn btn-sm list-next">›</button>
+      </div>` : "";
+    el.innerHTML = `<div class="list-controls">
+        <input type="search" class="list-search" placeholder="${esc(searchPlaceholder)}">
+        ${sortHtml}${pagerHtml}
+      </div>`;
+    const searchInput = el.querySelector(".list-search");
+    const sortSelect  = el.querySelector(".list-sort");
+    const sortDirBtn  = el.querySelector(".list-sort-dir");
+    const prevBtn     = el.querySelector(".list-prev");
+    const nextBtn     = el.querySelector(".list-next");
+    const pageInfo    = el.querySelector(".list-page-info");
+
+    let debounceTimer;
+    searchInput.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        state.searchTerm = searchInput.value;
+        state.page = 1;
+        onChange(state);
+      }, 150);
+    });
+    if (sortSelect) {
+      sortSelect.addEventListener("change", () => {
+        state.sortKey = sortSelect.value;
+        onChange(state);
+      });
+    }
+    if (sortDirBtn) {
+      sortDirBtn.addEventListener("click", () => {
+        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+        sortDirBtn.textContent = state.sortDir === "asc" ? "↑" : "↓";
+        onChange(state);
+      });
+    }
+    if (prevBtn) {
+      prevBtn.addEventListener("click", () => {
+        if (state.page > 1) { state.page -= 1; onChange(state); }
+      });
+      nextBtn.addEventListener("click", () => { state.page += 1; onChange(state); });
+    }
+    // Exposed so the page's render callback can update "Page X of Y" /
+    // disable prev/next at the edges after each filterSortPaginate call.
+    state._updatePager = (page, totalPages) => {
+      if (!pageInfo) return;
+      pageInfo.textContent = `Page ${page} of ${totalPages}`;
+      prevBtn.disabled = page <= 1;
+      nextBtn.disabled = page >= totalPages;
+    };
+    return state;
+  }
+
+  // Client-side CSV export — builds the file from data already in hand
+  // (or already fetched via apiGet) and triggers a browser download, no
+  // new backend endpoint needed. columns: [{key, label}, ...].
+  function exportCsv(filename, rows, columns) {
+    const esc_ = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = columns.map((c) => esc_(c.label)).join(",");
+    const lines = rows.map((r) => columns.map((c) => esc_(r[c.key])).join(","));
+    const csv = [header, ...lines].join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   // ── Nav ────────────────────────────────────────────────────────────
   const NAV_ITEMS = [
     { href: "index.html",    label: "Dashboard" },
@@ -340,5 +464,6 @@
     esc, fmtMoney, fmtRate, fmtPct, fmtWhen,
     renderTopbar, setConn, showFatalError, gmailSearchUrl,
     diffRender, skeletonCards, skeletonRows, popIn,
+    filterSortPaginate, mountListControls, exportCsv,
   };
 })();

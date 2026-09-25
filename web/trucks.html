@@ -53,6 +53,7 @@
   </section>
 
   <section class="panel">
+    <div id="trucks-controls"></div>
     <div class="table-scroll">
       <table>
         <thead>
@@ -193,7 +194,7 @@ function fmtLoadedMiles(min, max) {
 // Leaflet map created inside a hidden (display:none) container ends up
 // with zero size and renders blank tiles, so init only happens once the
 // panel is actually visible.
-let latestTrucks = [];
+let allTrucks = []; // full, unfiltered — the map always shows the whole fleet
 let mapInstance = null;
 let markerLayer = null;
 
@@ -222,7 +223,7 @@ function ensureMap() {
     maxZoom: 18,
   }).addTo(mapInstance);
   markerLayer = L.layerGroup().addTo(mapInstance);
-  renderMapMarkers(latestTrucks);
+  renderMapMarkers(allTrucks);
 }
 
 document.getElementById("map-toggle-btn").addEventListener("click", () => {
@@ -243,8 +244,6 @@ document.getElementById("map-toggle-btn").addEventListener("click", () => {
 });
 
 function renderTrucks(items) {
-  latestTrucks = items || [];
-  if (mapInstance) renderMapMarkers(latestTrucks);
   const body = document.getElementById("trucks-body");
   trucksById = {};
   if (!items || items.length === 0) {
@@ -277,10 +276,37 @@ function renderTrucks(items) {
   });
 }
 
+const trucksControls = MB.mountListControls(document.getElementById("trucks-controls"), {
+  searchPlaceholder: "Search trucks (driver, vehicle, zip, equipment)…",
+  sortOptions: [
+    { key: "driver_name", label: "Driver" },
+    { key: "vehicle", label: "Vehicle" },
+    { key: "zip_location", label: "Zip" },
+  ],
+  pageSize: 15,
+  onChange: applyTrucksControls,
+});
+
+function applyTrucksControls() {
+  const result = MB.filterSortPaginate(allTrucks, {
+    searchTerm: trucksControls.searchTerm,
+    searchFields: ["driver_name", "vehicle", "zip_location", "equipment"],
+    sortKey: trucksControls.sortKey,
+    sortDir: trucksControls.sortDir,
+    page: trucksControls.page,
+    pageSize: 15,
+  });
+  trucksControls.page = result.page;
+  trucksControls._updatePager(result.page, result.totalPages);
+  renderTrucks(result.items);
+}
+
 async function loadTrucks() {
   try {
     const res = await MB.apiGet("/api/web/trucks");
-    renderTrucks(res.items);
+    allTrucks = res.items || [];
+    if (mapInstance) renderMapMarkers(allTrucks);
+    applyTrucksControls();
     MB.setConn(true);
   } catch (err) {
     MB.setConn(false);

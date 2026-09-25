@@ -18,6 +18,7 @@
   </div>
 
   <section class="panel">
+    <div id="brokers-controls"></div>
     <div class="table-scroll">
       <table>
         <thead>
@@ -97,10 +98,38 @@ function renderBrokers(items) {
   });
 }
 
+let allBrokers = [];
+const brokersControls = MB.mountListControls(document.getElementById("brokers-controls"), {
+  searchPlaceholder: "Search brokers…",
+  sortOptions: [
+    { key: "broker_email", label: "Broker" },
+    { key: "total_bids", label: "Bids" },
+    { key: "win_rate", label: "Win rate" },
+    { key: "avg_rate_per_mile", label: "Avg $/mi" },
+  ],
+  pageSize: 15,
+  onChange: applyBrokersControls,
+});
+
+function applyBrokersControls() {
+  const result = MB.filterSortPaginate(allBrokers, {
+    searchTerm: brokersControls.searchTerm,
+    searchFields: ["broker_email"],
+    sortKey: brokersControls.sortKey,
+    sortDir: brokersControls.sortDir,
+    page: brokersControls.page,
+    pageSize: 15,
+  });
+  brokersControls.page = result.page;
+  brokersControls._updatePager(result.page, result.totalPages);
+  renderBrokers(result.items);
+}
+
 async function loadBrokers() {
   try {
     const res = await MB.apiGet("/api/web/brokers");
-    renderBrokers(res.items);
+    allBrokers = res.items || [];
+    applyBrokersControls();
     MB.setConn(true);
   } catch (err) {
     MB.setConn(false);

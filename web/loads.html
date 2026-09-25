@@ -18,6 +18,7 @@
   </div>
 
   <section class="panel">
+    <div id="loads-controls"></div>
     <div id="loads-list" class="feed-list"></div>
   </section>
 </main>
@@ -202,10 +203,38 @@ document.getElementById("loads-list").addEventListener("click", (e) => {
   recordBid(btn.dataset.order, btn.dataset.method, btn, btn.dataset.broker);
 });
 
+let allLoads = [];
+const loadsControls = MB.mountListControls(document.getElementById("loads-controls"), {
+  searchPlaceholder: "Search loads (order, route, broker)…",
+  sortOptions: [
+    { key: "order", label: "Order #" },
+    { key: "pickup_loc", label: "Pickup" },
+    { key: "delivery_loc", label: "Delivery" },
+    { key: "broker_name", label: "Broker" },
+  ],
+  pageSize: 20,
+  onChange: applyLoadsControls,
+});
+
+function applyLoadsControls() {
+  const result = MB.filterSortPaginate(allLoads, {
+    searchTerm: loadsControls.searchTerm,
+    searchFields: ["order", "pickup_loc", "delivery_loc", "broker_name", "broker_email"],
+    sortKey: loadsControls.sortKey,
+    sortDir: loadsControls.sortDir,
+    page: loadsControls.page,
+    pageSize: 20,
+  });
+  loadsControls.page = result.page;
+  loadsControls._updatePager(result.page, result.totalPages);
+  renderLoads(result.items);
+}
+
 async function refresh() {
   try {
     const feed = await MB.apiGet("/api/web/feed", { limit: 50 });
-    renderLoads(feed.items);
+    allLoads = feed.items;
+    applyLoadsControls();
     MB.setConn(true);
   } catch (err) {
     MB.setConn(false);
