@@ -1139,6 +1139,24 @@ def web_standalone_poller_status(license_key: str):
     return {"success": True, "heartbeat": hb}
 
 
+# Real bug, found 2026-09-25: StaticFiles serves no Cache-Control header
+# by default, so a browser can keep using a stale cached common.js/
+# style.css indefinitely after a deploy — a dispatcher's already-open
+# browser hit "MB.mountListControls is not a function" because its
+# cached common.js predated the same-day deploy that added it, while
+# the HTML page it loaded fresh already referenced the new function.
+# "no-cache" (not "no-store") forces revalidation via ETag on every
+# load — cheap (a 304 when unchanged), but guarantees the next deploy's
+# JS/CSS is picked up without anyone needing to hard-refresh.
+@app.middleware("http")
+async def _no_cache_static_assets(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/app/") and path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # Static frontend — mounted LAST and at a sub-path so it can never
 # shadow an API route above. Reachable at https://<domain>/app/
 # (Caddy already reverse-proxies everything to this server, so no
