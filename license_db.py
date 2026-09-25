@@ -58,6 +58,14 @@ def init_db():
             conn.execute(f'ALTER TABLE licenses ADD COLUMN {_col} {_decl}')
         except sqlite3.OperationalError:
             pass  # column already exists
+    # A human-assigned label (e.g. client name), distinct from machine_name
+    # (which the DESKTOP app sets automatically from the device it's
+    # activated on) — this one is set by us, purely so a raw license key
+    # isn't the only way to tell whose account is whose.
+    try:
+        conn.execute("ALTER TABLE licenses ADD COLUMN label TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -305,12 +313,12 @@ def heartbeat(key: str, machine_id: str) -> bool:
     return True
 
 
-def add_license(key: str, expires_at: Optional[str] = None):
+def add_license(key: str, expires_at: Optional[str] = None, label: str = ''):
     now = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        'INSERT OR IGNORE INTO licenses (key, active, created_at, expires_at) VALUES (?,1,?,?)',
-        (key, now, expires_at)
+        'INSERT OR IGNORE INTO licenses (key, active, created_at, expires_at, label) VALUES (?,1,?,?,?)',
+        (key, now, expires_at, label)
     )
     conn.commit()
     conn.close()
@@ -321,3 +329,34 @@ def revoke_license(key: str):
     conn.execute('UPDATE licenses SET active=0 WHERE key=?', (key,))
     conn.commit()
     conn.close()
+
+
+def set_license_label(key: str, label: str) -> bool:
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('UPDATE licenses SET label=? WHERE key=?', (label, key))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def list_all_licenses() -> list:
+    """Every license with its label, for identifying who's who without
+    reading raw keys — key, label, active, machine_name, created_at,
+    expires_at, last_heartbeat, ordered newest-first."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        '''SELECT key, label, active, machine_name, created_at, expires_at, last_heartbeat
+           FROM licenses ORDER BY created_at DESC'''
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            'key': r[0], 'label': r[1] or '', 'active': bool(r[2]),
+            'machine_name': r[3], 'created_at': r[4],
+            'expires_at': r[5], 'last_heartbeat': r[6],
+        }
+        for r in rows
+    ]
