@@ -58,6 +58,7 @@ import bid_history
 import gmail_client
 import bid_actions
 import map_token
+import route_cache_store
 from gmail_client import GmailAuthError
 from parser_core import parse_email_for_api, FREIGHT_MARKERS, extract_text_from_full_message
 
@@ -437,9 +438,12 @@ def main():
     # process_bid_email() (called via parse_email_for_api) reads from
     # bid_history for rate recommendations — this process needs that
     # table to exist regardless of whether mailbot-api has started yet
-    # or already created it (don't assume startup ordering).
+    # or already created it (don't assume startup ordering). Same reason
+    # for route_cache_store below — parse_email_for_api's geocode/route
+    # calls now hit those tables directly (2026-09-25 multi-worker fix).
     bid_history.init_db()
     bid_history.init_processed_threads_table()
+    route_cache_store.init_db()
 
     while True:
         processed = 0

@@ -41,8 +41,8 @@ import zip_geocode
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
 
-_push_queue: collections.deque = collections.deque()
-_push_lock = threading.Lock()
+import push_queue
+import route_cache_store
 
 
 # ── Load .env file manually (works without python-dotenv) ─────────────────
@@ -80,6 +80,8 @@ async def lifespan(app):
     load_store.init_db()
     gmail_store.init_db()
     route_calibration.init_db()
+    push_queue.init_db()
+    route_cache_store.init_db()
     zip_geocode.warmup()
     logger.info("Database initialized")
     yield
@@ -107,8 +109,7 @@ async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
             history_id = str(notification.get("historyId", ""))
             print(f"WEBHOOK_HIT t={time.time():.3f}", flush=True)
             logger.info(f"PUSH_IN historyId={history_id} t={time.time():.3f}")
-            with _push_lock:
-                _push_queue.append((history_id, time.time()))
+            push_queue.push(history_id)
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -123,9 +124,7 @@ async def poll_push(request: Request):
     )
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    with _push_lock:
-        items = list(_push_queue)
-        _push_queue.clear()
+    items = push_queue.drain_all()
     if items:
         for history_id, pushed_at in items:
             lag = time.time() - pushed_at

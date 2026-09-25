@@ -165,21 +165,16 @@ PHOTON_URL    = "https://photon.komoot.io/api/"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GEOCODER_UA   = "MailBotDispatcher/1.0"
 
-GEO_CACHE_FILE   = "geo_cache.json"
-ROUTE_CACHE_FILE = "route_cache.json"
-MAPS_CACHE_FILE  = "maps_verify_cache.json"          # ← NEW
-_GEO_CACHE_LOCK   = threading.Lock()
-_ROUTE_CACHE_LOCK = threading.Lock()
-_MAPS_CACHE_LOCK  = threading.Lock()                  # ← NEW
-_GEO_CACHE_DIRTY   = False
-_ROUTE_CACHE_DIRTY = False
-_MAPS_CACHE_DIRTY  = False                             # ← NEW
-
-# Bumped for this rewrite — see FIX #8 in the header comment.
-CACHE_SCHEMA_VERSION = 3
 ROUTE_CACHE_TTL_DAYS = 30
 
 STOP_EVENT = threading.Event()
+
+# GEO_CACHE / ROUTE_CACHE / MAPS_CACHE used to be plain in-process dicts
+# here — invisible across uvicorn's 4 worker processes (see
+# route_cache_store.py's module docstring for the full history). Now
+# backed by SQLite (WAL mode, safe across all 4 workers), same fix
+# already applied to LOAD_STORE / BID_TEMPLATE below.
+import route_cache_store
 
 # LOAD_STORE / BID_TEMPLATE used to be plain in-process globals here —
 # invisible across uvicorn's 4 worker processes (a load matched by one
@@ -212,27 +207,6 @@ _maps_session.mount("https://", HTTPAdapter(max_retries=0))
 # through a single GraphHopper slot. GH is local + fast; 6 concurrent
 # calls is safe and actually lets the parallel matcher run in parallel.
 _GH_SEMAPHORE = threading.Semaphore(6)
-
-
-def _cache_flush_worker():
-    global _GEO_CACHE_DIRTY, _ROUTE_CACHE_DIRTY, _MAPS_CACHE_DIRTY
-    while not STOP_EVENT.is_set():
-        time.sleep(30)
-        if _GEO_CACHE_DIRTY:
-            with _GEO_CACHE_LOCK:
-                _save_cache(GEO_CACHE_FILE, GEO_CACHE)
-                _GEO_CACHE_DIRTY = False
-        if _ROUTE_CACHE_DIRTY:
-            with _ROUTE_CACHE_LOCK:
-                _save_cache(ROUTE_CACHE_FILE, ROUTE_CACHE)
-                _ROUTE_CACHE_DIRTY = False
-        if _MAPS_CACHE_DIRTY:
-            with _MAPS_CACHE_LOCK:
-                _save_cache(MAPS_CACHE_FILE, MAPS_CACHE)
-                _MAPS_CACHE_DIRTY = False
-
-
-threading.Thread(target=_cache_flush_worker, daemon=True).start()
 
 
 # =============================================================
@@ -366,36 +340,6 @@ def parse_load_height_from_dims(dims_text: str):
                 pass
     return None
 
-
-# =============================================================
-# CACHE LOAD / SAVE  (FIX #8: schema versioning)
-# =============================================================
-
-def _load_cache(path, expected_version) -> Dict[str, Any]:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("__version__") != expected_version:
-                print(f"[CACHE] {path} is stale (schema mismatch) — clearing.", flush=True)
-                return {"__version__": expected_version}
-            return data
-        except Exception:
-            return {"__version__": expected_version}
-    return {"__version__": expected_version}
-
-
-def _save_cache(path, data):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
-
-
-GEO_CACHE: Dict[str, Any]   = _load_cache(GEO_CACHE_FILE, CACHE_SCHEMA_VERSION)
-ROUTE_CACHE: Dict[str, Any] = _load_cache(ROUTE_CACHE_FILE, CACHE_SCHEMA_VERSION)
-MAPS_CACHE: Dict[str, Any]  = _load_cache(MAPS_CACHE_FILE, CACHE_SCHEMA_VERSION)   # ← NEW
 
 _US_LAT = (15.0, 72.0)
 _US_LON = (-180.0, -65.0)
@@ -584,8 +528,7 @@ def _extract_zip_state(place: str):
 
 def photon_geocode(place: str) -> Optional[List[float]]:
     key = place.strip().upper()
-    with _GEO_CACHE_LOCK:
-        cached = GEO_CACHE.get(key)
+    cached = route_cache_store.geo_get(key)
     if cached:
         return cached
 
@@ -630,10 +573,7 @@ def photon_geocode(place: str) -> Optional[List[float]]:
 
     if result:
         print(f"[GEOCODE] '{place}' -> {result} via {source}", flush=True)
-        global _GEO_CACHE_DIRTY
-        with _GEO_CACHE_LOCK:
-            GEO_CACHE[key] = result
-            _GEO_CACHE_DIRTY = True
+        route_cache_store.geo_set(key, result)
     else:
         print(f"[GEOCODE] FAILED '{place_clean}' (expected_state={expected_state})", flush=True)
 
@@ -1161,13 +1101,11 @@ def verify_route_with_google_maps_cached(origin_latlon, dest_latlon, gh_result: 
     ROUTE_CACHE) — a given truck-zip -> pickup-zip pair repeats across
     many loads, so after warmup this rarely calls the paid API at all.
     """
-    global _MAPS_CACHE_DIRTY
     cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
                  f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
     now = time.time()
 
-    with _MAPS_CACHE_LOCK:
-        cached = MAPS_CACHE.get(cache_key)
+    cached = route_cache_store.maps_get(cache_key)
     if cached and (now - cached.get("ts", 0)) < MAPS_CACHE_TTL_DAYS * 86400:
         result = dict(cached)
         # Recompute the diff against THIS request's GH number in case it
@@ -1185,9 +1123,7 @@ def verify_route_with_google_maps_cached(origin_latlon, dest_latlon, gh_result: 
     if result and result.get("maps_miles") is not None:
         to_store = dict(result)
         to_store["ts"] = now
-        with _MAPS_CACHE_LOCK:
-            MAPS_CACHE[cache_key] = to_store
-            _MAPS_CACHE_DIRTY = True
+        route_cache_store.maps_set(cache_key, to_store)
     return result
 
 
@@ -1225,13 +1161,11 @@ def _parallel_fallback_route(origin_latlon, dest_latlon):
 
 
 def compute_route(origin_latlon, dest_latlon):
-    global _ROUTE_CACHE_DIRTY
     cache_key = (f"{origin_latlon[0]:.3f},{origin_latlon[1]:.3f}"
                  f"|{dest_latlon[0]:.3f},{dest_latlon[1]:.3f}")
     now = time.time()
 
-    with _ROUTE_CACHE_LOCK:
-        cached = ROUTE_CACHE.get(cache_key)
+    cached = route_cache_store.route_get(cache_key)
 
     if cached:
         age_secs      = now - cached.get("ts", 0)
@@ -1246,9 +1180,7 @@ def compute_route(origin_latlon, dest_latlon):
             gh_result = _graphhopper_route(origin_latlon, dest_latlon)
             if gh_result:
                 gh_result.update({"source": "gh", "ts": now})
-                with _ROUTE_CACHE_LOCK:
-                    ROUTE_CACHE[cache_key] = gh_result
-                    _ROUTE_CACHE_DIRTY = True
+                route_cache_store.route_set(cache_key, gh_result)
                 print(f"[ROUTE] {cache_key} source=gh(refresh) miles={gh_result['miles']}", flush=True)
                 return gh_result
 
@@ -1267,9 +1199,7 @@ def compute_route(origin_latlon, dest_latlon):
         result["source"] = source
         result["ts"]     = now
         print(f"[ROUTE] {cache_key} source={source}(fresh) miles={result['miles']}", flush=True)
-        with _ROUTE_CACHE_LOCK:
-            ROUTE_CACHE[cache_key] = result
-            _ROUTE_CACHE_DIRTY = True
+        route_cache_store.route_set(cache_key, result)
     else:
         print(f"[ROUTE] {cache_key} ALL ENGINES FAILED", flush=True)
     return result
@@ -2704,15 +2634,14 @@ def parse_email_for_api(request_data: dict) -> dict:
 
     def _warm(zip_loc):
         key = (zip_loc or "").strip().upper()
-        with _GEO_CACHE_LOCK:
-            if key in GEO_CACHE:
-                return
+        if route_cache_store.geo_get(key) is not None:
+            return
         if zip_loc:
             photon_geocode(zip_loc)
 
     if local_trucks:
         uncached = [t["zip"] for t in local_trucks
-                    if (t["zip"] or "").strip().upper() not in GEO_CACHE]
+                    if route_cache_store.geo_get((t["zip"] or "").strip().upper()) is None]
         if uncached:
             # FIX #7: bounded, non-blocking executor shutdown here too —
             # a `with` block would still block on executor.shutdown(wait=True)
@@ -2775,5 +2704,5 @@ def parse_email_for_api(request_data: dict) -> dict:
 # DEPLOYMENT MARKER — grep for this in journalctl right after
 # restarting the service to confirm the new file is actually live.
 # =============================================================
-print(f"[PARSER_CORE] Fresh rewrite loaded — cache schema v{CACHE_SCHEMA_VERSION} "
+print(f"[PARSER_CORE] Fresh rewrite loaded — cache schema v{route_cache_store.SCHEMA_VERSION} "
       f"— {datetime.now().isoformat()}", flush=True)
