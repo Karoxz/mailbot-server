@@ -68,22 +68,32 @@ def verify_bid_token(token: str):
 _OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
 
-def make_oauth_state(license_key: str) -> str:
-    payload = {"lk": license_key, "purpose": "gmail_oauth",
+def make_oauth_state(license_key: str, code_verifier: str) -> str:
+    # code_verifier rides along in the signed state itself rather than
+    # any server-side session — /oauth/start and /oauth/callback are two
+    # independent HTTP requests (and may land on two different uvicorn
+    # workers), each building its own fresh google_auth_oauthlib Flow
+    # object, so a verifier generated during /start is otherwise lost by
+    # the time /callback runs. Found live 2026-09-25: Google's token
+    # endpoint rejected every real sign-in with "(invalid_grant) Missing
+    # code verifier" because the callback's Flow never had it. Embedding
+    # it here (signed, so it can't be tampered with in transit) keeps
+    # the whole flow stateless while still completing PKCE correctly.
+    payload = {"lk": license_key, "cv": code_verifier, "purpose": "gmail_oauth",
                "exp": int(time.time()) + _OAUTH_STATE_TTL_SECONDS}
     return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
 def verify_oauth_state(token: str):
-    """Returns the license_key, or None (expired/tampered/malformed/
-    wrong purpose). Never raises."""
+    """Returns (license_key, code_verifier), or (None, None) if
+    expired/tampered/malformed/wrong purpose. Never raises."""
     secret = _secret()
     if not secret or not token:
-        return None
+        return None, None
     try:
         claims = jwt.decode(token, secret, algorithms=[_ALGORITHM])
         if claims.get("purpose") != "gmail_oauth":
-            return None
-        return claims["lk"]
+            return None, None
+        return claims["lk"], claims.get("cv")
     except (JWTError, KeyError):
-        return None
+        return None, None

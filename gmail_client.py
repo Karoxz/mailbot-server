@@ -16,6 +16,8 @@
 
 import json
 import os
+import string
+from random import SystemRandom
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
@@ -218,10 +220,38 @@ def oauth_configured() -> bool:
     return _oauth_client_config() is not None
 
 
-def build_oauth_flow(redirect_uri: str) -> Optional[Flow]:
+_PKCE_CHARS = string.ascii_letters + string.digits + "-._~"
+
+
+def generate_code_verifier() -> str:
+    """RFC 7636 PKCE code_verifier — same length/alphabet
+    google_auth_oauthlib's Flow generates internally (see build_oauth_flow's
+    docstring for why this needs to be generated explicitly here rather
+    than left to the library's own autogeneration)."""
+    rnd = SystemRandom()
+    return "".join(rnd.choice(_PKCE_CHARS) for _ in range(128))
+
+
+def build_oauth_flow(redirect_uri: str, code_verifier: Optional[str] = None) -> Optional[Flow]:
+    """code_verifier: pass the SAME value on both ends of the flow —
+    /oauth/start generates one (generate_code_verifier()) and must reuse
+    it when building /oauth/callback's Flow too. These are two
+    independent HTTP requests (no server-side session, may even land on
+    different uvicorn workers), so left to the library's own
+    autogenerate_code_verifier default, each call gets its own random
+    value and the callback's token exchange fails with Google's
+    "(invalid_grant) Missing code verifier" — confirmed live 2026-09-25.
+    Passing the identical verifier explicitly (carried through via the
+    signed oauth `state` param, see map_token.make_oauth_state) fixes
+    this while keeping the whole flow stateless."""
     config = _oauth_client_config()
     if not config:
         return None
+    if code_verifier:
+        return Flow.from_client_config(
+            config, scopes=SCOPES, redirect_uri=redirect_uri,
+            code_verifier=code_verifier, autogenerate_code_verifier=False,
+        )
     return Flow.from_client_config(config, scopes=SCOPES, redirect_uri=redirect_uri)
 
 

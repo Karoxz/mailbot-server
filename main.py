@@ -998,13 +998,14 @@ def web_gmail_oauth_start(license_key: str):
         raise HTTPException(status_code=500, detail="Server misconfigured: WEB_BASE_URL not set.")
 
     redirect_uri = f"{WEB_BASE_URL}/api/web/gmail/oauth/callback"
-    flow = gmail_client.build_oauth_flow(redirect_uri)
+    code_verifier = gmail_client.generate_code_verifier()
+    flow = gmail_client.build_oauth_flow(redirect_uri, code_verifier=code_verifier)
     if not flow:
         raise HTTPException(status_code=500,
                              detail="Google sign-in isn't configured on the server yet — "
                                     "use the paste-token option below instead.")
 
-    state = map_token.make_oauth_state(license_key)
+    state = map_token.make_oauth_state(license_key, code_verifier)
     # access_type=offline + prompt=consent: without both, Google won't
     # reliably hand back a refresh_token on a repeat consent (e.g. a
     # dispatcher reconnecting after a revoke) — the whole point of this
@@ -1032,12 +1033,12 @@ def web_gmail_oauth_callback(code: str = None, state: str = None, error: str = N
     if not code or not state:
         return _fail("Incomplete response from Google.")
 
-    license_key = map_token.verify_oauth_state(state)
+    license_key, code_verifier = map_token.verify_oauth_state(state)
     if not license_key:
         return _fail("This sign-in link expired — try connecting Gmail again.")
 
     redirect_uri = f"{WEB_BASE_URL}/api/web/gmail/oauth/callback"
-    flow = gmail_client.build_oauth_flow(redirect_uri)
+    flow = gmail_client.build_oauth_flow(redirect_uri, code_verifier=code_verifier)
     if not flow:
         return _fail("Google sign-in isn't configured on the server.")
 
