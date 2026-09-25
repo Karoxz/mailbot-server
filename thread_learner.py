@@ -32,6 +32,7 @@ from requests.adapters import HTTPAdapter
 
 import bid_history
 import reply_classifier
+import activity_log
 import llm_client
 
 TIMEOUT_DAYS = 3  # no broker reply after this many days -> inferred loss
@@ -171,6 +172,10 @@ def process_thread(license_key: str, thread_id: str, order_id: Optional[str], me
             print(f"[THREAD-LEARNER] RC thread={thread_id} matched order="
                   f"{matched_candidate} -> upgraded bid ids={upgraded_ids} to won",
                   flush=True)
+            activity_log.log_event(
+                license_key, "bid_won",
+                f"Order #{matched_candidate} confirmed WON (Rate Confirmation received)",
+            )
             return {"processed": True, "wrote_bid": False,
                     "upgraded_bid_ids": upgraded_ids,
                     "order_id": matched_candidate, "outcome": "won",

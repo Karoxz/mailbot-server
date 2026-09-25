@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plutus Bot — Activity</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/plutus_logo.jpg">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Activity</h1>
+    <span class="hint">Live feed of bids, brokers, Gmail, and standalone-mode events · auto-refreshing</span>
+  </div>
+
+  <section class="panel">
+    <div id="activity-list" class="feed-list"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("activity.html");
+
+const EVENT_ICON = {
+  bid_recorded:          "💰",
+  bid_won:               "🏆",
+  broker_blacklisted:    "🚫",
+  broker_unblacklisted:  "✅",
+  backfill_run:          "🔄",
+  gmail_connected:       "📧",
+  gmail_disconnected:    "📪",
+  standalone_enabled:    "▶️",
+  standalone_disabled:   "⏸️",
+  load_matched:          "📦",
+};
+
+function renderActivity(items) {
+  const el = document.getElementById("activity-list");
+  MB.diffRender(el, items, {
+    key: (it) => it.id,
+    isRow: false,
+    emptyHtml: '<p class="empty-note">No activity yet.</p>',
+    html: (it) => `
+      <div class="feed-card">
+        <div class="order">${EVENT_ICON[it.event_type] || "•"} ${MB.esc(it.message)}</div>
+        <div class="meta">${MB.fmtWhen(it.created_at)}</div>
+      </div>`,
+  });
+}
+
+async function refresh() {
+  try {
+    const res = await MB.apiGet("/api/web/activity", { limit: 100 });
+    renderActivity(res.items);
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+document.getElementById("activity-list").innerHTML = MB.skeletonCards(4);
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

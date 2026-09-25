@@ -37,6 +37,7 @@ import bid_actions
 import map_token
 import route_calibration
 import zip_geocode
+import activity_log
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -82,6 +83,7 @@ async def lifespan(app):
     route_calibration.init_db()
     push_queue.init_db()
     route_cache_store.init_db()
+    activity_log.init_db()
     zip_geocode.warmup()
     logger.info("Database initialized")
     yield
@@ -573,6 +575,14 @@ def web_bid_history(license_key: str, limit: int = 50):
     return {"success": True, "items": bid_history.get_recent_bids(license_key, limit=limit)}
 
 
+@app.get("/api/web/activity")
+def web_activity(license_key: str, limit: int = 100):
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "items": activity_log.get_recent_events(license_key, limit=limit)}
+
+
 @app.get("/api/web/stats")
 def web_stats(license_key: str):
     check = validate_license_key_only(license_key)
@@ -654,6 +664,7 @@ def web_blacklist_broker(req: WebBlacklistRequest):
         raise HTTPException(status_code=403, detail=check["reason"])
     fleet_store.blacklist_broker(req.license_key, req.broker_email, req.broker_name, req.note)
     logger.info(f"[WEB] blacklisted broker: {req.broker_email}")
+    activity_log.log_event(req.license_key, "broker_blacklisted", f"Blacklisted broker {req.broker_email}")
     return {"success": True}
 
 
@@ -664,6 +675,7 @@ def web_unblacklist_broker(broker_email: str, license_key: str):
         raise HTTPException(status_code=403, detail=check["reason"])
     fleet_store.unblacklist_broker(license_key, broker_email)
     logger.info(f"[WEB] un-blacklisted broker: {broker_email}")
+    activity_log.log_event(license_key, "broker_unblacklisted", f"Un-blacklisted broker {broker_email}")
     return {"success": True}
 
 
@@ -696,6 +708,8 @@ def web_record_bid(req: WebRecordBidRequest):
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
     logger.info(f"[WEB] recorded bid: order={req.order_id} method={req.method} bid_id={result['bid_id']}")
+    activity_log.log_event(req.license_key, "bid_recorded",
+                            f"Recorded {req.method.upper()} bid on order #{req.order_id}")
     return {"success": True, "bid_id": result["bid_id"], "bid_text": result["bid_text"],
             "thread_id": result["thread_id"]}
 
@@ -783,6 +797,8 @@ def web_bid_price_submit(req: dict):
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
     logger.info(f"[WEB] bid_price submit: order={order_id} price={price} bid_id={result['bid_id']}")
+    activity_log.log_event(license_key, "bid_recorded",
+                            f"Recorded PC bid on order #{order_id} at ${price:g}")
     return {"success": True, "bid_text": result["bid_text"],
             "thread_id": result["thread_id"], "broker_email": result["broker_email"]}
 
@@ -843,6 +859,9 @@ def web_thread_learning_run_backfill(req: WebLoginRequest):
     try:
         result = thread_backfill.run_backfill(req.license_key)
         logger.info(f"[WEB] backfill run for {req.license_key}: {result}")
+        activity_log.log_event(req.license_key, "backfill_run",
+                                f"Thread-learning backfill: {result.get('processed', 0)} processed, "
+                                f"{result.get('skipped', 0)} skipped, {result.get('errors', 0)} errors")
         return {"success": True, **result}
     except GmailAuthError as e:
         raise HTTPException(status_code=400, detail=f"Gmail auth error: {e}")
@@ -933,6 +952,7 @@ def web_gmail_token_upload(req: WebGmailTokenUpload):
 
     gmail_store.save_token(req.license_key, probe["token_json"], probe["email"])
     logger.info(f"[WEB] Gmail token connected for {req.license_key} ({probe['email']})")
+    activity_log.log_event(req.license_key, "gmail_connected", f"Gmail connected ({probe['email']})")
     return {"success": True, "connected_email": probe["email"]}
 
 
@@ -955,6 +975,7 @@ def web_gmail_token_delete(license_key: str):
         raise HTTPException(status_code=403, detail=check["reason"])
     gmail_store.delete_token(license_key)
     logger.info(f"[WEB] Gmail token disconnected for {license_key}")
+    activity_log.log_event(license_key, "gmail_disconnected", "Gmail disconnected")
     return {"success": True}
 
 
@@ -1085,6 +1106,7 @@ def web_standalone_enable(req: WebLoginRequest):
 
     license_db.set_standalone_mode_enabled(req.license_key, True)
     logger.info(f"[WEB] standalone mode ENABLED for {req.license_key}")
+    activity_log.log_event(req.license_key, "standalone_enabled", "Standalone mode enabled")
     return {"success": True, "enabled": True}
 
 
@@ -1095,6 +1117,7 @@ def web_standalone_disable(req: WebLoginRequest):
         raise HTTPException(status_code=403, detail=check["reason"])
     license_db.set_standalone_mode_enabled(req.license_key, False)
     logger.info(f"[WEB] standalone mode disabled for {req.license_key}")
+    activity_log.log_event(req.license_key, "standalone_disabled", "Standalone mode disabled")
     return {"success": True, "enabled": False}
 
 

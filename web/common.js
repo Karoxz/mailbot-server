@@ -298,6 +298,7 @@
     { href: "loads.html",    label: "Loads" },
     { href: "trucks.html",   label: "Trucks" },
     { href: "brokers.html",  label: "Brokers" },
+    { href: "activity.html", label: "Activity" },
     { href: "settings.html", label: "Settings" },
   ];
   function renderTopbar(activeHref) {

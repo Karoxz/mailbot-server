@@ -59,6 +59,7 @@ import gmail_client
 import bid_actions
 import map_token
 import route_cache_store
+import activity_log
 from gmail_client import GmailAuthError
 from parser_core import parse_email_for_api, FREIGHT_MARKERS, extract_text_from_full_message
 
@@ -391,6 +392,8 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
                            order_id=order_id, route_url=route_url,
                            gmail_url=gmail_url, bid_price_url=bid_price_url)
         logger.info(f"[{license_key}] matched load #{result.get('order_id')}")
+        activity_log.log_event(license_key, "load_matched",
+                                f"Standalone poller matched load #{result.get('order_id')}")
         return True
     return False
 
@@ -444,6 +447,7 @@ def main():
     bid_history.init_db()
     bid_history.init_processed_threads_table()
     route_cache_store.init_db()
+    activity_log.init_db()
 
     while True:
         processed = 0
