@@ -158,6 +158,36 @@ async def hb(req: HeartbeatRequest):
     return {"valid": True}
 
 
+# ── Desktop/standalone mutual exclusion, 2026-09-25 ─────────────────────
+# See license_db.py's desktop_poll_heartbeat column comment for the full
+# background: two licenses (or one license run in both modes) sharing a
+# Gmail account race on Gmail's own read/unread state. This pair of
+# endpoints is how each side finds out the other is currently active —
+# same machine-bound validate_license() pattern as /api/heartbeat and
+# /api/telegram/status, not the license-key-only web endpoints.
+@app.post("/api/desktop/poll_heartbeat")
+async def desktop_poll_heartbeat(req: HeartbeatRequest):
+    """Sent every ~20s by a running desktop's Gmail-poll loop — ONLY
+    while it's actually polling (after START), not merely while the app
+    is open (that's the existing /api/heartbeat, a different signal)."""
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    license_db.record_desktop_poll_heartbeat(req.license_key)
+    return {"success": True}
+
+
+@app.post("/api/standalone/active_status")
+async def standalone_active_status(req: HeartbeatRequest):
+    """Polled every ~30s by a running desktop so it can pause its own
+    processing while standalone mode is on for its license — the
+    reverse direction of the check above."""
+    check = validate_license(req.license_key, req.machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"active": license_db.get_standalone_mode_enabled(req.license_key)}
+
+
 @app.post("/api/parse", response_model=ParseResponse)
 def parse(req: ParseRequest):
     check = validate_license(req.license_key, req.machine_id)

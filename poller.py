@@ -408,6 +408,15 @@ def run_one_license_cycle(license_key: str):
         logger.info(f"[{license_key}] skipped: no allowed vehicles configured")
         return
 
+    # Desktop/standalone mutual exclusion, 2026-09-25 — skip this
+    # license's ENTIRE cycle (not even a Gmail fetch) if a desktop is
+    # presently polling the same account, so the two never race on
+    # Gmail's own read/unread state. See license_db.py's
+    # desktop_poll_heartbeat column comment for the full background.
+    if license_db.is_desktop_recently_active(license_key):
+        logger.info(f"[{license_key}] skipped: desktop app is actively polling this license")
+        return
+
     try:
         service = gmail_client.build_service(license_key)
     except GmailAuthError as e:

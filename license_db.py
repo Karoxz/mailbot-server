@@ -66,6 +66,20 @@ def init_db():
         conn.execute("ALTER TABLE licenses ADD COLUMN label TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Desktop/standalone mutual exclusion, 2026-09-25 — a real conflict
+    # surfaced live: two licenses sharing one Gmail account raced on
+    # Gmail's own read/unread state (whichever side polled first marked
+    # everything read, starving the other). User's explicit design for
+    # the real case this needs to solve (ONE license switching between
+    # desktop and standalone against the SAME Gmail account): automatic
+    # mutual exclusion, not just a warning. This column is the desktop's
+    # side of that — updated every ~20s by a running desktop's poll loop
+    # (see /api/desktop/poll_heartbeat), read by poller.py to skip a
+    # license's standalone cycle while the desktop is presumed active.
+    try:
+        conn.execute("ALTER TABLE licenses ADD COLUMN desktop_poll_heartbeat TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -235,6 +249,46 @@ def set_standalone_mode_enabled(key: str, enabled: bool) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def record_desktop_poll_heartbeat(key: str) -> bool:
+    """Called every ~20s by a running desktop's Gmail-poll loop (only
+    while it's actually polling, not just while the app is open) — see
+    /api/desktop/poll_heartbeat. Doesn't require the license to exist
+    (mirrors heartbeat()'s own tolerance) since a failed write here
+    should never crash the desktop's poll loop over it."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE licenses SET desktop_poll_heartbeat=? WHERE key=?',
+        (datetime.now(timezone.utc).isoformat(), key)
+    )
+    updated = conn.total_changes > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def is_desktop_recently_active(key: str, within_seconds: int = 60) -> bool:
+    """True if a desktop's poll loop sent a heartbeat within the last
+    `within_seconds` — poller.py checks this before running a license's
+    standalone cycle, so the two never process the same Gmail account
+    at the same time (see the desktop/standalone mutual-exclusion note
+    on desktop_poll_heartbeat's own ALTER TABLE, above)."""
+    row = _get_row(key)
+    if not row:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        'SELECT desktop_poll_heartbeat FROM licenses WHERE key=?', (key,)
+    ).fetchone()
+    conn.close()
+    if not val or not val[0]:
+        return False
+    try:
+        last = datetime.fromisoformat(val[0])
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - last).total_seconds() < within_seconds
 
 
 def list_standalone_enabled_licenses() -> list:
