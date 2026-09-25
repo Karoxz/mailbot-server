@@ -1047,7 +1047,10 @@ def web_standalone_settings_set(req: WebStandaloneSettings):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     fields = req.dict(exclude={"license_key"}, exclude_none=True)
-    license_db.set_standalone_settings(req.license_key, **fields)
+    try:
+        license_db.set_standalone_settings(req.license_key, **fields)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     logger.info(f"[WEB] standalone settings updated for {req.license_key}: {list(fields.keys())}")
     return {"success": True}
 
@@ -1072,6 +1075,13 @@ def web_standalone_enable(req: WebLoginRequest):
     if not (settings and settings["allowed_vehicles"].strip()):
         raise HTTPException(status_code=400,
                              detail="No allowed vehicles configured — set at least one first.")
+    if license_db.is_known_desktop_token(settings.get("bot_token", "")):
+        raise HTTPException(
+            status_code=400,
+            detail="Standalone mode's bot token is the desktop app's own token — "
+                   "set a separate bot token first (Settings), or replies will be "
+                   "unpredictably split between the desktop and standalone mode.",
+        )
 
     license_db.set_standalone_mode_enabled(req.license_key, True)
     logger.info(f"[WEB] standalone mode ENABLED for {req.license_key}")

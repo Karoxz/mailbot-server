@@ -158,9 +158,36 @@ def get_standalone_settings(key: str) -> Optional[dict]:
     }
 
 
+# Known bot tokens hardcoded into the DESKTOP app (client/main copy.py's
+# BOT_TOKEN constant) — reused here purely to reject a dispatcher pasting
+# that SAME token into standalone mode's config. If both then ran
+# concurrently, Telegram getUpdates calls would race and button-press
+# replies would land on whichever process happened to poll first
+# (documented, unresolved bug, MAILBOT_ROADMAP.md's "Known conflict").
+# The desktop and standalone poller are meant to be alternate modes for
+# the SAME account/chat — this only blocks the literal token collision,
+# it doesn't (and shouldn't) force them onto permanently different bots.
+# Update this set whenever the desktop's BOT_TOKEN is next rotated.
+KNOWN_DESKTOP_BOT_TOKENS = {
+    "8157082619:AAETFqdzP_VOXPEoWmKi3Uq48CQuHNU_Z08",
+}
+
+
+def is_known_desktop_token(token: str) -> bool:
+    return bool(token) and token.strip() in KNOWN_DESKTOP_BOT_TOKENS
+
+
 def set_standalone_settings(key: str, **fields) -> bool:
     """Partial update — only columns present in `fields` are touched.
-    Valid keys: allowed_vehicles, max_radius_miles, chat_ids, bot_token."""
+    Valid keys: allowed_vehicles, max_radius_miles, chat_ids, bot_token.
+    Raises ValueError if `bot_token` is the desktop app's own known
+    token (see KNOWN_DESKTOP_BOT_TOKENS above)."""
+    if 'bot_token' in fields and is_known_desktop_token(fields['bot_token']):
+        raise ValueError(
+            "This is the desktop app's own bot token — standalone mode "
+            "needs its own separate bot. Create a new bot via @BotFather "
+            "and use that token here instead."
+        )
     row = _get_row(key)
     if not row:
         return False
