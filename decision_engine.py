@@ -33,12 +33,12 @@ _RANK_TO_DECISION = {v: k for k, v in _SEVERITY.items()}
 _MIN_RESOLVED_FOR_WIN_RATE = 5
 
 
-def _score_broker(broker_email: str) -> tuple:
+def _score_broker(license_key: str, broker_email: str) -> tuple:
     """Returns (score_delta, reasons, broker_known)."""
     if not broker_email:
         return -1, ["No broker email on this load — can't check track record"], False
 
-    stats = bid_history.broker_summary(broker_email)
+    stats = bid_history.broker_summary(license_key, broker_email)
     if not stats or stats["total_bids"] == 0:
         return -1, ["No history with this broker yet — proceed cautiously"], False
 
@@ -107,7 +107,8 @@ def _score_freight_fit(freight_fit: Optional[Dict[str, Any]]) -> tuple:
     return 0, []
 
 
-def get_load_decision(broker_email: str = "",
+def get_load_decision(license_key: str,
+                       broker_email: str = "",
                        deadhead_miles: Optional[float] = None,
                        max_radius_miles: Optional[float] = None,
                        maps_verification: Optional[Dict[str, Any]] = None,
@@ -134,7 +135,7 @@ def get_load_decision(broker_email: str = "",
     # A dispatcher-blacklisted broker is an absolute business rule, not
     # a signal to weigh against others — short-circuits everything else
     # below with maximum confidence, before any scoring happens.
-    if broker_email and fleet_store.is_broker_blacklisted(broker_email):
+    if broker_email and fleet_store.is_broker_blacklisted(license_key, broker_email):
         return {
             "decision":     "Reject",
             "confidence":   0.95,
@@ -146,7 +147,7 @@ def get_load_decision(broker_email: str = "",
     score = 0
     reasons: List[str] = []
 
-    broker_delta, broker_reasons, broker_known = _score_broker(broker_email)
+    broker_delta, broker_reasons, broker_known = _score_broker(license_key, broker_email)
     score += broker_delta
     reasons += broker_reasons
 

@@ -72,7 +72,7 @@ def run_backfill(license_key: str, days_back: int = 45) -> dict:
                     "label_ids":  [label_map.get(lid, lid) for lid in msg.get("labelIds", [])],
                 })
             result = thread_learner.process_thread(
-                thread_id=tid, order_id=None, messages=messages_out
+                license_key=license_key, thread_id=tid, order_id=None, messages=messages_out
             )
             if result.get("processed"):
                 processed += 1

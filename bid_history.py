@@ -29,6 +29,8 @@ import math
 from typing import Optional
 from datetime import datetime, timezone
 
+from migration_defaults import LEGACY_DATA_LICENSE_KEY
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "bid_history.db")
 
@@ -89,6 +91,20 @@ def init_db():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_bids_status   ON bids(status)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_bids_broker   ON bids(broker_email)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_bids_lane     ON bids(lane)')
+
+        # Per-license isolation, 2026-09-25 — every license/account used
+        # to share this ONE global bids table (confirmed: zero
+        # license_key references anywhere before this). Plain ADD
+        # COLUMN + backfill is enough here — `id` is already the
+        # primary key. See migration_defaults.py.
+        try:
+            conn.execute('ALTER TABLE bids ADD COLUMN license_key TEXT')
+        except sqlite3.OperationalError:
+            pass
+        conn.execute('UPDATE bids SET license_key=? WHERE license_key IS NULL',
+                     (LEGACY_DATA_LICENSE_KEY,))
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_bids_license  ON bids(license_key)')
+
         conn.commit()
     finally:
         conn.close()
@@ -99,6 +115,14 @@ def init_processed_threads_table():
     add this call right next to it). Tracks which Gmail threads thread_learner
     has already walked, and how many messages were in them last time, so a
     recurring sweep only re-processes threads that actually got new replies.
+
+    Per-license isolation, 2026-09-25 — primary key becomes
+    (license_key, thread_id): a bare thread_id isn't provably unique
+    across two different Gmail accounts/licenses, so this recreates the
+    table (same create/copy/drop/rename approach fleet_store.py's
+    broker_blacklist migration uses) rather than just adding a filter
+    column. Production had 1320 real rows at migration time — all
+    backfilled to the one real account already using this table.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS processed_threads (
@@ -106,28 +130,47 @@ def init_processed_threads_table():
         message_count  INTEGER,
         last_checked_at TEXT
     )''')
+    cols = {row[1] for row in conn.execute('PRAGMA table_info(processed_threads)')}
+    if "license_key" not in cols:
+        conn.execute('''CREATE TABLE processed_threads_new (
+            license_key     TEXT NOT NULL,
+            thread_id       TEXT NOT NULL,
+            message_count   INTEGER,
+            last_checked_at TEXT,
+            PRIMARY KEY (license_key, thread_id)
+        )''')
+        conn.execute(
+            '''INSERT INTO processed_threads_new
+                   (license_key, thread_id, message_count, last_checked_at)
+               SELECT ?, thread_id, message_count, last_checked_at
+               FROM processed_threads''',
+            (LEGACY_DATA_LICENSE_KEY,)
+        )
+        conn.execute('DROP TABLE processed_threads')
+        conn.execute('ALTER TABLE processed_threads_new RENAME TO processed_threads')
     conn.commit()
     conn.close()
 
 
-def get_processed_thread_count(thread_id: str):
+def get_processed_thread_count(license_key: str, thread_id: str):
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        'SELECT message_count FROM processed_threads WHERE thread_id=?', (thread_id,)
+        'SELECT message_count FROM processed_threads WHERE license_key=? AND thread_id=?',
+        (license_key, thread_id)
     ).fetchone()
     conn.close()
     return row[0] if row else None
 
 
-def mark_thread_processed(thread_id: str, message_count: int):
+def mark_thread_processed(license_key: str, thread_id: str, message_count: int):
     now = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        'INSERT INTO processed_threads (thread_id, message_count, last_checked_at) '
-        'VALUES (?,?,?) '
-        'ON CONFLICT(thread_id) DO UPDATE SET message_count=excluded.message_count, '
+        'INSERT INTO processed_threads (license_key, thread_id, message_count, last_checked_at) '
+        'VALUES (?,?,?,?) '
+        'ON CONFLICT(license_key, thread_id) DO UPDATE SET message_count=excluded.message_count, '
         'last_checked_at=excluded.last_checked_at',
-        (thread_id, message_count, now)
+        (license_key, thread_id, message_count, now)
     )
     conn.commit()
     conn.close()
@@ -164,7 +207,8 @@ def _derive_state(loc: str) -> str:
     return ""
 
 
-def record_bid(order_id: str,
+def record_bid(license_key: str,
+                order_id: str,
                 thread_id: Optional[str] = None,
                 bid_method: str = "",
                 vehicle_type: str = "",
@@ -228,14 +272,16 @@ def record_bid(order_id: str,
     try:
         cur = conn.execute(
             '''INSERT INTO bids (
+                license_key,
                 order_id, thread_id, bid_method, vehicle_type, driver_name,
                 pickup_loc, delivery_loc, pickup_state, delivery_state, lane,
                 broker_name, broker_email,
                 deadhead_miles, loaded_miles, total_miles, verified_miles, verified_source,
                 bid_amount, rate_per_mile,
                 status, created_at, updated_at
-            ) VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?, ?,?,?,?,?, ?,?, 'pending', ?, ?)''',
-            (order_id, thread_id, bid_method, vehicle_type, driver_name,
+            ) VALUES (?, ?,?,?,?,?, ?,?,?,?,?, ?,?, ?,?,?,?,?, ?,?, 'pending', ?, ?)''',
+            (license_key,
+             order_id, thread_id, bid_method, vehicle_type, driver_name,
              pickup_loc, delivery_loc, pickup_state, delivery_state, lane,
              broker_name, broker_email,
              deadhead_miles, loaded_miles, total_miles, verified_miles, verified_source,
@@ -251,26 +297,28 @@ def record_bid(order_id: str,
         conn.close()
 
 
-def update_bid_amount(bid_id: int, bid_amount: float) -> bool:
+def update_bid_amount(license_key: str, bid_id: int, bid_amount: float) -> bool:
     """Attach a rate to an existing bid row once it's known (e.g. a
     later UI step where the dispatcher confirms what they actually
     quoted, or the automatic thread-learning backfill). Recomputes
     rate_per_mile from the real trip mileage — see record_bid()'s
     miles_for_rate docstring for why verified_miles/deadhead_miles are
-    deliberately excluded here."""
+    deliberately excluded here. Scoped to license_key so a bid_id
+    belonging to a different account can't be modified even if
+    guessed/reused."""
     conn = _connect()
     try:
         row = conn.execute(
-            'SELECT total_miles, loaded_miles FROM bids WHERE id=?',
-            (bid_id,)
+            'SELECT total_miles, loaded_miles FROM bids WHERE id=? AND license_key=?',
+            (bid_id, license_key)
         ).fetchone()
         if not row:
             return False
         miles_for_rate = row[0] or row[1]
         rate_per_mile = round(bid_amount / miles_for_rate, 2) if miles_for_rate else None
         conn.execute(
-            'UPDATE bids SET bid_amount=?, rate_per_mile=?, updated_at=? WHERE id=?',
-            (bid_amount, rate_per_mile, _now(), bid_id)
+            'UPDATE bids SET bid_amount=?, rate_per_mile=?, updated_at=? WHERE id=? AND license_key=?',
+            (bid_amount, rate_per_mile, _now(), bid_id, license_key)
         )
         conn.commit()
         return True
@@ -278,7 +326,7 @@ def update_bid_amount(bid_id: int, bid_amount: float) -> bool:
         conn.close()
 
 
-def update_bid_outcome(bid_id: int, status: str,
+def update_bid_outcome(license_key: str, bid_id: int, status: str,
                         outcome_source: str = "", outcome_note: str = "") -> bool:
     """
     Mark a bid's outcome. status must be one of _VALID_STATUSES.
@@ -293,8 +341,8 @@ def update_bid_outcome(bid_id: int, status: str,
     try:
         conn.execute(
             '''UPDATE bids SET status=?, outcome_source=?, outcome_note=?,
-               updated_at=?, outcome_at=? WHERE id=?''',
-            (status, outcome_source, outcome_note, now, now, bid_id)
+               updated_at=?, outcome_at=? WHERE id=? AND license_key=?''',
+            (status, outcome_source, outcome_note, now, now, bid_id, license_key)
         )
         updated = conn.total_changes > 0
         conn.commit()
@@ -303,7 +351,7 @@ def update_bid_outcome(bid_id: int, status: str,
         conn.close()
 
 
-def get_pending_bids_for_thread(thread_id: str) -> list:
+def get_pending_bids_for_thread(license_key: str, thread_id: str) -> list:
     """
     Used by the broker-reply watcher: given a Gmail thread_id that
     just got a new message, find any bids on that thread still
@@ -312,37 +360,38 @@ def get_pending_bids_for_thread(thread_id: str) -> list:
     conn = _connect()
     try:
         cur = conn.execute(
-            '''SELECT * FROM bids WHERE thread_id=? AND status='pending'
+            '''SELECT * FROM bids WHERE license_key=? AND thread_id=? AND status='pending'
                ORDER BY created_at DESC''',
-            (thread_id,)
+            (license_key, thread_id)
         )
         return [_row_to_dict(cur, r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def get_recent_bids(limit: int = 50) -> list:
-    """Most recent bids across all orders — for the web dashboard's
-    bid-history table. Newest first."""
+def get_recent_bids(license_key: str, limit: int = 50) -> list:
+    """Most recent bids across all orders for this account — for the
+    web dashboard's bid-history table. Newest first."""
     conn = _connect()
     try:
         cur = conn.execute(
-            'SELECT * FROM bids ORDER BY created_at DESC LIMIT ?',
-            (limit,)
+            'SELECT * FROM bids WHERE license_key=? ORDER BY created_at DESC LIMIT ?',
+            (license_key, limit)
         )
         return [_row_to_dict(cur, r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def overall_summary() -> dict:
-    """Aggregate win-rate + volume across ALL bids — the web
-    dashboard's top-line stats cards. Mirrors broker_summary()'s shape
-    but with no WHERE clause; pending bids excluded from the win-rate
-    denominator since they haven't resolved yet, same as broker_summary."""
+def overall_summary(license_key: str) -> dict:
+    """Aggregate win-rate + volume across all of THIS account's bids —
+    the web dashboard's top-line stats cards. Mirrors broker_summary()'s
+    shape; pending bids excluded from the win-rate denominator since
+    they haven't resolved yet, same as broker_summary."""
     conn = _connect()
     try:
-        cur = conn.execute('SELECT status, COUNT(*) FROM bids GROUP BY status')
+        cur = conn.execute('SELECT status, COUNT(*) FROM bids WHERE license_key=? GROUP BY status',
+                            (license_key,))
         counts = {status: n for status, n in cur.fetchall()}
     finally:
         conn.close()
@@ -356,7 +405,8 @@ def overall_summary() -> dict:
     conn = _connect()
     try:
         row = conn.execute(
-            'SELECT AVG(rate_per_mile), COUNT(*) FROM bids WHERE rate_per_mile IS NOT NULL'
+            'SELECT AVG(rate_per_mile), COUNT(*) FROM bids WHERE license_key=? AND rate_per_mile IS NOT NULL',
+            (license_key,)
         ).fetchone()
         avg_rate, rate_n = row
     finally:
@@ -373,12 +423,12 @@ def overall_summary() -> dict:
     }
 
 
-def get_bids_for_order(order_id: str) -> list:
+def get_bids_for_order(license_key: str, order_id: str) -> list:
     conn = _connect()
     try:
         cur = conn.execute(
-            'SELECT * FROM bids WHERE order_id=? ORDER BY created_at DESC',
-            (order_id,)
+            'SELECT * FROM bids WHERE license_key=? AND order_id=? ORDER BY created_at DESC',
+            (license_key, order_id)
         )
         return [_row_to_dict(cur, r) for r in cur.fetchall()]
     finally:
@@ -391,6 +441,12 @@ def expire_stale_pending(older_than_days: int = 3) -> int:
     means the broker never replied (or the reply-watcher missed it) —
     not that it's still live. Call this periodically so 'pending'
     stays a meaningful signal rather than an ever-growing junk drawer.
+
+    Deliberately NOT license_key-scoped, unlike everything else in this
+    module — this only flips a status/timestamp based on age, it never
+    returns or exposes any bid's content to a caller, so there's no
+    cross-account data to leak. Meant to run as one global sweep across
+    every account's stale bids, not per-license.
     """
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400
     conn = _connect()
@@ -422,13 +478,13 @@ def expire_stale_pending(older_than_days: int = 3) -> int:
 # kept intentionally simple: plain aggregate queries, no ML yet)
 # =============================================================
 
-def _avg_rate_query(where_clause: str, params: tuple):
+def _avg_rate_query(license_key: str, where_clause: str, params: tuple):
     conn = _connect()
     try:
         row = conn.execute(
             f'''SELECT AVG(rate_per_mile), COUNT(*)
-                FROM bids WHERE rate_per_mile IS NOT NULL {where_clause}''',
-            params
+                FROM bids WHERE license_key=? AND rate_per_mile IS NOT NULL {where_clause}''',
+            (license_key,) + params
         ).fetchone()
         avg, n = row
         return {"avg_rate_per_mile": round(avg, 3) if avg else None, "sample_size": n}
@@ -436,27 +492,28 @@ def _avg_rate_query(where_clause: str, params: tuple):
         conn.close()
 
 
-def avg_rate_per_mile_by_broker(broker_email: str) -> dict:
-    return _avg_rate_query("AND broker_email=?", (broker_email,))
+def avg_rate_per_mile_by_broker(license_key: str, broker_email: str) -> dict:
+    return _avg_rate_query(license_key, "AND broker_email=?", (broker_email,))
 
 
-def avg_rate_per_mile_by_lane(lane: str) -> dict:
-    return _avg_rate_query("AND lane=?", (lane,))
+def avg_rate_per_mile_by_lane(license_key: str, lane: str) -> dict:
+    return _avg_rate_query(license_key, "AND lane=?", (lane,))
 
 
-def avg_rate_per_mile_by_vehicle(vehicle_type: str) -> dict:
-    return _avg_rate_query("AND vehicle_type=?", (vehicle_type,))
+def avg_rate_per_mile_by_vehicle(license_key: str, vehicle_type: str) -> dict:
+    return _avg_rate_query(license_key, "AND vehicle_type=?", (vehicle_type,))
 
 
-def broker_summary(broker_email: str) -> dict:
-    """Win rate + volume for one broker — pending bids excluded from
-    the win-rate denominator since they haven't resolved yet."""
+def broker_summary(license_key: str, broker_email: str) -> dict:
+    """Win rate + volume for one broker, within this account's own bid
+    history — pending bids excluded from the win-rate denominator since
+    they haven't resolved yet."""
     conn = _connect()
     try:
         cur = conn.execute(
-            '''SELECT status, COUNT(*) FROM bids WHERE broker_email=?
+            '''SELECT status, COUNT(*) FROM bids WHERE license_key=? AND broker_email=?
                GROUP BY status''',
-            (broker_email,)
+            (license_key, broker_email)
         )
         counts = {status: n for status, n in cur.fetchall()}
     finally:
@@ -468,7 +525,7 @@ def broker_summary(broker_email: str) -> dict:
     resolved = won + lost + counts.get("countered", 0)
     win_rate = round(won / resolved, 3) if resolved else None
 
-    rate_info = avg_rate_per_mile_by_broker(broker_email)
+    rate_info = avg_rate_per_mile_by_broker(license_key, broker_email)
     return {
         "broker_email":  broker_email,
         "total_bids":    sum(counts.values()),
@@ -480,20 +537,21 @@ def broker_summary(broker_email: str) -> dict:
     }
 
 
-def list_all_brokers() -> list:
-    """Every distinct broker_email that's ever appeared on a bid, with
-    the same summary shape as broker_summary() — for the web
-    dashboard's Brokers page. Skips blank broker_email (a lot of
-    gmail_backfill rows never captured one)."""
+def list_all_brokers(license_key: str) -> list:
+    """Every distinct broker_email that's ever appeared on one of THIS
+    account's bids, with the same summary shape as broker_summary() —
+    for the web dashboard's Brokers page. Skips blank broker_email (a
+    lot of gmail_backfill rows never captured one)."""
     conn = _connect()
     try:
         emails = [r[0] for r in conn.execute(
             "SELECT DISTINCT broker_email FROM bids "
-            "WHERE broker_email IS NOT NULL AND broker_email != ''"
+            "WHERE license_key=? AND broker_email IS NOT NULL AND broker_email != ''",
+            (license_key,)
         ).fetchall()]
     finally:
         conn.close()
-    return [broker_summary(email) for email in emails]
+    return [broker_summary(license_key, email) for email in emails]
 
 
 # =============================================================
@@ -597,7 +655,7 @@ def _mileage_bracket_clause(miles: float):
         return "AND total_miles IS NOT NULL AND total_miles >= 500", ()
 
 
-def get_bid_recommendation(broker_email: str = "", lane: str = "",
+def get_bid_recommendation(license_key: str, broker_email: str = "", lane: str = "",
                             vehicle_type: str = "",
                             miles: Optional[float] = None) -> Optional[dict]:
     """
@@ -640,7 +698,7 @@ def get_bid_recommendation(broker_email: str = "", lane: str = "",
         candidates.append(("broker", "AND broker_email=?", (broker_email,), MIN_SAMPLE_SIZE))
 
     for basis, where, params, min_samples in candidates:
-        result = _avg_rate_query(where, params)
+        result = _avg_rate_query(license_key, where, params)
         if result["avg_rate_per_mile"] and result["sample_size"] >= min_samples:
             rate = result["avg_rate_per_mile"]
             return {

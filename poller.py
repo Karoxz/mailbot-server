@@ -194,14 +194,14 @@ def _gmail_url(order_id, broker_email, thread_id=None):
     return f"https://mail.google.com/mail/u/0/#search/{quote(q)}"
 
 
-def _record_bid_and_build_text(order_id: str, method: str,
+def _record_bid_and_build_text(license_key: str, order_id: str, method: str,
                                 price: float = None, rate_per_mile: float = None):
     """Thin wrapper around the shared bid_actions helper (also used by
     main.py's /api/web/record_bid and the BID PC price+map page) — adds
     the gmail_url this caller specifically needs, built from poller.py's
     own _gmail_url (uses the real thread_id poller.py's Gmail access
     provides, unlike desktop-sourced loads)."""
-    result = bid_actions.record_bid_and_build_text(order_id, method, price, rate_per_mile)
+    result = bid_actions.record_bid_and_build_text(license_key, order_id, method, price, rate_per_mile)
     if not result:
         return None
     result["gmail_url"] = _gmail_url(order_id, result["broker_email"], result["thread_id"])
@@ -219,7 +219,7 @@ def _answer_callback_query(bot_token: str, callback_query_id: str, text: str = N
         pass  # non-fatal — worst case the button spinner times out client-side
 
 
-def _handle_callback_query(bot_token: str, cq: dict):
+def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
     callback_id = cq.get("id")
     chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
     data = cq.get("data", "")
@@ -230,7 +230,7 @@ def _handle_callback_query(bot_token: str, cq: dict):
         return
 
     method, label = _TG_METHOD_MAP[action]
-    result = _record_bid_and_build_text(order_id, method)
+    result = _record_bid_and_build_text(license_key, order_id, method)
     if not result:
         _answer_callback_query(bot_token, callback_id,
                                text="Order not found in the current live feed.")
@@ -257,12 +257,19 @@ def _handle_callback_query(bot_token: str, cq: dict):
         logger.warning(f"Telegram bid-text reply failed: {e}")
 
 
-def _telegram_callback_loop(bot_token: str):
+def _telegram_callback_loop(bot_token: str, license_key: str):
     """One thread per distinct bot token, long-polling getUpdates —
     same idea as the desktop's get_telegram_updates(), just handling
     button presses instead of also handling REPLY/clipboard actions.
     Runs independently of the main 20s poll loop since a button press
-    should feel close to instant, not wait for the next cycle."""
+    should feel close to instant, not wait for the next cycle.
+
+    license_key (2026-09-25): a bot_token is assumed one-per-license in
+    practice (each account's own private bot) — captured once here at
+    thread-start time, from the same lookup _ensure_callback_listeners
+    already does, rather than trying to reverse-lookup "which license
+    owns this token" later from inside a getUpdates response that has
+    no account context of its own."""
     offset = None
     logger.info(f"Telegram callback listener starting (bot ...{bot_token[-6:]})")
     while True:
@@ -277,7 +284,7 @@ def _telegram_callback_loop(bot_token: str):
                 cq = update.get("callback_query")
                 if cq:
                     try:
-                        _handle_callback_query(bot_token, cq)
+                        _handle_callback_query(bot_token, cq, license_key)
                     except Exception:
                         logger.error(f"callback handling error:\n{traceback.format_exc()}")
         except Exception as e:
@@ -293,7 +300,7 @@ def _ensure_callback_listeners():
         settings = license_db.get_standalone_settings(lic)
         token = settings and settings.get("bot_token")
         if token and token not in _callback_threads:
-            t = threading.Thread(target=_telegram_callback_loop, args=(token,),
+            t = threading.Thread(target=_telegram_callback_loop, args=(token, lic),
                                  daemon=True, name=f"tg-callback-{token[-6:]}")
             t.start()
             _callback_threads[token] = t
@@ -352,12 +359,13 @@ def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
     internal_date = int(full.get("internalDate", "0"))
 
     result = parse_email_for_api({
+        "license_key":      license_key,
         "email_body":       body,
         "internal_date_ms": internal_date,
         "allowed_vehicles":  allowed_vehicles,
         "max_radius_miles":  radius_miles,
-        "trucks":            fleet_store.list_trucks(),
-        "bid_template":      None,  # falls back to load_store's server default
+        "trucks":            fleet_store.list_trucks(license_key),
+        "bid_template":      None,  # falls back to load_store's per-license default
         "thread_id":         thread_id,   # real Gmail thread — this is what
         "message_id":        msg_id,      # lets "Find in Gmail"/BID PC land
                                            # on the exact thread, not a search

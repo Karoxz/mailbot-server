@@ -97,7 +97,7 @@ def _extract_order_candidates(text: str) -> set:
     return set(re.findall(r"\b\d{4,}\b", text or ""))
 
 
-def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> dict:
+def process_thread(license_key: str, thread_id: str, order_id: Optional[str], messages: list) -> dict:
     """
     messages: list of dicts, oldest first, each:
         {message_id, date_ms, is_from_me, subject, body}
@@ -108,7 +108,7 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
     if not messages:
         return {"processed": False, "reason": "no messages"}
 
-    prev_count = bid_history.get_processed_thread_count(thread_id)
+    prev_count = bid_history.get_processed_thread_count(license_key, thread_id)
     if prev_count is not None and prev_count == len(messages):
         return {"processed": False, "reason": "no new messages since last check"}
 
@@ -152,7 +152,7 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
             # doesn't leave sibling rows for the same order stuck as
             # stale "lost" data that would otherwise poison win-rate
             # analytics for that broker/lane.
-            unresolved = [b for b in bid_history.get_bids_for_order(cand)
+            unresolved = [b for b in bid_history.get_bids_for_order(license_key, cand)
                           if b["status"] != "won"]
             if unresolved:
                 matched_bids, matched_candidate = unresolved, cand
@@ -162,12 +162,12 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
             upgraded_ids = []
             for b in matched_bids:
                 bid_history.update_bid_outcome(
-                    b["id"], "won", outcome_source="rc_label",
+                    license_key, b["id"], "won", outcome_source="rc_label",
                     outcome_note=f"Correlated via RC-labeled thread {thread_id} "
                                  f"(order match: {matched_candidate})",
                 )
                 upgraded_ids.append(b["id"])
-            bid_history.mark_thread_processed(thread_id, len(messages))
+            bid_history.mark_thread_processed(license_key, thread_id, len(messages))
             print(f"[THREAD-LEARNER] RC thread={thread_id} matched order="
                   f"{matched_candidate} -> upgraded bid ids={upgraded_ids} to won",
                   flush=True)
@@ -203,7 +203,7 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
 
     if not my_rates:
         # Nothing to learn from — you never quoted a number in this thread.
-        bid_history.mark_thread_processed(thread_id, len(messages))
+        bid_history.mark_thread_processed(license_key, thread_id, len(messages))
         return {"processed": True, "wrote_bid": False, "reason": "no rate found in your messages"}
 
     final_rate = my_rates[-1]["rate"]   # last number YOU quoted — the
@@ -250,10 +250,10 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
     # rate belongs on. Only fall back to inserting a fresh row (the
     # original behavior) when nothing pending is on file for this
     # thread — a genuinely historical thread the live app never saw.
-    pending = bid_history.get_pending_bids_for_thread(thread_id)
+    pending = bid_history.get_pending_bids_for_thread(license_key, thread_id)
     if pending:
         bid_id = pending[0]["id"]
-        bid_history.update_bid_amount(bid_id, final_rate)
+        bid_history.update_bid_amount(license_key, bid_id, final_rate)
     else:
         # occurred_at = the real date of the message the final rate was
         # quoted in, NOT "now" — without this every backfilled row's
@@ -265,6 +265,7 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
             my_rates[-1]["date_ms"] / 1000, tz=timezone.utc
         ).isoformat()
         bid_id = bid_history.record_bid(
+            license_key=license_key,
             order_id=order_id, thread_id=thread_id, bid_method="gmail_backfill",
             vehicle_type="", driver_name="", pickup_loc="", delivery_loc="",
             broker_name="", broker_email="",
@@ -276,12 +277,12 @@ def process_thread(thread_id: str, order_id: Optional[str], messages: list) -> d
 
     if outcome:
         bid_history.update_bid_outcome(
-            bid_id, outcome,
+            license_key, bid_id, outcome,
             outcome_source=outcome_source or "",
             outcome_note=outcome_note or "",
         )
 
-    bid_history.mark_thread_processed(thread_id, len(messages))
+    bid_history.mark_thread_processed(license_key, thread_id, len(messages))
 
     return {
         "processed": True, "wrote_bid": True, "bid_id": bid_id,

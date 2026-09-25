@@ -22,12 +22,12 @@ import load_store
 import parser_core
 
 
-def record_bid_and_build_text(order_id: str, method: str,
+def record_bid_and_build_text(license_key: str, order_id: str, method: str,
                                price: Optional[float] = None,
                                rate_per_mile: Optional[float] = None) -> Optional[dict]:
     """Returns {"bid_id", "bid_text", "thread_id", "broker_email"}, or
     None if order_id isn't in the current live feed (load_store)."""
-    load = load_store.get_load(order_id)
+    load = load_store.get_load(license_key, order_id)
     if not load:
         return None
 
@@ -35,6 +35,7 @@ def record_bid_and_build_text(order_id: str, method: str,
     thread_id = (load.get("original_msg_full") or {}).get("threadId", "")
 
     bid_id = bid_history.record_bid(
+        license_key=license_key,
         order_id=order_id,
         thread_id=thread_id,
         bid_method=method,
@@ -67,6 +68,7 @@ def record_bid_and_build_text(order_id: str, method: str,
         truck_equipment=load.get("truck_equipment", ""),
         bid_template=load.get("bid_template"),
         price=price, rate_per_mile=rate_per_mile,
+        license_key=license_key,
     )
 
     return {

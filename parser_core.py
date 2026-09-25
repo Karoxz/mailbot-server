@@ -1679,7 +1679,8 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
                           delivery, delivery_dt, google_deadhead=None,
                           driver_name="", truck_type="", truck_dims="",
                           deadhead_eta_minutes=None, truck_equipment="",
-                          bid_template=None, price=None, rate_per_mile=None):
+                          bid_template=None, price=None, rate_per_mile=None,
+                          license_key: str = ""):
     eta_str   = fmt_hours_minutes(deadhead_eta_minutes) if deadhead_eta_minutes else ""
     # New feature, 2026-09-19: the BID PC price-entry dialog (map +
     # price field + live rate/mile) lets the dispatcher confirm a real
@@ -1711,7 +1712,7 @@ def build_bid_email_body(order, broker, vehicle, pickup, pickup_dt,
         price=price_str, rate_per_mile=rate_str,
     )
     if bid_template is None:
-        bid_template = load_store.get_bid_template()
+        bid_template = load_store.get_bid_template(license_key)
     try:
         body = bid_template.format(**data)
     except KeyError as e:
@@ -1738,7 +1739,8 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
                           delivery_loc, delivery_dt, google_deadhead=None,
                           driver_name="", truck_type="", truck_dimensions="",
                           deadhead_eta_minutes=None, truck_equipment="",
-                          bid_template=None, price=None, rate_per_mile=None):
+                          bid_template=None, price=None, rate_per_mile=None,
+                          license_key: str = ""):
     return build_bid_email_body(
         order=order, broker="", vehicle=vehicle_required,
         pickup=pickup_loc, pickup_dt=pickup_dt,
@@ -1749,6 +1751,7 @@ def build_bid_reply_body(order, vehicle_required, pickup_loc, pickup_dt,
         truck_equipment=truck_equipment,
         bid_template=bid_template,
         price=price, rate_per_mile=rate_per_mile,
+        license_key=license_key,
     )
 
 
@@ -2061,11 +2064,12 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                        max_radius_miles, original_msg_full,
                        trucks=None,
                        bid_template=None,
-                       allowed_delivery_states=None):
+                       allowed_delivery_states=None,
+                       license_key: str = ""):
     local_trucks   = trucks if trucks is not None else []
     local_template = bid_template
     if local_template is None:
-        local_template = load_store.get_bid_template()
+        local_template = load_store.get_bid_template(license_key)
 
     _PE0 = time.perf_counter()
     t = raw_text.replace("\r\n", "\n")
@@ -2507,6 +2511,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
         _rec_lane = f"{_pu_state}-{_dl_state}" if _pu_state and _dl_state else ""
 
         bid_recommendation = bid_history.get_bid_recommendation(
+            license_key=license_key,
             broker_email=broker_email_addr,
             lane=_rec_lane,
             vehicle_type=vehicle_required,
@@ -2531,6 +2536,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     load_decision = None
     if deadhead_miles is not None:
         load_decision = decision_engine.get_load_decision(
+            license_key=license_key,
             broker_email=broker_email_addr,
             deadhead_miles=deadhead_miles,
             max_radius_miles=max_radius_miles,
@@ -2558,7 +2564,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     delivery_dt_stored = "ASAP" if delivery_asap else delivery_dt
 
     if order:
-        load_store.put_load(order, {
+        load_store.put_load(license_key, order, {
                 "original_msg_full":    original_msg_full,
                 "order":                order,
                 "vehicle_required":     vehicle_required,
@@ -2676,6 +2682,7 @@ def _extract_state_codes_from_text(text: str) -> list:
 
 def parse_email_for_api(request_data: dict) -> dict:
     T0 = time.perf_counter()
+    license_key = request_data.get('license_key') or ''
     local_trucks = []
     for t in request_data.get('trucks', []):
         local_trucks.append({
@@ -2719,7 +2726,7 @@ def parse_email_for_api(request_data: dict) -> dict:
     T2 = time.perf_counter()
     print(f"[TIMING] zip warmup: {T2-T1:.3f}s", flush=True)
 
-    local_bid_template = request_data.get('bid_template') or load_store.get_bid_template()
+    local_bid_template = request_data.get('bid_template') or load_store.get_bid_template(license_key)
 
     # threadId defaults to '' (the historical HTTP /api/parse behavior —
     # the desktop's JSON request never carried this) but a caller that
@@ -2740,6 +2747,7 @@ def parse_email_for_api(request_data: dict) -> dict:
         original_msg_full  = dummy_msg,
         trucks             = local_trucks,
         bid_template       = local_bid_template,
+        license_key        = license_key,
     )
     T3 = time.perf_counter()
     print(f"[TIMING] process_bid_email: {T3-T2:.3f}s", flush=True)
@@ -2754,7 +2762,7 @@ def parse_email_for_api(request_data: dict) -> dict:
     }
 
     if order:
-        ld = load_store.get_load(order)
+        ld = load_store.get_load(license_key, order)
         if ld:
             result['route_url'] = ld.get('route_url', '')
             result['load_data'] = {k: v for k, v in ld.items()

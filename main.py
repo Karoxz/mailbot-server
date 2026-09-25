@@ -348,6 +348,7 @@ def record_bid(req: RecordBidRequest):
         raise HTTPException(status_code=403, detail=check["reason"])
     try:
         bid_id = bid_history.record_bid(
+            license_key=req.license_key,
             order_id=req.order_id, thread_id=req.thread_id, bid_method=req.bid_method,
             vehicle_type=req.vehicle_type, driver_name=req.driver_name,
             pickup_loc=req.pickup_loc, delivery_loc=req.delivery_loc,
@@ -368,7 +369,7 @@ def update_bid_amount(req: UpdateBidAmountRequest):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     try:
-        ok = bid_history.update_bid_amount(req.bid_id, req.bid_amount)
+        ok = bid_history.update_bid_amount(req.license_key, req.bid_id, req.bid_amount)
         return {"success": ok}
     except Exception as e:
         logger.error(f"update_bid_amount error: {e}", exc_info=True)
@@ -458,6 +459,7 @@ def backfill_thread(req: BackfillThreadRequest):
 
     try:
         result = thread_learner.process_thread(
+            license_key=req.license_key,
             thread_id=req.thread_id,
             order_id=req.order_id,
             messages=[m.dict() for m in req.messages],
@@ -474,7 +476,7 @@ def classify_reply(req: ClassifyReplyRequest):
 
     # Cheap DB lookup FIRST — the LLM is only ever called when this
     # thread actually has a bid awaiting an outcome.
-    pending = bid_history.get_pending_bids_for_thread(req.thread_id)
+    pending = bid_history.get_pending_bids_for_thread(req.license_key, req.thread_id)
     if not pending:
         return {"success": True, "matched": False}
 
@@ -501,7 +503,7 @@ def classify_reply(req: ClassifyReplyRequest):
     updated_ids = []
     for bid in pending:
         if bid_history.update_bid_outcome(
-            bid["id"], result["status"],
+            req.license_key, bid["id"], result["status"],
             outcome_source="broker_reply", outcome_note=result["reason"],
         ):
             updated_ids.append(bid["id"])
@@ -541,10 +543,13 @@ def web_feed(license_key: str, limit: int = 50):
     # load_store only ever holds loads that got far enough to match a
     # truck (see process_bid_email) — it's not a full "every email
     # seen" log. SQLite-backed as of 2026-09-05 (was an in-process
-    # dict, invisible across uvicorn's 4 worker processes — not
-    # scoped per-license still, a known limitation, fine while
-    # there's a single active dispatcher).
-    items = load_store.get_recent_loads(limit=limit)
+    # dict, invisible across uvicorn's 4 worker processes). Per-license
+    # isolation added 2026-09-25 — this used to return the SAME global
+    # load pool regardless of which license authenticated ("a known
+    # limitation, fine while there's a single active dispatcher" — it
+    # stopped being fine once a second real account needed to act as
+    # an independent one).
+    items = load_store.get_recent_loads(license_key, limit=limit)
     # original_msg_full carries raw Gmail payload data the frontend never
     # needs in full — strip it, but pull the one field out of it first
     # that the frontend DOES need: the real threadId (present for
@@ -566,7 +571,7 @@ def web_bid_history(license_key: str, limit: int = 50):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, "items": bid_history.get_recent_bids(limit=limit)}
+    return {"success": True, "items": bid_history.get_recent_bids(license_key, limit=limit)}
 
 
 @app.get("/api/web/stats")
@@ -574,7 +579,7 @@ def web_stats(license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, **bid_history.overall_summary()}
+    return {"success": True, **bid_history.overall_summary(license_key)}
 
 
 # =============================================================
@@ -588,7 +593,7 @@ def web_list_trucks(license_key: str, include_inactive: bool = False):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, "items": fleet_store.list_trucks(active_only=not include_inactive)}
+    return {"success": True, "items": fleet_store.list_trucks(license_key, active_only=not include_inactive)}
 
 
 @app.post("/api/web/trucks")
@@ -597,6 +602,7 @@ def web_add_truck(req: WebTruckIn):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     truck_id = fleet_store.add_truck(
+        license_key=req.license_key,
         vehicle=req.vehicle, driver_name=req.driver_name, zip_location=req.zip_location,
         dimensions=req.dimensions, max_payload_lbs=req.max_payload_lbs,
         equipment=req.equipment, allowed_states=req.allowed_states,
@@ -612,7 +618,7 @@ def web_update_truck(truck_id: int, req: WebTruckUpdate):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     fields = req.dict(exclude={"license_key"}, exclude_none=True)
-    updated = fleet_store.update_truck(truck_id, **fields)
+    updated = fleet_store.update_truck(req.license_key, truck_id, **fields)
     if not updated:
         raise HTTPException(status_code=404, detail="Truck not found or nothing to update")
     return {"success": True}
@@ -623,7 +629,7 @@ def web_delete_truck(truck_id: int, license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    deleted = fleet_store.delete_truck(truck_id)
+    deleted = fleet_store.delete_truck(license_key, truck_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Truck not found")
     return {"success": True}
@@ -634,8 +640,8 @@ def web_list_brokers(license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    blacklisted = {b["broker_email"] for b in fleet_store.list_blacklisted_brokers()}
-    brokers = bid_history.list_all_brokers()
+    blacklisted = {b["broker_email"] for b in fleet_store.list_blacklisted_brokers(license_key)}
+    brokers = bid_history.list_all_brokers(license_key)
     for b in brokers:
         b["blacklisted"] = b["broker_email"] in blacklisted
     brokers.sort(key=lambda b: b["total_bids"], reverse=True)
@@ -647,7 +653,7 @@ def web_blacklist_broker(req: WebBlacklistRequest):
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    fleet_store.blacklist_broker(req.broker_email, req.broker_name, req.note)
+    fleet_store.blacklist_broker(req.license_key, req.broker_email, req.broker_name, req.note)
     logger.info(f"[WEB] blacklisted broker: {req.broker_email}")
     return {"success": True}
 
@@ -657,7 +663,7 @@ def web_unblacklist_broker(broker_email: str, license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    fleet_store.unblacklist_broker(broker_email)
+    fleet_store.unblacklist_broker(license_key, broker_email)
     logger.info(f"[WEB] un-blacklisted broker: {broker_email}")
     return {"success": True}
 
@@ -686,7 +692,7 @@ def web_record_bid(req: WebRecordBidRequest):
     if req.method not in ("pc", "phone", "draft"):
         raise HTTPException(status_code=400, detail="method must be pc, phone, or draft")
 
-    result = bid_actions.record_bid_and_build_text(req.order_id, req.method)
+    result = bid_actions.record_bid_and_build_text(req.license_key, req.order_id, req.method)
     if not result:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
@@ -729,7 +735,7 @@ def web_bid_price_context(t: str = None, license_key: str = None, order_id: str 
     """Everything bid_price.html needs to render: route/order info for
     the header, plus the fields /api/web/bid_price/route_map needs."""
     license_key, order_id = _resolve_bid_price_auth(t, license_key, order_id)
-    load = load_store.get_load(order_id)
+    load = load_store.get_load(license_key, order_id)
     if not load:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
     order = {k: v for k, v in load.items() if k != "original_msg_full"}
@@ -773,7 +779,7 @@ def web_bid_price_submit(req: dict):
     except (TypeError, ValueError):
         rate_per_mile = None
 
-    result = bid_actions.record_bid_and_build_text(order_id, "pc", price, rate_per_mile)
+    result = bid_actions.record_bid_and_build_text(license_key, order_id, "pc", price, rate_per_mile)
     if not result:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
@@ -879,26 +885,28 @@ def web_get_bid_template(license_key: str):
     check = validate_license_key_only(license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, "template": load_store.get_bid_template()}
+    return {"success": True, "template": load_store.get_bid_template(license_key)}
 
 
 @app.post("/api/web/bid_template")
 def web_set_bid_template(req: WebBidTemplateRequest):
     """
-    NOTE: this sets the SERVER's fallback default template (in
-    load_store.db as of 2026-09-05, was parser_core.BID_TEMPLATE — an
-    in-process global, invisible across uvicorn's 4 workers, the same
-    bug LOAD_STORE had), used only when a client's /api/parse call
-    doesn't include its own bid_template. The desktop app always sends
-    its own locally-configured template on every parse call, so
-    editing this here does NOT change what the desktop actually uses
-    day to day — the UI should say so, not imply otherwise.
+    NOTE: this sets THIS license's own fallback template (per-license
+    as of 2026-09-25 — before that it was one single global row shared
+    by every account, `load_store.db`'s original design from
+    2026-09-05), used only when a client's /api/parse call doesn't
+    include its own bid_template. The desktop app always sends its own
+    locally-configured template on every parse call, so editing this
+    here does NOT change what the desktop actually uses day to day —
+    the UI should say so, not imply otherwise. Standalone mode and the
+    BID PC price+map page, which have no desktop process to supply
+    their own, are what this actually drives.
     """
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    load_store.set_bid_template(req.template)
-    logger.info("[WEB] bid template updated (server-side default)")
+    load_store.set_bid_template(req.license_key, req.template)
+    logger.info(f"[WEB] bid template updated for {req.license_key}")
     return {"success": True}
 
 
