@@ -191,6 +191,50 @@ main.content { animation: fadeIn .25s ease both; }
 .dot.ok   { background: var(--good); }
 .dot.bad  { background: var(--bad); }
 
+/* ── Mobile nav drawer ──────────────────────────────────────── */
+/* Hidden above the mobile breakpoint (the desktop .topnav handles nav
+   there); shown below it, replacing the old wrap-to-second-row behavior. */
+.nav-hamburger { display: none; }
+.nav-drawer {
+  position: fixed;
+  top: 0;
+  right: -280px;
+  width: 260px;
+  max-width: 80vw;
+  height: 100%;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 70px 14px 14px;
+  transition: right .25s ease;
+  z-index: 1000;
+}
+.nav-drawer.open { right: 0; }
+.nav-drawer a {
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: .95rem;
+  font-weight: 600;
+  padding: 11px 14px;
+  border-radius: 8px;
+  transition: background .15s ease, color .15s ease;
+}
+.nav-drawer a:hover { background: var(--bg-card); color: var(--text); }
+.nav-drawer a.active { background: var(--accent-bg); color: var(--accent); }
+.nav-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+  z-index: 999;
+}
+.nav-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
 /* ── Layout ─────────────────────────────────────────────── */
 .content {
   max-width: 1100px;
@@ -491,6 +535,7 @@ tr.skeleton-row td { padding: 12px 18px; }
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .content { padding: 14px 10px 40px; }
   .login-card { padding: 26px 20px; }
-  .topnav { order: 3; width: 100%; }
+  .topnav { display: none; }
+  .nav-hamburger { display: flex; }
   .topbar { flex-wrap: wrap; }
 }

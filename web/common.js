@@ -443,12 +443,32 @@
         <span id="conn-dot" class="dot" title="Connection status"></span>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" type="button">🌙</button>
         <button id="logout-btn" class="icon-btn" title="Log out" type="button">⎋</button>
+        <button id="nav-hamburger" class="icon-btn nav-hamburger" title="Menu" type="button">☰</button>
       </div>`;
+    // Rendered as siblings of .topbar, not nested inside it — a fixed-
+    // position drawer/backdrop needs to escape the topbar's own stacking
+    // context to overlay the whole page, not just slide within the bar.
+    mount.insertAdjacentHTML("afterend",
+      `<nav id="nav-drawer" class="nav-drawer">${links}</nav>
+       <div id="nav-drawer-backdrop" class="nav-drawer-backdrop"></div>`);
     document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
     document.getElementById("logout-btn").addEventListener("click", () => {
       clearLicenseKey();
       window.location.href = "login.html";
     });
+
+    const drawer = document.getElementById("nav-drawer");
+    const backdrop = document.getElementById("nav-drawer-backdrop");
+    function closeDrawer() {
+      drawer.classList.remove("open");
+      backdrop.classList.remove("open");
+    }
+    document.getElementById("nav-hamburger").addEventListener("click", () => {
+      drawer.classList.toggle("open");
+      backdrop.classList.toggle("open");
+    });
+    backdrop.addEventListener("click", closeDrawer);
+    drawer.querySelectorAll("a").forEach((a) => a.addEventListener("click", closeDrawer));
   }
   function setConn(ok) {
     const dot = document.getElementById("conn-dot");
