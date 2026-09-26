@@ -1,54 +1,53 @@
 # =============================================================
-# poller.py — the standalone autonomous engine (Phase C, 2026-09-05)
+# poller.py — the standalone/web engine (Phase C 2026-09-05; rewritten
+# for full desktop parity 2026-09-26)
 #
 # Runs as its OWN process — a separate systemd unit (mailbot-poller),
-# never one of the 4 `mailbot-api` uvicorn workers. That separation
-# matters: if this loop ran inside the API app itself it would either
-# land in one arbitrary worker (no control over which) or run 4x
-# redundantly (duplicate Telegram sends, duplicate parses, wasted
-# Gemini quota). Every module below is imported directly as a library —
-# no HTTP calls to the API server itself; this process IS part of the
-# same server, just a different entry point, reading/writing the same
-# on-disk SQLite files the 4 API workers already share safely.
+# never one of the 4 `mailbot-api` uvicorn workers (that would land in
+# one arbitrary worker or run 4x redundantly). Every module below is
+# imported directly as a library — no HTTP calls to the API server
+# itself; this process IS part of the same server, reading/writing the
+# same on-disk SQLite files the API workers share safely.
 #
-# Default-off. Nothing here does anything for a license unless it has
-# standalone_mode_enabled=1 (license_db.list_standalone_enabled_licenses()),
-# a working stored Gmail token, and at least one allowed vehicle
-# configured — re-checked every cycle, not just at startup, so turning
-# it off in Settings takes effect within one poll interval, no restart.
+# Default-off. Nothing happens for a license unless it has
+# standalone_mode_enabled=1, a working stored Gmail token and at least
+# one allowed vehicle — re-checked every cycle, so turning it off in
+# Settings takes effect within one poll interval, no restart.
 #
-# Deliberately NOT ported from the desktop's main_loop() (see
-# MAILBOT_ROADMAP.md's "Standalone engine" section for the full
-# reasoning, not repeated here):
-#   - Gmail push/Pub/Sub watch + history-API polling. This uses the
-#     simpler `is:unread` list-based query only — the same fallback
-#     path the desktop itself already relies on (_fast_gmail_poller).
-#   - The 5-worker ThreadPoolExecutor concurrency pool. Messages are
-#     processed one at a time — a 20s poll interval already dominates
-#     latency, concurrency buys nothing here.
-#   - The REPLY button specifically (desktop-only: replies to a
-#     broker's message from the Telegram chat via clipboard + opening
-#     Gmail — no server-side equivalent of "the user's own clipboard").
-#     BID PC/BID PHONE/DRAFT **are** ported (2026-09-05, requested —
-#     "I want telegram messages to work just like they did before") via
-#     a getUpdates long-poll thread, same idea as the desktop's
-#     get_telegram_updates(), just replying with the bid text in chat
-#     (long-press-to-copy in Telegram) instead of a local clipboard,
-#     since there's no clipboard to copy to on a headless server.
-#   - reply_classifier outcome-detection and delivery_states matching —
-#     reasonable fast-follows once this base loop is proven, not part
-#     of the first working version.
+# PARITY TARGET: the desktop app (client/main copy.py), which this file
+# only ever READS — never modifies. _process_message() is a
+# step-for-step port of the desktop's _process_email(): fetch -> custom
+# label guard -> reply/freight detection -> thread-label guard (labeled
+# thread => "Label / States" ping) -> body -> classify reply in the
+# background -> strip quoted reply -> parse -> Telegram (identical
+# buttons) -> _safe_mark_read. Pure helpers live in desktop_parity.py.
+#
+# DESKTOP/WEB MUTUAL EXCLUSION (no desktop change needed): the desktop's
+# push poller hits /webhook/poll ~5x/second while it is running;
+# main.py records that as licenses.desktop_poll_heartbeat and this
+# engine yields a license's Gmail account for as long as it is fresh
+# (see run_one_license_cycle). Web and desktop can share one Gmail
+# account and "switch" automatically without ever racing on its
+# read/unread state.
+#
+# Still deliberately NOT ported (documented, not needed for parity):
+# Gmail Pub/Sub push + history API (3s list polling instead), the
+# 20-worker pool (messages processed serially), the desktop's startup
+# mass mark-read cleanup, and the "Mark All Read" tool.
 # =============================================================
 
 import os
 import json
 import time
+import ssl
 import logging
 import threading
 import traceback
+from collections import OrderedDict
 from urllib.parse import quote
 
 import requests
+from googleapiclient.errors import HttpError
 
 import license_db
 import fleet_store
@@ -61,20 +60,19 @@ import map_token
 import route_cache_store
 import activity_log
 import zip_geocode
+import desktop_parity
+import reply_handler
 from gmail_client import GmailAuthError
-from parser_core import parse_email_for_api, FREIGHT_MARKERS, extract_text_from_full_message
+from parser_core import parse_email_for_api, extract_text_from_full_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [poller] %(message)s")
 logger = logging.getLogger("poller")
 
 
 # ── Load .env manually — kept independent from main.py's own copy of
-# this (not imported from there) so this process doesn't pull in
-# FastAPI/pydantic just for a few env vars, matching this file's
-# existing no-cross-import-from-main.py design (see this file's top
-# docstring). In production both systemd units already have
-# EnvironmentFile=.env, so this only actually matters when running
-# poller.py directly (local dev) without systemd. ─────────────────────
+# this so this process doesn't pull in FastAPI/pydantic just for a few
+# env vars. In production both systemd units already have
+# EnvironmentFile=.env; this only matters running poller.py directly. ──
 def _load_env_file(path=".env"):
     if not os.path.exists(path):
         return
@@ -90,105 +88,88 @@ def _load_env_file(path=".env"):
 
 _load_env_file()
 
-# Origin for the BID PC price+map link sent over Telegram (bid_price.html
-# is served from the same web/ StaticFiles mount as the rest of the
-# dashboard). No default — if unset, _process_message falls back to the
-# plain gmail_url link instead of a broken URL.
+# Origin for the BID PC price+map link (bid_price.html is served from the
+# same web/ StaticFiles mount as the dashboard). No default — if unset,
+# BID PC falls back to recording a price-less bid + the bid text.
 WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
 
-# Not the desktop's aggressive 3s — this is an unattended background
-# loop with nobody watching a GUI in real time, not a latency-sensitive
-# interactive tool.
-POLL_INTERVAL_SECONDS = 20
-FRESH_WINDOW = "1h"           # Reverted 2026-09-24 — was widened to "3d" on
-                              # 2026-09-05 to exercise the match/notify path
-                              # against a backlog of already-unread mail while
-                              # testing; the pipeline's been stable in
-                              # production for 2+ weeks since, so back to the
-                              # desktop's own fallback-poller window.
-MAX_RESULTS_PER_CYCLE = 10
+# Desktop parity (2026-09-26): the desktop's own fast list poller runs
+# every 3s over a 1h window, and its START does a one-time 2-day
+# catch-up scan (up to 500 messages). Same numbers here.
+POLL_INTERVAL_SECONDS = 3
+FRESH_WINDOW = "1h"
+INITIAL_SCAN_WINDOW = "2d"
+INITIAL_SCAN_LIMIT = 500
+MAX_RESULTS_PER_CYCLE = 50
 DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
+_SERVICE_TTL = 1800           # desktop rebuilds its Gmail service every 30 min
+_LABEL_TTL = 600
+_SEEN_CAP = 2000              # desktop's processed_ids cap
+_COOLDOWN_SEC = 300           # desktop's per-thread ping/classify cooldown
+_RETRIES = 3                  # desktop: 3 retries, 2/4/8s backoff
 
-def _telegram_send(bot_token: str, chat_ids: list, text: str, order_id: str = None,
-                    route_url: str = None, gmail_url: str = None, bid_price_url: str = None):
-    """BID PC (2026-09-05) is a plain link in the message TEXT, not an
-    inline button — Telegram shows an "Open this link?" interstitial for
-    EVERY inline url-type button, on every client, for every bot,
-    unconditionally (an anti-phishing measure: a button's label isn't
-    the URL, so Telegram confirms the real destination before
-    navigating — this can't be suppressed via the Bot API, no matter how
-    the button is built). A plain URL sitting in the message body,
-    auto-linkified by Telegram, doesn't get that treatment, since the
-    destination is already visible with nothing hidden behind a label —
-    so putting the link directly in the text is the one lever that
-    actually removes the confirmation prompt, at the cost of it not
-    looking like a proper button. BID PHONE/DRAFT are unaffected — still
-    callback_data buttons, still recording the bid + replying with
-    copyable text (long-press to copy — no bot on any platform can
-    write to a recipient's device clipboard, that's a hard platform
-    limit, not an implementation gap). ROUTE (row 1) is still a real
-    button and will show the same interstitial if tapped — not changed,
-    since only BID PC's confirmation prompt was raised as an issue.
+_sleep = time.sleep           # indirection so tests can skip real waits
 
-    bid_price_url (2026-09-24) replaces the plain gmail_url line for
-    BID PC — this is the price+map page (route map, price field, live
-    rate/mile, same as the desktop's BID PC dialog), which ends its own
-    flow with a link to the exact Gmail thread anyway, so nothing is
-    lost by not also linking it directly here. Falls back to gmail_url
-    if bid_price_url isn't available for any reason (e.g. MAP_TOKEN_SECRET
-    isn't configured) — always leaves BID PC actionable somehow."""
-    if bid_price_url:
-        text = f"{text}\n\n💵 BID PC — enter your price:\n{bid_price_url}"
-    elif gmail_url:
-        text = f"{text}\n\n💵 BID PC — open thread directly:\n{gmail_url}"
-    payload = {"text": text}
-    keyboard = []
-    if route_url:
-        keyboard.append([{"text": "🚩 ROUTE 🚩", "url": route_url}])
+
+# =============================================================
+# TELEGRAM
+# =============================================================
+
+def _tg_api(bot_token: str, method: str, payload: dict, timeout: int = 10):
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{bot_token}/{method}",
+                          json=payload, timeout=timeout)
+        if not r.ok:
+            logger.warning(f"Telegram {method} failed: {r.text[:200]}")
+        return r
+    except Exception as e:
+        logger.warning(f"Telegram {method} exception: {e}")
+        return None
+
+
+def _tg_send(bot_token: str, chat_id, text: str, keyboard=None) -> bool:
+    payload = {"chat_id": chat_id, "text": text}
+    if keyboard:
+        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+    r = _tg_api(bot_token, "sendMessage", payload, timeout=15)
+    return bool(r is not None and r.ok)
+
+
+def _tg_broadcast(bot_token: str, chat_ids: list, text: str, keyboard=None) -> int:
+    """Send to every chat in parallel with a 6s join — same as the
+    desktop's send_to_telegram. Returns how many sends succeeded."""
+    results = []
+
+    def _one(cid):
+        results.append(_tg_send(bot_token, cid, text, keyboard))
+
+    threads = [threading.Thread(target=_one, args=(cid,), daemon=True) for cid in chat_ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=6)
+    return sum(1 for ok in results if ok)
+
+
+def _load_keyboard(order_id, route_url) -> list:
+    """Identical to the desktop's load message buttons: row 1 is
+    BID PC | BID PHONE | DRAFT (callbacks), row 2 is the ROUTE url."""
+    rows = []
     if order_id:
-        keyboard.append([
+        rows.append([
+            {"text": "💵 BID PC",    "callback_data": f"bid:{order_id}"},
             {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
             {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
         ])
-    if keyboard:
-        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
-    for chat_id in chat_ids:
-        try:
-            body = dict(payload)
-            body["chat_id"] = chat_id
-            r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                               json=body, timeout=15)
-            if not r.ok:
-                logger.warning(f"Telegram send failed (chat {chat_id}): {r.text[:200]}")
-        except Exception as e:
-            logger.warning(f"Telegram send exception (chat {chat_id}): {e}")
-
-
-# ── Telegram button callbacks (BID PHONE / DRAFT) ────────────────────
-# BID PC (2026-09-05) is a plain url button now, not callback_data — see
-# _telegram_send's docstring — so "bid" below is effectively unreachable
-# from any newly-sent message. Left in place only so an already-sent
-# message from before this change (if one's still sitting in a chat)
-# doesn't hit an unknown-action error if tapped.
-#
-# The actual record+build logic (_record_bid_and_build_text, below) goes
-# through the shared bid_actions.record_bid_and_build_text() — the same
-# one main.py's web_record_bid() and the BID PC price+map page use — not
-# duplicated here anymore (2026-09-24).
-_TG_METHOD_MAP = {
-    "bid":   ("pc",    "💵 BID PC"),
-    "phone": ("phone", "💵 BID PHONE"),
-    "text":  ("draft", "📋 DRAFT"),
-}
+    if route_url:
+        rows.append([{"text": "🚩ROUTE🚩", "url": route_url}])
+    return rows
 
 
 def _gmail_url(order_id, broker_email, thread_id=None):
-    """Real thread deep link when we have one (poller-sourced loads now
-    carry a real threadId — see parser_core.parse_email_for_api's
-    thread_id passthrough), falling back to a search link otherwise —
-    same two-tier scheme as common.js's gmailSearchUrl() on the web
-    side, kept in sync deliberately."""
+    """Real thread deep link when we have one, else a search link — same
+    two-tier scheme as common.js's gmailSearchUrl()."""
     if thread_id:
         return f"https://mail.google.com/mail/u/0/#all/{thread_id}"
     q = str(order_id or "").strip()
@@ -197,13 +178,23 @@ def _gmail_url(order_id, broker_email, thread_id=None):
     return f"https://mail.google.com/mail/u/0/#search/{quote(q)}"
 
 
+# ── Telegram button callbacks ───────────────────────────────────────
+# bid   = BID PC   -> reply with the price+map page link (plain text, so
+#                     no "Open this link?" prompt) — the web equivalent
+#                     of the desktop's price dialog; that page records
+#                     the bid, copies the text and lands on the thread.
+# phone = BID PHONE, text = DRAFT -> record + reply with the bid text.
+_TG_METHOD_MAP = {
+    "bid":   ("pc",    "💵 BID PC"),
+    "phone": ("phone", "💵 BID PHONE"),
+    "text":  ("draft", "📋 DRAFT"),
+}
+
+
 def _record_bid_and_build_text(license_key: str, order_id: str, method: str,
                                 price: float = None, rate_per_mile: float = None):
-    """Thin wrapper around the shared bid_actions helper (also used by
-    main.py's /api/web/record_bid and the BID PC price+map page) — adds
-    the gmail_url this caller specifically needs, built from poller.py's
-    own _gmail_url (uses the real thread_id poller.py's Gmail access
-    provides, unlike desktop-sourced loads)."""
+    """Thin wrapper around the shared bid_actions helper — adds the
+    gmail_url this caller needs."""
     result = bid_actions.record_bid_and_build_text(license_key, order_id, method, price, rate_per_mile)
     if not result:
         return None
@@ -212,14 +203,31 @@ def _record_bid_and_build_text(license_key: str, order_id: str, method: str,
 
 
 def _answer_callback_query(bot_token: str, callback_query_id: str, text: str = None):
-    try:
-        body = {"callback_query_id": callback_query_id}
-        if text:
-            body["text"] = text
-        requests.post(f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery",
-                     json=body, timeout=10)
-    except Exception:
-        pass  # non-fatal — worst case the button spinner times out client-side
+    body = {"callback_query_id": callback_query_id}
+    if text:
+        body["text"] = text
+    _tg_api(bot_token, "answerCallbackQuery", body, timeout=10)
+
+
+def _handle_bid_pc(bot_token: str, license_key: str, order_id: str, chat_id, callback_id: str):
+    load = load_store.get_load(license_key, order_id)
+    if not load:
+        _answer_callback_query(bot_token, callback_id, text="Order not found in the current live feed.")
+        return
+    _answer_callback_query(bot_token, callback_id)
+    if not chat_id:
+        return
+    if WEB_BASE_URL:
+        tok = map_token.make_bid_token(license_key, order_id)
+        _tg_send(bot_token, chat_id,
+                 f"💵 BID PC — Order #{order_id}\nEnter your price:\n"
+                 f"{WEB_BASE_URL}/app/bid_price.html?t={tok}")
+        return
+    # No public web origin configured: fall back to a price-less bid.
+    result = _record_bid_and_build_text(license_key, order_id, "pc")
+    if result:
+        _tg_send(bot_token, chat_id, f"💵 BID PC — Order #{order_id}\n\n{result['bid_text']}",
+                 [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
 
 
 def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
@@ -232,6 +240,10 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
         _answer_callback_query(bot_token, callback_id)
         return
 
+    if action == "bid":
+        _handle_bid_pc(bot_token, license_key, order_id, chat_id, callback_id)
+        return
+
     method, label = _TG_METHOD_MAP[action]
     result = _record_bid_and_build_text(license_key, order_id, method)
     if not result:
@@ -242,37 +254,14 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
     _answer_callback_query(bot_token, callback_id, text=f"Recorded {label}")
     if not chat_id:
         return
-    # Nothing is ever auto-sent — same principle as the web dashboard's
-    # bid modal. There's no clipboard to copy into on a headless server,
-    # so the bid text comes back as a chat message (long-press to copy
-    # in Telegram) instead, plus a Gmail search link to find the thread.
-    text = f"{label} — Order #{order_id}\n\n{result['bid_text']}"
-    payload = {
-        "chat_id": chat_id, "text": text,
-        "reply_markup": json.dumps({"inline_keyboard": [[
-            {"text": "✉️ Find in Gmail", "url": result["gmail_url"]}
-        ]]}),
-    }
-    try:
-        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                     json=payload, timeout=15)
-    except Exception as e:
-        logger.warning(f"Telegram bid-text reply failed: {e}")
+    _tg_send(bot_token, chat_id, f"{label} — Order #{order_id}\n\n{result['bid_text']}",
+             [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
 
 
 def _telegram_callback_loop(bot_token: str, license_key: str):
-    """One thread per distinct bot token, long-polling getUpdates —
-    same idea as the desktop's get_telegram_updates(), just handling
-    button presses instead of also handling REPLY/clipboard actions.
-    Runs independently of the main 20s poll loop since a button press
-    should feel close to instant, not wait for the next cycle.
-
-    license_key (2026-09-25): a bot_token is assumed one-per-license in
-    practice (each account's own private bot) — captured once here at
-    thread-start time, from the same lookup _ensure_callback_listeners
-    already does, rather than trying to reverse-lookup "which license
-    owns this token" later from inside a getUpdates response that has
-    no account context of its own."""
+    """One thread per distinct bot token, long-polling getUpdates — same
+    idea as the desktop's get_telegram_updates(). A bot_token is assumed
+    one-per-license in practice (each account's own private bot)."""
     offset = None
     logger.info(f"Telegram callback listener starting (bot ...{bot_token[-6:]})")
     while True:
@@ -314,89 +303,317 @@ def _parse_chat_ids(chat_ids_csv: str) -> list:
             if c.strip().lstrip("-").isdigit()]
 
 
-def _build_query(allowed_vehicles: list) -> str:
-    veh_terms = " OR ".join(f'"{v}"' for v in allowed_vehicles)
-    return f'is:unread newer_than:{FRESH_WINDOW} ({veh_terms})'
+# =============================================================
+# PER-LICENSE CACHES / DEDUP (all in-memory, like the desktop's)
+# =============================================================
+
+_svc_cache = {}          # license -> (service, built_at)
+_label_cache = {}        # license -> (label_map, built_at)
+_seen = {}               # license -> OrderedDict of processed message ids
+_last_labeled_notify = {}   # (license, thread) -> ts   (5-min cooldown)
+_last_classify = {}         # (license, thread) -> ts   (5-min cooldown)
+_cooldown_lock = threading.Lock()
+_yielding = {}           # license -> bool (currently paused for the desktop?)
 
 
-def _process_message(service, label_map, msg_id, license_key, allowed_vehicles,
-                      radius_miles, chat_ids, bot_token):
-    """Mirrors the desktop's _process_email() guard sequence: full fetch
-    -> custom-label guard -> freight-marker check -> thread-label guard
-    -> extract body -> parse -> mark read. Returns True if a load was
-    matched (for logging only)."""
-    full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+def _get_service(license_key: str):
+    ent = _svc_cache.get(license_key)
+    if ent and time.time() - ent[1] < _SERVICE_TTL:
+        return ent[0]
+    service = gmail_client.build_service(license_key)
+    _svc_cache[license_key] = (service, time.time())
+    _label_cache.pop(license_key, None)
+    return service
 
-    if gmail_client.has_custom_labels(full.get("labelIds", [])):
-        # Already has a real label (Bid, RC, Finished Loads, ...) — a
-        # dispatcher or the desktop already handled this one.
-        return False
 
-    subject = ""
-    for h in full.get("payload", {}).get("headers", []):
-        if h.get("name", "").lower() == "subject":
-            subject = h.get("value", "")
-            break
+def _get_label_map(license_key: str, service) -> dict:
+    ent = _label_cache.get(license_key)
+    if ent and time.time() - ent[1] < _LABEL_TTL:
+        return ent[0]
+    m = gmail_client.get_label_map(service)
+    _label_cache[license_key] = (m, time.time())
+    return m
 
-    # Real bug, reported 2026-09-23 (desktop side) and confirmed here
-    # 2026-09-24: a reply keeps the original subject verbatim (most mail
-    # clients do this), so a broker's reply in an already-labeled thread
-    # ("Re: LARGE STRAIGHT from...") matched a freight marker and got
-    # routed to the fresh-posting parse below instead of the thread-label
-    # guard, producing no notification at all. Ported from the desktop's
-    # same-day fix (client/main copy.py, _process_email).
-    subject_upper = subject.upper()
-    is_reply_subject = subject_upper.strip().startswith(("RE:", "FW:", "FWD:"))
-    is_freight = (not is_reply_subject) and any(m in subject_upper for m in FREIGHT_MARKERS)
-    thread_id = full.get("threadId", "")
-    if not is_freight and thread_id:
-        thread_labels = gmail_client.get_thread_label_names(service, thread_id, label_map)
-        if thread_labels:
-            # Whole thread already carries a real label somewhere even
-            # though this specific message doesn't yet — same guard the
-            # desktop applies before treating a message as "new."
-            gmail_client.mark_as_read(service, msg_id)
+
+def _drop_service(license_key: str):
+    _svc_cache.pop(license_key, None)
+    _label_cache.pop(license_key, None)
+
+
+def _is_seen(license_key: str, msg_id: str) -> bool:
+    return msg_id in _seen.get(license_key, ())
+
+
+def _mark_seen(license_key: str, msg_id: str):
+    d = _seen.setdefault(license_key, OrderedDict())
+    d[msg_id] = 1
+    while len(d) > _SEEN_CAP:
+        d.popitem(last=False)
+
+
+def _cooldown_ok(store: dict, key) -> bool:
+    now = time.time()
+    with _cooldown_lock:
+        if now - store.get(key, 0) < _COOLDOWN_SEC:
             return False
+        store[key] = now
+        return True
 
-    body = extract_text_from_full_message(full)
-    internal_date = int(full.get("internalDate", "0"))
 
-    result = parse_email_for_api({
-        "license_key":      license_key,
-        "email_body":       body,
-        "internal_date_ms": internal_date,
-        "allowed_vehicles":  allowed_vehicles,
-        "max_radius_miles":  radius_miles,
-        "trucks":            fleet_store.list_trucks(license_key),
-        "bid_template":      None,  # falls back to load_store's per-license default
-        "thread_id":         thread_id,   # real Gmail thread — this is what
-        "message_id":        msg_id,      # lets "Find in Gmail"/BID PC land
-                                           # on the exact thread, not a search
-    })
+# =============================================================
+# RETRY HELPERS — desktop: _is_conn_reset / _is_rate_limited
+# =============================================================
 
-    # "Already read" is the dedup mechanism (same as the desktop) — no
-    # separate processed-ids table. Mark read regardless of match/no-match
-    # so a non-matching freight email isn't re-checked every cycle.
+def _is_rate_limited(e: Exception) -> bool:
+    if isinstance(e, HttpError):
+        status = getattr(e.resp, "status", None)
+        text = str(e).lower()
+        return status == 429 or (status == 403 and "ratelimit" in text.replace(" ", ""))
+    return False
+
+
+def _is_conn_reset(e: Exception) -> bool:
+    if isinstance(e, (ConnectionResetError, ConnectionAbortedError, ssl.SSLError, TimeoutError)):
+        return True
+    s = str(e)
+    return "10054" in s or "Connection reset" in s or "10053" in s
+
+
+# =============================================================
+# PER-MESSAGE PIPELINE — port of the desktop's _process_email()
+# =============================================================
+
+def _header(full: dict, name: str) -> str:
+    for h in full.get("payload", {}).get("headers", []):
+        if h.get("name", "").lower() == name.lower():
+            return h.get("value", "")
+    return ""
+
+
+def _can_send(ctx: dict) -> bool:
+    return bool(ctx["telegram_enabled"] and ctx["bot_token"] and ctx["chat_ids"])
+
+
+def _notify_labeled_thread(ctx: dict, label_names: list, subject: str, thread_id: str) -> bool:
+    """Desktop's _notify_labeled_thread: a Label / States ping with a
+    "REPLY BID" button that opens the thread — the ONLY notification a
+    broker reply produces. 5-minute per-thread cooldown."""
+    lk = ctx["license_key"]
+    if not _cooldown_ok(_last_labeled_notify, (lk, thread_id)):
+        return False
+    text = desktop_parity.labeled_thread_message(label_names, subject)
+    logger.info(f"[{lk}] labeled-thread ping labels={label_names} subject={subject[:60]!r}")
+    if not _can_send(ctx):
+        return False
+    sent = _tg_broadcast(ctx["bot_token"], ctx["chat_ids"], text,
+                         [[{"text": "💵 REPLY BID", "url": _gmail_url(None, None, thread_id)}]])
+    if sent:
+        activity_log.log_event(lk, "labeled_ping",
+                               f"Reply ping: {', '.join(label_names)} — {subject[:60]}")
+    return bool(sent)
+
+
+def _classify_in_background(license_key: str, thread_id: str, subject: str, body: str):
+    """Desktop's _run_classify_and_notify: classify the broker's reply and
+    record the outcome server-side, on its own thread so it never delays
+    the poll loop; 5-min per-thread cooldown. Silent on Telegram."""
+    if not _cooldown_ok(_last_classify, (license_key, thread_id)):
+        return None
+
+    def _run():
+        try:
+            res = reply_handler.classify_and_record(license_key, thread_id, subject, body)
+            if res.get("matched") and res.get("updated"):
+                order = (res.get("order") or {}).get("order_id", "")
+                status = (res.get("classification") or {}).get("status", "")
+                activity_log.log_event(license_key, "bid_outcome",
+                                       f"Broker reply on order #{order}: {status}")
+        except Exception:
+            logger.error(f"[{license_key}] classify failed:\n{traceback.format_exc()}")
+
+    t = threading.Thread(target=_run, daemon=True, name="classify")
+    t.start()
+    return t
+
+
+def _safe_mark_read(ctx: dict, service, msg_id: str, thread_id: str, label_map: dict, subject: str):
+    """Desktop's _safe_mark_read: a message in a labeled thread is left
+    exactly as-is (with the ping as the visibility guarantee); anything
+    else is marked read — read state is the dedup mechanism."""
+    if thread_id:
+        names, tsubject = gmail_client.get_thread_info(service, thread_id, label_map)
+        if names:
+            _notify_labeled_thread(ctx, names, tsubject or subject, thread_id)
+            return
     gmail_client.mark_as_read(service, msg_id)
 
+
+def _deliver_load(ctx: dict, result: dict, thread_id: str) -> str:
+    lk = ctx["license_key"]
+    load_data = result.get("load_data") or {}
+    order_id = result.get("order_id")
+    if not ctx["telegram_enabled"]:
+        logger.info(f"[{lk}] #{order_id} matched — Telegram is OFF, not sent")
+        activity_log.log_event(lk, "load_matched", f"Load #{order_id} matched (Telegram is OFF — not sent)")
+        return "telegram_off"
+    if not (ctx["bot_token"] and ctx["chat_ids"]):
+        logger.info(f"[{lk}] #{order_id} matched — no bot token / chat IDs configured")
+        activity_log.log_event(lk, "load_matched", f"Load #{order_id} matched (no bot token/chat ID set — not sent)")
+        return "no_recipient"
+    sent = _tg_broadcast(ctx["bot_token"], ctx["chat_ids"], result["formatted"],
+                         _load_keyboard(order_id, load_data.get("route_url")))
+    if not sent:
+        logger.warning(f"[{lk}] #{order_id} Telegram send FAILED")
+        activity_log.log_event(lk, "send_failed", f"Load #{order_id} matched but the Telegram send failed")
+        return "send_failed"
+    logger.info(f"[{lk}] matched load #{order_id}")
+    activity_log.log_event(lk, "load_matched", f"Standalone poller matched load #{order_id}")
+    return "sent"
+
+
+def _process_message(ctx: dict, service, label_map: dict, msg_id: str) -> str:
+    """Step-for-step port of the desktop's _process_email(). Returns a
+    short outcome string (used by tests and logging)."""
+    lk = ctx["license_key"]
+    try:
+        full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+    except HttpError as e:
+        if getattr(e.resp, "status", None) == 404:
+            return "gone"
+        raise
+
+    # 3. custom-label guard — silent skip
+    if gmail_client.has_custom_labels(full.get("labelIds", [])):
+        return "labeled"
+
+    # 4. reply / freight detection
+    subject = _header(full, "subject")
+    thread_id = full.get("threadId", "")
+    is_freight = desktop_parity.is_freight_subject(subject)
+
+    # 5. thread-label guard — a non-freight message in a labeled thread
+    # (typically a broker reply) never reaches the parser; it gets the
+    # label ping instead and is left as-is.
+    if not is_freight and thread_id:
+        names, tsubject = gmail_client.get_thread_info(service, thread_id, label_map)
+        if names:
+            _notify_labeled_thread(ctx, names, tsubject or subject, thread_id)
+            return "labeled_thread"
+
+    # 6. body, 7. classify (background), 8. strip quoted reply
+    body = extract_text_from_full_message(full)
+    if thread_id:
+        _classify_in_background(lk, thread_id, subject, body)
+    parse_body = desktop_parity.strip_quoted_reply(body)
+
+    # 9. parse
+    result = parse_email_for_api({
+        "license_key":      lk,
+        "email_body":       parse_body,
+        "internal_date_ms": int(full.get("internalDate", "0")),
+        "allowed_vehicles": ctx["allowed_vehicles"],
+        "max_radius_miles": ctx["radius_miles"],
+        "trucks":           fleet_store.list_trucks(lk),
+        "bid_template":     None,      # falls back to load_store's per-license default
+        "thread_id":        thread_id,  # real Gmail thread: lets "Find in Gmail"/BID PC
+        "message_id":       msg_id,     # land on the exact thread, not a search
+    })
+
+    # 10-11. send (identical buttons) or log the skip reason
     if result.get("success") and result.get("formatted"):
-        if bot_token and chat_ids:
-            load_data = result.get("load_data") or {}
-            route_url = load_data.get("route_url")
-            order_id = result.get("order_id")
-            gmail_url = _gmail_url(order_id, load_data.get("broker_email"), thread_id)
-            bid_price_url = None
-            if order_id and WEB_BASE_URL:
-                tok = map_token.make_bid_token(license_key, order_id)
-                bid_price_url = f"{WEB_BASE_URL}/app/bid_price.html?t={tok}"
-            _telegram_send(bot_token, chat_ids, result["formatted"],
-                           order_id=order_id, route_url=route_url,
-                           gmail_url=gmail_url, bid_price_url=bid_price_url)
-        logger.info(f"[{license_key}] matched load #{result.get('order_id')}")
-        activity_log.log_event(license_key, "load_matched",
-                                f"Standalone poller matched load #{result.get('order_id')}")
-        return True
-    return False
+        outcome = _deliver_load(ctx, result, thread_id)
+    else:
+        reason = (result.get("message") or "").strip()
+        logger.info(f"[{lk}] SKIPPED #{result.get('order_id') or '?'} — {reason[:120]}")
+        activity_log.log_event(lk, "load_skipped",
+                               f"Skipped #{result.get('order_id') or '?'} — {reason[:100]}")
+        outcome = "skipped"
+
+    # 13. mark read (unless it lives in a labeled thread)
+    _safe_mark_read(ctx, service, msg_id, thread_id, label_map, subject)
+    return outcome
+
+
+def _process_with_retry(ctx: dict, service, label_map: dict, msg_id: str) -> str:
+    """Desktop retry policy: a connection reset or Gmail 429/rate-limit
+    is retried up to 3 times with 2/4/8s backoff; anything else (or the
+    last failure) is logged and the message is considered handled so a
+    bad message can't be re-fetched every 3s forever."""
+    lk = ctx["license_key"]
+    outcome = "error"
+    for attempt in range(_RETRIES + 1):
+        try:
+            outcome = _process_message(ctx, service, label_map, msg_id)
+            break
+        except Exception as e:
+            if (_is_rate_limited(e) or _is_conn_reset(e)) and attempt < _RETRIES:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"[{lk}] transient Gmail error on {msg_id[-8:]} "
+                               f"(attempt {attempt + 1}); retrying in {wait}s: {e}")
+                _sleep(wait)
+                continue
+            logger.error(f"[{lk}] error processing message {msg_id}:\n{traceback.format_exc()}")
+            activity_log.log_event(lk, "poller_error", f"Error processing a message: {str(e)[:100]}")
+            outcome = "error"
+            break
+    _mark_seen(lk, msg_id)
+    return outcome
+
+
+# =============================================================
+# CYCLE
+# =============================================================
+
+def _build_query(allowed_vehicles: list, window: str = None) -> str:
+    veh_terms = " OR ".join(f'"{v}"' for v in allowed_vehicles)
+    return f'is:unread newer_than:{window or FRESH_WINDOW} ({veh_terms})'
+
+
+def _list_message_ids(service, query: str, limit: int) -> list:
+    ids, token = [], None
+    while len(ids) < limit:
+        kw = {"userId": "me", "q": query, "maxResults": min(500, limit - len(ids))}
+        if token:
+            kw["pageToken"] = token
+        resp = service.users().messages().list(**kw).execute()
+        ids += [m["id"] for m in resp.get("messages", [])]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return ids
+
+
+def _note_yield(license_key: str, yielding: bool):
+    was = _yielding.get(license_key, False)
+    if yielding == was:
+        return
+    _yielding[license_key] = yielding
+    if yielding:
+        logger.info(f"[{license_key}] paused: desktop app is actively polling this license")
+        activity_log.log_event(license_key, "web_paused", "Web bot paused — the desktop app is running")
+    else:
+        logger.info(f"[{license_key}] resumed: desktop app is no longer polling")
+        activity_log.log_event(license_key, "web_resumed", "Web bot resumed — the desktop app stopped")
+
+
+def _initial_scan(ctx: dict, service, label_map: dict):
+    """The desktop's START: a 'Watching' Telegram message plus a one-time
+    catch-up scan of the last 2 days of unread freight mail. Runs once
+    per ENABLE (the flag is reset by /api/web/standalone/enable), never
+    on a mere poller restart."""
+    lk = ctx["license_key"]
+    ids = _list_message_ids(service, _build_query(ctx["allowed_vehicles"], INITIAL_SCAN_WINDOW),
+                            INITIAL_SCAN_LIMIT)
+    license_db.set_standalone_initial_scan_done(lk, True)
+    if _can_send(ctx):
+        _tg_broadcast(ctx["bot_token"], ctx["chat_ids"],
+                      f"✅ Watching: {', '.join(ctx['allowed_vehicles'])}\n"
+                      f"Window: {INITIAL_SCAN_WINDOW}\n Delivery states: ALL")
+    activity_log.log_event(lk, "standalone_scan",
+                           f"Catch-up scan started: {len(ids)} unread message(s) in the last {INITIAL_SCAN_WINDOW}")
+    for mid in ids:
+        if not _is_seen(lk, mid):
+            _process_with_retry(ctx, service, label_map, mid)
 
 
 def run_one_license_cycle(license_key: str):
@@ -408,55 +625,51 @@ def run_one_license_cycle(license_key: str):
         logger.info(f"[{license_key}] skipped: no allowed vehicles configured")
         return
 
-    # Desktop/standalone mutual exclusion, 2026-09-25 — skip this
-    # license's ENTIRE cycle (not even a Gmail fetch) if a desktop is
-    # presently polling the same account, so the two never race on
-    # Gmail's own read/unread state. See license_db.py's
-    # desktop_poll_heartbeat column comment for the full background.
+    # Desktop/web mutual exclusion — skip the ENTIRE cycle (not even a
+    # Gmail call) while a desktop is polling this license; see header.
     if license_db.is_desktop_recently_active(license_key):
-        logger.info(f"[{license_key}] skipped: desktop app is actively polling this license")
+        _note_yield(license_key, True)
         return
+    _note_yield(license_key, False)
 
     try:
-        service = gmail_client.build_service(license_key)
+        service = _get_service(license_key)
     except GmailAuthError as e:
         logger.warning(f"[{license_key}] skipped: {e}")
         return
 
-    label_map = gmail_client.get_label_map(service)
-    query = _build_query(allowed_vehicles)
-    resp = service.users().messages().list(
-        userId="me", q=query, maxResults=MAX_RESULTS_PER_CYCLE
-    ).execute()
-
-    radius_miles = settings["max_radius_miles"] or DEFAULT_RADIUS_MILES
-    chat_ids = _parse_chat_ids(settings["chat_ids"])
-    bot_token = settings["bot_token"]
-
-    for msg in resp.get("messages", []):
-        try:
-            _process_message(service, label_map, msg["id"], license_key,
-                              allowed_vehicles, radius_miles, chat_ids, bot_token)
-        except Exception:
-            logger.error(f"[{license_key}] error processing message {msg['id']}:\n"
-                         f"{traceback.format_exc()}")
+    ctx = {
+        "license_key":      license_key,
+        "allowed_vehicles": allowed_vehicles,
+        "radius_miles":     settings["max_radius_miles"] or DEFAULT_RADIUS_MILES,
+        "chat_ids":         _parse_chat_ids(settings["chat_ids"]),
+        "bot_token":        settings["bot_token"],
+        "telegram_enabled": license_db.get_telegram_enabled(license_key),
+    }
+    try:
+        label_map = _get_label_map(license_key, service)
+        if not license_db.get_standalone_initial_scan_done(license_key):
+            _initial_scan(ctx, service, label_map)
+        for mid in _list_message_ids(service, _build_query(allowed_vehicles), MAX_RESULTS_PER_CYCLE):
+            if not _is_seen(license_key, mid):
+                _process_with_retry(ctx, service, label_map, mid)
+    except Exception:
+        _drop_service(license_key)   # rebuild credentials/service next cycle
+        raise
 
 
 def main():
     logger.info(f"poller starting — poll interval {POLL_INTERVAL_SECONDS}s")
     license_db.init_db()
     # zip_geocode warmed up before fleet_store — its truck-location
-    # backfill (2026-09-25) needs the offline geocoder already loaded.
+    # backfill needs the offline geocoder already loaded.
     zip_geocode.warmup()
     fleet_store.init_db()
     load_store.init_db()
     gmail_store.init_db()
-    # process_bid_email() (called via parse_email_for_api) reads from
-    # bid_history for rate recommendations — this process needs that
-    # table to exist regardless of whether mailbot-api has started yet
-    # or already created it (don't assume startup ordering). Same reason
-    # for route_cache_store below — parse_email_for_api's geocode/route
-    # calls now hit those tables directly (2026-09-25 multi-worker fix).
+    # process_bid_email() (via parse_email_for_api) reads bid_history and
+    # the geo/route cache tables — this process must create them itself
+    # rather than assume mailbot-api started first.
     bid_history.init_db()
     bid_history.init_processed_threads_table()
     route_cache_store.init_db()
@@ -467,8 +680,7 @@ def main():
         last_error = None
         try:
             _ensure_callback_listeners()
-            licenses = license_db.list_standalone_enabled_licenses()
-            for lic in licenses:
+            for lic in license_db.list_standalone_enabled_licenses():
                 try:
                     run_one_license_cycle(lic)
                     processed += 1

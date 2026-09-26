@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "activity_log.db")
+_KEEP_PER_LICENSE = 3000
 
 
 def _connect() -> sqlite3.Connection:
@@ -53,11 +54,22 @@ def log_event(license_key: str, event_type: str, message: str) -> None:
         return
     conn = _connect()
     try:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO events (license_key, event_type, message, created_at) "
             "VALUES (?, ?, ?, ?)",
             (license_key, event_type, message, datetime.now(timezone.utc).isoformat()),
         )
+        # The standalone poller now logs every parsed email (including
+        # skipped ones — the web equivalent of the desktop's live log
+        # panel), which is hundreds of rows an hour. Keep only the newest
+        # _KEEP_PER_LICENSE per license; checked once per ~100 inserts so
+        # it costs nothing on the hot path.
+        if cur.lastrowid and cur.lastrowid % 100 == 0:
+            conn.execute(
+                "DELETE FROM events WHERE license_key=? AND id NOT IN "
+                "(SELECT id FROM events WHERE license_key=? ORDER BY id DESC LIMIT ?)",
+                (license_key, license_key, _KEEP_PER_LICENSE),
+            )
         conn.commit()
     finally:
         conn.close()

@@ -111,26 +111,38 @@ def get_label_map(service) -> dict:
     return {lbl["id"]: lbl["name"] for lbl in resp.get("labels", [])}
 
 
-def get_thread_label_names(service, thread_id: str, label_map: dict) -> list:
-    """Every non-system label name anywhere in this thread — ported from
-    the desktop's _get_thread_info()/_get_thread_label_names(), simplified
-    to just the names (the desktop also returns the thread's subject, used
-    there only for its own Telegram "labeled thread" notification, which
-    poller.py doesn't send — see roadmap on the deliberately-simplified
-    notification scope)."""
+def get_thread_info(service, thread_id: str, label_map: dict) -> tuple:
+    """(label_names, subject) — every non-system label name anywhere in
+    this thread plus the thread's first non-empty subject. Ported
+    verbatim from the desktop's _get_thread_info() (2026-09-26 — the
+    subject is what the labeled-thread Telegram ping extracts state
+    codes from)."""
     try:
         thread = service.users().threads().get(
             userId="me", id=thread_id, format="metadata",
             metadataHeaders=["Subject"],
         ).execute()
         found = set()
+        subject = ""
         for msg in thread.get("messages", []):
             for lid in msg.get("labelIds", []):
                 if lid not in _SYSTEM_LABEL_IDS and not lid.startswith("CATEGORY_"):
                     found.add(lid)
-        return [label_map.get(lid, lid) for lid in found]
+            if not subject:
+                for h in msg.get("payload", {}).get("headers", []):
+                    if h.get("name", "").lower() == "subject":
+                        v = h.get("value", "").strip()
+                        if v:
+                            subject = v
+                            break
+        return [label_map.get(lid, lid) for lid in found], subject
     except Exception:
-        return []
+        return [], ""
+
+
+def get_thread_label_names(service, thread_id: str, label_map: dict) -> list:
+    names, _ = get_thread_info(service, thread_id, label_map)
+    return names
 
 
 def has_custom_labels(label_ids) -> bool:

@@ -80,6 +80,16 @@ def init_db():
         conn.execute("ALTER TABLE licenses ADD COLUMN desktop_poll_heartbeat TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Web version parity with the desktop's START (2026-09-26): the
+    # desktop does a one-time catch-up scan of the last 2 days of unread
+    # mail (plus a "Watching" Telegram message) every time it starts.
+    # This flag is reset to 0 whenever standalone mode is ENABLED and set
+    # to 1 by poller.py once that scan + message have been done, so the
+    # scan runs exactly once per enable, never on every poller restart.
+    try:
+        conn.execute("ALTER TABLE licenses ADD COLUMN standalone_initial_scan_done INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -249,6 +259,25 @@ def set_standalone_mode_enabled(key: str, enabled: bool) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def get_standalone_initial_scan_done(key: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    val = conn.execute(
+        'SELECT standalone_initial_scan_done FROM licenses WHERE key=?', (key,)
+    ).fetchone()
+    conn.close()
+    return bool(val[0]) if val and val[0] is not None else False
+
+
+def set_standalone_initial_scan_done(key: str, done: bool) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE licenses SET standalone_initial_scan_done=? WHERE key=?',
+        (1 if done else 0, key)
+    )
+    conn.commit()
+    conn.close()
 
 
 def record_desktop_poll_heartbeat(key: str) -> bool:

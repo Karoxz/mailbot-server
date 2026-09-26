@@ -1169,9 +1169,17 @@ def web_standalone_enable(req: WebLoginRequest):
         )
 
     license_db.set_standalone_mode_enabled(req.license_key, True)
+    # Mirrors the desktop's START button (2026-09-26): it forces Telegram
+    # notifications ON and turns thread learning ON server-side, and its
+    # startup does a one-time catch-up scan + "Watching" message — the
+    # flag below makes poller.py do exactly that once per enable.
+    license_db.set_telegram_enabled(req.license_key, True)
+    license_db.set_thread_learning_enabled(req.license_key, True)
+    license_db.set_standalone_initial_scan_done(req.license_key, False)
     logger.info(f"[WEB] standalone mode ENABLED for {req.license_key}")
     activity_log.log_event(req.license_key, "standalone_enabled", "Standalone mode enabled")
-    return {"success": True, "enabled": True}
+    return {"success": True, "enabled": True,
+            "desktop_active": license_db.is_desktop_recently_active(req.license_key)}
 
 
 @app.post("/api/web/standalone/disable")
