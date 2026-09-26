@@ -1252,6 +1252,14 @@ def web_standalone_enable(req: WebLoginRequest):
                    "unpredictably split between the desktop and standalone mode.",
         )
 
+    if (license_db.is_known_desktop_driver_token(settings.get("driver_bot_token", ""))
+            or license_db.is_known_desktop_token(settings.get("driver_bot_token", ""))):
+        raise HTTPException(
+            status_code=400,
+            detail="The web driver bot token is one of the desktop app's own tokens — set a "
+                   "separate driver bot token first (Settings).",
+        )
+
     license_db.set_standalone_mode_enabled(req.license_key, True)
     # Mirrors the desktop's START button (2026-09-26): it forces Telegram
     # notifications ON and turns thread learning ON server-side, and its

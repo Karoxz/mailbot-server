@@ -182,3 +182,4 @@ class WebStandaloneSettings(BaseModel):
     max_radius_miles:          Optional[int] = None
     chat_ids:                  Optional[str] = None  # comma-separated
     bot_token:                 Optional[str] = None
+    driver_bot_token:          Optional[str] = None  # web driver bot (separate bot)

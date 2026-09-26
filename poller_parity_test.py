@@ -683,6 +683,193 @@ def _():
         cleanup_license()
 
 
+# ── 7. driver bot (desktop: client/driver_bot.py) ─────────────────────
+import driver_bot_web
+import tg_notify
+
+DTOKEN = "777:driver-test-token"
+
+
+class DriverCapture:
+    def __init__(self):
+        self.calls, self.n = [], 100
+
+    def __call__(self, token, method, payload, timeout=10):
+        self.calls.append((token, method, payload))
+        self.n += 1
+        return {"ok": True, "result": {"message_id": self.n}}
+
+    def sent(self):
+        return [(p["chat_id"], p["text"], p.get("reply_markup")) for _, m, p in self.calls if m == "sendMessage"]
+
+
+dcap = DriverCapture()
+driver_bot_web._api = dcap
+fwd = []
+tg_notify.send_to_license = lambda lk, text, keyboard=None, respect_enabled=True: fwd.append(
+    (lk, text, keyboard, respect_enabled)) or 1
+
+FORMATTED = ("📦 New Load\n🤝 Broker: ACME\nName: Bob\nPhone: 555\nEmail: b@x.com\n"
+             "Pickup: Cleveland, OH\nDelivery: Columbus, OH")
+
+
+def driver_fleet():
+    fleet_store.add_truck(LK, "LARGE STRAIGHT", "ALEX", "44101", telegram_chat_id=111)
+    fleet_store.add_truck(LK, "SMALL STRAIGHT", "BEN", "44101", telegram_chat_id=222)
+    fleet_store.add_truck(LK, "LARGE STRAIGHT", "CARL", "44101")             # no driver chat
+
+
+def cleanup_trucks():
+    c = sqlite3.connect(fleet_store.DB_PATH)
+    c.execute("DELETE FROM trucks WHERE license_key=?", (LK,))
+    c.commit()
+    c.close()
+
+
+def dreset():
+    dcap.calls.clear()
+    fwd.clear()
+    driver_bot_web._PENDING.clear()
+
+
+LOAD = {"order": "555", "vehicle_required": "LARGE STRAIGHT", "pickup_loc": "Cleveland, OH",
+        "delivery_loc": "Columbus, OH", "google_deadhead": 10, "route_url": "https://maps.example/r",
+        "broker_name": "ACME", "broker_email": "b@x.com", "formatted_message": FORMATTED,
+        "original_msg_full": {"threadId": "th9", "id": "mid9"}}
+
+
+@test("driver bot: card only to drivers with a chat ID whose vehicle fits; desktop card text, BID + ROUTE buttons")
+def _():
+    dreset()
+    driver_fleet()
+    try:
+        n = driver_bot_web.notify_drivers(LK, DTOKEN, "555", LOAD, FORMATTED)
+        assert n == 1
+        chat, text, kb = dcap.sent()[0]
+        assert chat == 111
+        assert text.startswith("👤 ALEX\n" + "─" * 30 + "\n")
+        for excluded in ("Broker", "Name:", "Phone:", "Email:"):
+            assert excluded not in text, excluded
+        assert "Pickup: Cleveland, OH" in text
+        kbd = json.loads(kb)["inline_keyboard"][0]
+        assert kbd[0] == {"text": "💰 BID", "callback_data": "driverbid:555:ALEX"}
+        assert kbd[1] == {"text": "🚩 ROUTE", "url": "https://maps.example/r"}
+    finally:
+        cleanup_trucks()
+
+
+@test("driver taps BID: answered + ForceReply rate prompt; rate reply is parsed, forwarded to the dispatcher with BID PC/PHONE/DRAFT, bid recorded WITH the amount, driver confirmed")
+def _():
+    dreset()
+    seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r")
+    try:
+        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"}}
+        driver_bot_web.handle_callback_query(LK, DTOKEN, cq)
+        ans = [p for _, m, p in dcap.calls if m == "answerCallbackQuery"][0]
+        assert ans["text"] == "💰 Enter your rate below"
+        chat, text, kb = dcap.sent()[0]
+        assert text == "💰 Order #555\nType your rate (numbers only):\nExample:  1400"
+        assert json.loads(kb) == {"force_reply": True, "selective": True}
+        prompt_id = driver_bot_web._PENDING[(DTOKEN, 111, "555")]["prompt_msg_id"]
+
+        dcap.calls.clear()
+        driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "abc",
+                                                   "reply_to_message": {"message_id": prompt_id}})
+        assert dcap.sent()[0][1].startswith('⚠️ Could not read your rate from "abc".')
+        assert not fwd and (DTOKEN, 111, "555") in driver_bot_web._PENDING       # still waiting
+
+        dcap.calls.clear()
+        driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "$1,400.00",
+                                                   "reply_to_message": {"message_id": prompt_id}})
+        lk, ftext, rows, respect = fwd[0]
+        assert lk == LK and respect is False                                     # bypasses the Telegram on/off flag
+        assert ftext == "💰 ALEX — Rate: $1,400\n" + "─" * 30 + "\n" + FORMATTED
+        assert [b["callback_data"] for b in rows[0]] == ["bid:555", "phone:555", "text:555"]
+        assert rows[1] == [{"text": "🚩 ROUTE 🚩", "url": "https://maps.example/r"}]
+        assert dcap.sent()[0][1] == "✅ Bid of $1,400 sent to dispatcher!\nOrder #555"
+        b = bid_history.get_bids_for_order(LK, "555")[0]
+        assert b["bid_method"] == "driver_bot" and b["driver_name"] == "ALEX" and b["bid_amount"] == 1400.0
+        assert (DTOKEN, 111, "555") not in driver_bot_web._PENDING
+    finally:
+        cleanup_loads()
+
+
+@test("driver BID after a poller restart (no in-memory state): load + message come back from the persistent store")
+def _():
+    dreset()
+    seed_load("555", mid="mid9", formatted_message=FORMATTED)
+    try:
+        driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:555:ALEX", "from": {"id": 111}})
+        driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "1400"})    # plain reply, no reply_to
+        assert fwd and "Rate: $1400" in fwd[0][1] and FORMATTED in fwd[0][1]
+    finally:
+        cleanup_loads()
+
+
+@test("driver replies for a load we no longer have: told to contact the dispatcher; rate parsing variants")
+def _():
+    dreset()
+    driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:999:ALEX", "from": {"id": 111}})
+    dcap.calls.clear()
+    driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "1400"})
+    assert "Load #999 data not found" in dcap.sent()[0][1] and not fwd
+    for raw, want in (("1400", "1400"), ("$1400", "1400"), ("1,400", "1,400"),
+                      ("$1,400.00", "1,400"), ("1400.00", "1400"), ("about 950 bucks", "950")):
+        assert driver_bot_web.parse_rate(raw) == want, raw
+    assert driver_bot_web.parse_rate("no numbers") is None
+
+
+@test("driver bot tokens: can't be the desktop's tokens or the same as the dispatcher token")
+def _():
+    enable_license()
+    try:
+        desk_driver = next(iter(license_db.KNOWN_DESKTOP_DRIVER_BOT_TOKENS))
+        desk_disp = next(iter(license_db.KNOWN_DESKTOP_BOT_TOKENS))
+        for bad in (desk_driver, desk_disp):
+            try:
+                license_db.set_standalone_settings(LK, driver_bot_token=bad)
+                assert False, "should have been rejected"
+            except ValueError:
+                pass
+        try:
+            license_db.set_standalone_settings(LK, bot_token=desk_driver)
+            assert False, "dispatcher token = desktop driver token must be rejected"
+        except ValueError:
+            pass
+        try:                                        # same as the dispatcher token already stored (BOT)
+            license_db.set_standalone_settings(LK, driver_bot_token=BOT)
+            assert False, "driver token = dispatcher token must be rejected"
+        except ValueError:
+            pass
+        license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
+        assert license_db.get_standalone_settings(LK)["driver_bot_token"] == DTOKEN
+    finally:
+        cleanup_license()
+
+
+@test("poller: a matched load notifies drivers (formatted message persisted on the load); no driver token -> no driver traffic")
+def _():
+    dreset()
+    seed_load("555", mid="mid9")
+    calls = []
+    orig = driver_bot_web.notify_drivers
+    driver_bot_web.notify_drivers = lambda *a: calls.append(a)
+    try:
+        res = {"success": True, "formatted": "FMT", "order_id": "555", "load_data": {"vehicle_required": "LARGE STRAIGHT"}}
+        poller._notify_drivers_async(fresh_ctx(driver_bot_token=DTOKEN), res)
+        for t in __import__("threading").enumerate():
+            if t.name == "driver-notify":
+                t.join(2)
+        assert calls and calls[0][:3] == (LK, DTOKEN, "555") and calls[0][4] == "FMT"
+        assert load_store.get_load(LK, "555")["formatted_message"] == "FMT"
+        calls.clear()
+        poller._notify_drivers_async(fresh_ctx(driver_bot_token=""), res)
+        assert not calls
+    finally:
+        driver_bot_web.notify_drivers = orig
+        cleanup_loads()
+
+
 # ── run ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print()

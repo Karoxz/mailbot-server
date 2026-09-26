@@ -121,8 +121,12 @@
       <div class="field"><label>Max radius (miles)</label><input id="sa-radius" type="number" placeholder="e.g. 300"></div>
       <div class="field"><label>Telegram chat IDs (comma-separated)</label><input id="sa-chatids" placeholder="e.g. 123456789"></div>
       <div class="field"><label>Telegram bot token</label><input id="sa-bottoken" type="password" placeholder="paste bot token"></div>
+      <div class="field"><label>Driver bot token (optional)</label><input id="sa-drivertoken" type="password" placeholder="a separate bot for your drivers"></div>
     </div>
     <p class="note-text" style="color:var(--warn);padding-top:0;">⚠ Must be a <em>different</em> bot from the one the desktop app (PlutusBot.exe) uses. Don't paste the same token you use there — if both run at once with the same bot, Telegram replies get unpredictably split between the two. Create a separate bot via @BotFather if you don't have one.</p>
+    <p class="note-text" style="padding-top:0;"><strong>Driver bot (optional):</strong> a second, separate bot your drivers message. Give each truck a
+      driver Telegram chat ID on the Trucks page; drivers then get a load card with a 💰 BID button, type their rate, and it's forwarded to you
+      with the BID PC / BID PHONE / DRAFT buttons. It must be a different bot from both the dispatcher bot above and the desktop app's driver bot.</p>
     <div class="form-actions" style="padding:0 18px 16px;">
       <button id="sa-save-btn" class="btn" type="button">Save settings</button>
     </div>
@@ -400,6 +404,7 @@ const saRadius   = document.getElementById("sa-radius");
 const saChatIds  = document.getElementById("sa-chatids");
 const saBotToken = document.getElementById("sa-bottoken");
 const saSaveBtn  = document.getElementById("sa-save-btn");
+const saDriverToken = document.getElementById("sa-drivertoken");
 const saStatus   = document.getElementById("sa-status");
 const saToggle   = document.getElementById("sa-toggle");
 const saHint     = document.getElementById("sa-hint");
@@ -444,6 +449,7 @@ async function loadStandaloneSettings() {
     saRadius.value = res.max_radius_miles ?? "";
     saChatIds.value = res.chat_ids || "";
     saBotToken.value = res.bot_token || "";
+    saDriverToken.value = res.driver_bot_token || "";
     saHasVehicles = !!(res.allowed_vehicles || "").trim();
     saEnabled = !!res.standalone_mode_enabled;
     renderSaState();
@@ -463,6 +469,7 @@ saSaveBtn.addEventListener("click", async () => {
       max_radius_miles: saRadius.value ? Number(saRadius.value) : null,
       chat_ids: saChatIds.value.trim(),
       bot_token: saBotToken.value.trim(),
+      driver_bot_token: saDriverToken.value.trim(),
     });
     showToast("Standalone settings saved");
     await loadStandaloneSettings();

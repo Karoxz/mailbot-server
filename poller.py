@@ -62,6 +62,7 @@ import activity_log
 import zip_geocode
 import desktop_parity
 import reply_handler
+import driver_bot_web
 from gmail_client import GmailAuthError
 from parser_core import parse_email_for_api, extract_text_from_full_message
 
@@ -372,6 +373,12 @@ def _ensure_callback_listeners():
                                  daemon=True, name=f"tg-callback-{token[-6:]}")
             t.start()
             _callback_threads[token] = t
+        dtoken = settings and settings.get("driver_bot_token")
+        if dtoken and dtoken not in _callback_threads:
+            t = threading.Thread(target=driver_bot_web.run_loop, args=(dtoken, lic),
+                                 daemon=True, name=f"tg-driver-{dtoken[-6:]}")
+            t.start()
+            _callback_threads[dtoken] = t
 
 
 def _parse_chat_ids(chat_ids_csv: str) -> list:
@@ -524,7 +531,36 @@ def _safe_mark_read(ctx: dict, service, msg_id: str, thread_id: str, label_map: 
     gmail_client.mark_as_read(service, msg_id)
 
 
+def _notify_drivers_async(ctx: dict, result: dict):
+    """Desktop's driver-bot notify (after the dispatcher send, independent
+    of whether that send succeeded): every eligible driver with a Telegram
+    chat ID gets a card. The formatted message is stored on the persisted
+    load so a driver's BID tap still works after a poller restart."""
+    token = ctx.get("driver_bot_token")
+    order_id = result.get("order_id")
+    if not token or not order_id:
+        return
+    lk = ctx["license_key"]
+    load_data = result.get("load_data") or {}
+    try:
+        stored = load_store.get_load(lk, order_id)
+        if stored is not None:
+            stored["formatted_message"] = result.get("formatted", "")
+            load_store.put_load(lk, order_id, stored)
+    except Exception as e:
+        logger.warning(f"[{lk}] could not persist formatted message for driver bot: {e}")
+    threading.Thread(target=driver_bot_web.notify_drivers,
+                     args=(lk, token, order_id, load_data, result.get("formatted", "")),
+                     daemon=True, name="driver-notify").start()
+
+
 def _deliver_load(ctx: dict, result: dict, thread_id: str) -> str:
+    outcome = _deliver_to_dispatcher(ctx, result, thread_id)
+    _notify_drivers_async(ctx, result)
+    return outcome
+
+
+def _deliver_to_dispatcher(ctx: dict, result: dict, thread_id: str) -> str:
     lk = ctx["license_key"]
     load_data = result.get("load_data") or {}
     order_id = result.get("order_id")
@@ -771,6 +807,7 @@ def run_one_license_cycle(license_key: str):
         "radius_miles":     settings["max_radius_miles"] or DEFAULT_RADIUS_MILES,
         "chat_ids":         _parse_chat_ids(settings["chat_ids"]),
         "bot_token":        settings["bot_token"],
+        "driver_bot_token": settings.get("driver_bot_token", ""),
         "telegram_enabled": license_db.get_telegram_enabled(license_key),
     }
     try:

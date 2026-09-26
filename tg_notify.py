@@ -20,9 +20,11 @@ import license_db
 logger = logging.getLogger("tg_notify")
 
 
-def send_to_license(license_key: str, text: str, keyboard=None) -> int:
-    """Returns how many chats were successfully messaged."""
-    if not license_db.get_telegram_enabled(license_key):
+def send_to_license(license_key: str, text: str, keyboard=None, respect_enabled: bool = True) -> int:
+    """Returns how many chats were successfully messaged.
+    respect_enabled=False bypasses the license's Telegram on/off flag —
+    the desktop's driver-bot forwards do the same."""
+    if respect_enabled and not license_db.get_telegram_enabled(license_key):
         return 0
     s = license_db.get_standalone_settings(license_key) or {}
     token = s.get("bot_token")

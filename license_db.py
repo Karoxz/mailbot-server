@@ -53,6 +53,10 @@ def init_db():
         ('standalone_max_radius_miles', 'INTEGER'),
         ('standalone_chat_ids',         "TEXT DEFAULT ''"),
         ('standalone_bot_token',        "TEXT DEFAULT ''"),
+        # Web driver bot (2026-09-26): this license's OWN driver-bot token,
+        # separate from the dispatcher bot token above and never the
+        # desktop's hardcoded driver token (see KNOWN_DESKTOP_DRIVER_BOT_TOKENS).
+        ('standalone_driver_bot_token',  "TEXT DEFAULT ''"),
     ]:
         try:
             conn.execute(f'ALTER TABLE licenses ADD COLUMN {_col} {_decl}')
@@ -166,19 +170,21 @@ def get_standalone_settings(key: str) -> Optional[dict]:
     conn = sqlite3.connect(DB_PATH)
     val = conn.execute(
         '''SELECT standalone_mode_enabled, standalone_allowed_vehicles,
-                  standalone_max_radius_miles, standalone_chat_ids, standalone_bot_token
+                  standalone_max_radius_miles, standalone_chat_ids, standalone_bot_token,
+                  standalone_driver_bot_token
            FROM licenses WHERE key=?''', (key,)
     ).fetchone()
     conn.close()
     if not val:
         return None
-    enabled, vehicles, radius, chat_ids, bot_token = val
+    enabled, vehicles, radius, chat_ids, bot_token, driver_bot_token = val
     return {
         'standalone_mode_enabled': bool(enabled),
         'allowed_vehicles':        vehicles or '',
         'max_radius_miles':        radius,
         'chat_ids':                chat_ids or '',
         'bot_token':               bot_token or '',
+        'driver_bot_token':        driver_bot_token or '',
     }
 
 
@@ -197,8 +203,20 @@ KNOWN_DESKTOP_BOT_TOKENS = {
 }
 
 
+# The desktop's hardcoded DRIVER bot token (client/main copy.py's
+# DRIVER_BOT_TOKEN). The web driver bot must use its own token so the two
+# never long-poll the same bot; update on the next desktop rotation.
+KNOWN_DESKTOP_DRIVER_BOT_TOKENS = {
+    "8371628317:AAFa9yNDSfT_aks_OPYn_GQPchuEwOGuxt8",
+}
+
+
 def is_known_desktop_token(token: str) -> bool:
     return bool(token) and token.strip() in KNOWN_DESKTOP_BOT_TOKENS
+
+
+def is_known_desktop_driver_token(token: str) -> bool:
+    return bool(token) and token.strip() in KNOWN_DESKTOP_DRIVER_BOT_TOKENS
 
 
 def set_standalone_settings(key: str, **fields) -> bool:
@@ -212,14 +230,34 @@ def set_standalone_settings(key: str, **fields) -> bool:
             "needs its own separate bot. Create a new bot via @BotFather "
             "and use that token here instead."
         )
+    if 'driver_bot_token' in fields and fields['driver_bot_token']:
+        dt = fields['driver_bot_token'].strip()
+        if is_known_desktop_driver_token(dt) or is_known_desktop_token(dt):
+            raise ValueError(
+                "This is one of the desktop app's own bot tokens — the web driver bot "
+                "needs its own separate bot. Create a new bot via @BotFather and use "
+                "that token here instead."
+            )
+        other = (fields.get('bot_token') if 'bot_token' in fields
+                 else (get_standalone_settings(key) or {}).get('bot_token'))
+        if other and other.strip() == dt:
+            raise ValueError(
+                "The driver bot token must be a DIFFERENT bot from the dispatcher bot token."
+            )
+    if 'bot_token' in fields and fields['bot_token'] and is_known_desktop_driver_token(fields['bot_token']):
+        raise ValueError(
+            "This is the desktop app's driver bot token — standalone mode needs its own "
+            "separate bot. Create a new bot via @BotFather and use that token here instead."
+        )
     row = _get_row(key)
     if not row:
         return False
     col_map = {
-        'allowed_vehicles': 'standalone_allowed_vehicles',
-        'max_radius_miles': 'standalone_max_radius_miles',
-        'chat_ids':         'standalone_chat_ids',
-        'bot_token':        'standalone_bot_token',
+        'allowed_vehicles':  'standalone_allowed_vehicles',
+        'max_radius_miles':  'standalone_max_radius_miles',
+        'chat_ids':          'standalone_chat_ids',
+        'bot_token':         'standalone_bot_token',
+        'driver_bot_token':  'standalone_driver_bot_token',
     }
     sets, values = [], []
     for k, v in fields.items():
