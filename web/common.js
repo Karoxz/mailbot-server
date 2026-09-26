@@ -440,6 +440,9 @@
       </a>
       <nav class="topnav">${links}</nav>
       <div class="topbar-actions">
+        <button id="bot-chip" class="bot-chip" type="button" title="Web bot (the server-side version of the desktop's START/STOP)">
+          <span class="bot-dot"></span><span class="bot-label">Web bot…</span>
+        </button>
         <span id="conn-dot" class="dot" title="Connection status"></span>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" type="button">🌙</button>
         <button id="logout-btn" class="icon-btn" title="Log out" type="button">⎋</button>
@@ -456,6 +459,7 @@
       clearLicenseKey();
       window.location.href = "login.html";
     });
+    initBotChip();
 
     const drawer = document.getElementById("nav-drawer");
     const backdrop = document.getElementById("nav-drawer-backdrop");
@@ -470,6 +474,88 @@
     backdrop.addEventListener("click", closeDrawer);
     drawer.querySelectorAll("a").forEach((a) => a.addEventListener("click", closeDrawer));
   }
+  // ── Web bot ON/OFF chip (the web version's START / STOP) ─────────────
+  // Lives in the top bar on every page. ON = the server-side engine is
+  // reading this license's Gmail and notifying Telegram; PAUSED = it is
+  // ON but yielding because the desktop app is running on the same
+  // license (they take turns automatically, never both); OFF = stopped.
+  let _bot = { enabled: false, desktop_active: false, loaded: false };
+
+  function toast(msg, isError) {
+    let t = document.getElementById("mb-toast");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "mb-toast";
+      t.className = "mb-toast";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.toggle("error", !!isError);
+    t.classList.add("show");
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove("show"), 4000);
+  }
+
+  function renderBotChip() {
+    const chip = document.getElementById("bot-chip");
+    if (!chip) return;
+    const label = chip.querySelector(".bot-label");
+    chip.classList.remove("on", "off", "paused");
+    if (!_bot.loaded) { label.textContent = "Web bot…"; return; }
+    if (_bot.enabled && _bot.desktop_active) {
+      chip.classList.add("paused");
+      label.textContent = "Web bot paused — desktop running";
+      chip.title = "The web bot is ON but paused because the desktop app is running on this license. It resumes automatically about a minute after the desktop stops. Click to turn it OFF.";
+    } else if (_bot.enabled) {
+      chip.classList.add("on");
+      label.textContent = "Web bot ON";
+      chip.title = "The web bot is running (reading Gmail, notifying Telegram). Click to turn it OFF.";
+    } else {
+      chip.classList.add("off");
+      label.textContent = "Web bot OFF";
+      chip.title = "The web bot is stopped. Click to turn it ON.";
+    }
+  }
+
+  async function refreshBotChip() {
+    try {
+      const s = await apiGet("/api/web/standalone/settings");
+      _bot = { enabled: !!s.standalone_mode_enabled, desktop_active: !!s.desktop_active, loaded: true };
+    } catch (e) { /* leave the last known state; auth errors are handled per-page */ }
+    renderBotChip();
+  }
+
+  async function toggleBot() {
+    const chip = document.getElementById("bot-chip");
+    if (!_bot.loaded || chip.disabled) return;
+    if (!_bot.enabled && _bot.desktop_active &&
+        !confirm("The desktop app is running on this license right now. The web bot will stay paused until the desktop stops, then take over automatically. Turn it ON anyway?")) {
+      return;
+    }
+    chip.disabled = true;
+    try {
+      const res = await apiPost(_bot.enabled ? "/api/web/standalone/disable" : "/api/web/standalone/enable", {});
+      _bot.enabled = !!res.enabled;
+      if (res.desktop_active !== undefined) _bot.desktop_active = !!res.desktop_active;
+      toast(_bot.enabled ? "Web bot turned ON" : "Web bot turned OFF");
+    } catch (err) {
+      toast(err.message || "Couldn't change the web bot", true);
+    } finally {
+      chip.disabled = false;
+      renderBotChip();
+      refreshBotChip();
+    }
+  }
+
+  function initBotChip() {
+    const chip = document.getElementById("bot-chip");
+    if (!chip) return;
+    chip.addEventListener("click", toggleBot);
+    renderBotChip();
+    refreshBotChip();
+    setInterval(refreshBotChip, 15000);
+  }
+
   function setConn(ok) {
     const dot = document.getElementById("conn-dot");
     if (!dot) return;
@@ -484,6 +570,6 @@
     esc, fmtMoney, fmtRate, fmtPct, fmtWhen,
     renderTopbar, setConn, showFatalError, gmailSearchUrl,
     diffRender, skeletonCards, skeletonRows, popIn,
-    filterSortPaginate, mountListControls, exportCsv,
+    filterSortPaginate, mountListControls, exportCsv, toast,
   };
 })();

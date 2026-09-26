@@ -14,15 +14,19 @@
 <main class="content">
   <div class="page-toolbar">
     <h1>Activity</h1>
-    <span class="hint">Live feed of bids, brokers, Gmail, and standalone-mode events · auto-refreshing</span>
+    <span class="hint">The web bot's live log — the equivalent of the desktop's log panel · auto-refreshing</span>
   </div>
 
   <section class="panel">
+    <div id="activity-controls"></div>
+    <div class="list-controls" style="border-top:0;padding-top:0;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:.85rem;color:var(--text-dim);cursor:pointer;">
+        <input type="checkbox" id="show-skipped"> Show skipped loads (non-matching emails — high volume)
+      </label>
+    </div>
     <div id="activity-list" class="feed-list"></div>
   </section>
 </main>
-
-<div id="toast"></div>
 
 <script src="common.js"></script>
 <script>
@@ -34,15 +38,41 @@ MB.renderTopbar("activity.html");
 const EVENT_ICON = {
   bid_recorded:          "💰",
   bid_won:               "🏆",
+  bid_outcome:           "📊",
   broker_blacklisted:    "🚫",
   broker_unblacklisted:  "✅",
   backfill_run:          "🔄",
+  thread_learning:       "🧠",
   gmail_connected:       "📧",
   gmail_disconnected:    "📪",
   standalone_enabled:    "▶️",
   standalone_disabled:   "⏸️",
+  standalone_scan:       "🔎",
+  web_paused:            "⏸️",
+  web_resumed:           "▶️",
   load_matched:          "📦",
+  load_skipped:          "⏭️",
+  labeled_ping:          "📌",
+  send_failed:           "❌",
+  poller_error:          "⚠️",
 };
+
+let allEvents = [];
+const controls = MB.mountListControls(document.getElementById("activity-controls"), {
+  searchPlaceholder: "Search the log (order #, broker, event…)",
+  onChange: applyFilters,
+});
+document.getElementById("show-skipped").addEventListener("change", applyFilters);
+
+function applyFilters() {
+  const showSkipped = document.getElementById("show-skipped").checked;
+  const base = showSkipped ? allEvents : allEvents.filter((e) => e.event_type !== "load_skipped");
+  const result = MB.filterSortPaginate(base, {
+    searchTerm: controls.searchTerm,
+    searchFields: ["message", "event_type"],
+  });
+  renderActivity(result.items);
+}
 
 function renderActivity(items) {
   const el = document.getElementById("activity-list");
@@ -60,8 +90,9 @@ function renderActivity(items) {
 
 async function refresh() {
   try {
-    const res = await MB.apiGet("/api/web/activity", { limit: 100 });
-    renderActivity(res.items);
+    const res = await MB.apiGet("/api/web/activity", { limit: 500 });
+    allEvents = res.items;
+    applyFilters();
     MB.setConn(true);
   } catch (err) {
     MB.setConn(false);
@@ -72,7 +103,7 @@ async function refresh() {
 document.getElementById("activity-list").innerHTML = MB.skeletonCards(4);
 
 refresh();
-setInterval(refresh, 10000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>

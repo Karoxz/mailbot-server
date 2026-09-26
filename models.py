@@ -132,6 +132,7 @@ class WebTruckIn(BaseModel):
     # them per truck).
     loaded_miles_min: Optional[int] = None
     loaded_miles_max: Optional[int] = None
+    telegram_chat_id: Optional[int] = None   # driver's own chat (web driver bot)
 
 
 class WebTruckUpdate(BaseModel):
@@ -147,6 +148,7 @@ class WebTruckUpdate(BaseModel):
     radius_miles:    Optional[int] = None
     loaded_miles_min: Optional[int] = None
     loaded_miles_max: Optional[int] = None
+    telegram_chat_id: Optional[int] = None
     active:          Optional[bool] = None
 
 

@@ -130,6 +130,11 @@
       <span id="sa-status" style="font-weight:600;">Loading…</span>
       <button id="sa-toggle" class="btn btn-primary" type="button" disabled>…</button>
     </div>
+    <p class="note-text"><strong>Web bot and desktop app take turns automatically.</strong> You can connect the same Gmail
+      account to both. While the desktop app is running (after START) the web bot pauses by itself and shows
+      "paused — desktop running"; about a minute after you stop the desktop, the web bot takes over again. They never
+      run at the same time, so they can't fight over the same emails. (The web bot turns Telegram notifications and
+      thread learning ON when you enable it, just like the desktop's START button.)</p>
     <p id="sa-hint" class="note-text"></p>
     <p id="sa-poller-status" class="note-text" style="padding-top:0;"></p>
   </section>

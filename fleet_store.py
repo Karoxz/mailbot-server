@@ -115,6 +115,13 @@ def init_db():
                 conn.execute(f'ALTER TABLE trucks ADD COLUMN {_col} REAL')
             except sqlite3.OperationalError:
                 pass
+        # Driver's own Telegram chat ID (desktop truck-line field 10,
+        # 2026-09-26 web parity) — used by the web driver bot; NULL means
+        # "this driver isn't on the driver bot".
+        try:
+            conn.execute('ALTER TABLE trucks ADD COLUMN telegram_chat_id INTEGER')
+        except sqlite3.OperationalError:
+            pass
         rows = conn.execute(
             "SELECT id, zip_location FROM trucks WHERE lat IS NULL AND zip_location IS NOT NULL AND zip_location != ''"
         ).fetchall()
@@ -194,7 +201,8 @@ def add_truck(license_key: str, vehicle: str, driver_name: str, zip_location: st
               equipment: str = "", allowed_states: Optional[list] = None,
               pickup_date: str = "", radius_miles: Optional[int] = None,
               loaded_miles_min: Optional[int] = None,
-              loaded_miles_max: Optional[int] = None) -> int:
+              loaded_miles_max: Optional[int] = None,
+              telegram_chat_id: Optional[int] = None) -> int:
     now = _now()
     coords = zip_geocode.lookup(zip_location.strip()) or [None, None]
     conn = _connect()
@@ -202,13 +210,14 @@ def add_truck(license_key: str, vehicle: str, driver_name: str, zip_location: st
         cur = conn.execute(
             '''INSERT INTO trucks (license_key, vehicle, driver_name, dimensions, max_payload_lbs,
                 equipment, allowed_states, zip_location, pickup_date, radius_miles,
-                loaded_miles_min, loaded_miles_max, lat, lon, active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)''',
+                loaded_miles_min, loaded_miles_max, lat, lon, telegram_chat_id,
+                active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)''',
             (license_key, vehicle.upper().strip(), driver_name.strip(), dimensions.strip(),
              max_payload_lbs, equipment.strip(),
              json.dumps(allowed_states) if allowed_states else None,
              zip_location.strip(), pickup_date.strip(), radius_miles,
-             loaded_miles_min, loaded_miles_max, coords[0], coords[1], now, now)
+             loaded_miles_min, loaded_miles_max, coords[0], coords[1], telegram_chat_id, now, now)
         )
         conn.commit()
         assert cur.lastrowid is not None
@@ -226,7 +235,8 @@ def update_truck(license_key: str, truck_id: int, **fields) -> bool:
         return False
     allowed_cols = {"vehicle", "driver_name", "dimensions", "max_payload_lbs",
                      "equipment", "allowed_states", "zip_location", "pickup_date",
-                     "radius_miles", "loaded_miles_min", "loaded_miles_max", "active"}
+                     "radius_miles", "loaded_miles_min", "loaded_miles_max", "telegram_chat_id",
+                     "active"}
     sets, params = [], []
     for k, v in fields.items():
         if k not in allowed_cols:

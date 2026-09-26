@@ -39,6 +39,7 @@ import route_calibration
 import zip_geocode
 import activity_log
 import tg_notify
+import truck_lines
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -577,7 +578,7 @@ def classify_reply(req: ClassifyReplyRequest):
 
 
 # =============================================================
-# WEB DASHBOARD API  — read-only for now (Phase W, MVP slice 1)
+# WEB DASHBOARD API (Phase W) — the full web version of the desktop app
 #
 # License-key-only auth (validate_license_key_only — no machine
 # binding, see that function's docstring for why). Every endpoint
@@ -677,6 +678,7 @@ def web_add_truck(req: WebTruckIn):
         equipment=req.equipment, allowed_states=req.allowed_states,
         pickup_date=req.pickup_date, radius_miles=req.radius_miles,
         loaded_miles_min=req.loaded_miles_min, loaded_miles_max=req.loaded_miles_max,
+        telegram_chat_id=req.telegram_chat_id,
     )
     return {"success": True, "truck_id": truck_id}
 
@@ -686,11 +688,64 @@ def web_update_truck(truck_id: int, req: WebTruckUpdate):
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
-    fields = req.dict(exclude={"license_key"}, exclude_none=True)
+    # exclude_unset (not exclude_none): a field the client sent as an
+    # explicit null now CLEARS it (e.g. removing a per-truck radius or
+    # payload) instead of being silently ignored — a long-standing gap.
+    # Fields the client didn't send at all are still left alone.
+    fields = req.dict(exclude={"license_key"}, exclude_unset=True)
+    for required in ("vehicle", "driver_name", "zip_location"):
+        if required in fields and not fields[required]:
+            fields.pop(required)          # these can't be blanked
     updated = fleet_store.update_truck(req.license_key, truck_id, **fields)
     if not updated:
         raise HTTPException(status_code=404, detail="Truck not found or nothing to update")
     return {"success": True}
+
+
+@app.post("/api/web/trucks/import")
+def web_import_trucks(req: dict):
+    """Paste the desktop's truck lines (VEHICLE:DRIVER:DIMS:PAYLOAD:
+    EQUIPMENT:STATES:ZIP:DATE:RADIUS:CHAT_ID:LOADED_MILES) straight into
+    the web fleet — same format, same validation messages as the desktop
+    (see truck_lines.py). replace=true first removes the current fleet,
+    like editing the desktop's Trucks box; otherwise trucks are added."""
+    license_key = req.get("license_key", "")
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    text = req.get("text", "")
+    errors = truck_lines.validate(text)
+    parsed = truck_lines.parse(text)
+    if not errors and not parsed:
+        errors = ["No truck lines found — one truck per line."]
+    for i, t in enumerate(parsed, start=1):
+        if not t["zip_location"]:
+            errors.append(f"Truck {i} ({t['driver_name']}): a ZIP location is required on the web "
+                          f"(field 7) so loads can be matched to it")
+    if errors:
+        raise HTTPException(status_code=400, detail=chr(10).join(errors))
+    removed = 0
+    if req.get("replace"):
+        for t in fleet_store.list_trucks(license_key):
+            if fleet_store.delete_truck(license_key, t["id"]):
+                removed += 1
+    for t in parsed:
+        fleet_store.add_truck(license_key=license_key, **t)
+    activity_log.log_event(license_key, "trucks_imported",
+                           f"Imported {len(parsed)} truck(s) from desktop-format lines"
+                           + (f" (replaced {removed})" if removed else ""))
+    return {"success": True, "added": len(parsed), "removed": removed}
+
+
+@app.get("/api/web/trucks/export")
+def web_export_trucks(license_key: str):
+    """The web fleet as desktop-format lines (paste into the desktop's
+    Trucks box) — the inverse of the import above."""
+    check = validate_license_key_only(license_key)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    lines = [truck_lines.to_line(t) for t in fleet_store.list_trucks(license_key)]
+    return {"success": True, "text": chr(10).join(lines)}
 
 
 @app.delete("/api/web/trucks/{truck_id}")
@@ -751,11 +806,10 @@ def web_record_bid(req: WebRecordBidRequest):
     text (via the shared bid_actions helper, also used by poller.py
     and the BID PC price+map page) so the frontend can show/copy it.
 
-    NOTE: unlike the desktop, this can't reliably open the exact Gmail
-    thread — LOAD_STORE entries populated via /api/parse always carry
-    a placeholder original_msg_full (no real headers/threadId), so
-    thread_id and a real broker reply-to address aren't available yet
-    server-side. Documented as an open gap, not silently glossed over.
+    NOTE (updated 2026-09-26): loads matched by the web engine (poller.py)
+    carry the real Gmail threadId/message id, so the exact thread link works
+    for them; only loads pushed by an older desktop /api/parse call still
+    lack one and fall back to a Gmail search link.
     """
     check = validate_license_key_only(req.license_key)
     if not check["valid"]:

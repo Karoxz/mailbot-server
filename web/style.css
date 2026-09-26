@@ -191,6 +191,52 @@ main.content { animation: fadeIn .25s ease both; }
 .dot.ok   { background: var(--good); }
 .dot.bad  { background: var(--bad); }
 
+/* ── Web bot ON/OFF chip (top bar) ──────────────────────────── */
+.bot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .15s ease, background .15s ease;
+}
+.bot-chip:hover:not(:disabled) { border-color: var(--accent); }
+.bot-chip:disabled { opacity: .6; cursor: default; }
+.bot-chip .bot-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+.bot-chip.on .bot-dot { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+.bot-chip.off .bot-dot { background: var(--bad); }
+.bot-chip.paused { border-color: var(--warn); }
+.bot-chip.paused .bot-dot { background: var(--warn); }
+
+/* Built-in toast (common.js MB.toast) — for pages with no #toast of their own */
+.mb-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translate(-50%, 20px);
+  background: var(--good);
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: .88rem;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+  z-index: 2000;
+  max-width: 90vw;
+}
+.mb-toast.error { background: var(--bad); }
+.mb-toast.show { opacity: 1; transform: translate(-50%, 0); }
+
 /* ── Mobile nav drawer ──────────────────────────────────────── */
 /* Hidden above the mobile breakpoint (the desktop .topnav handles nav
    there); shown below it, replacing the old wrap-to-second-row behavior. */
@@ -538,4 +584,8 @@ tr.skeleton-row td { padding: 12px 18px; }
   .topnav { display: none; }
   .nav-hamburger { display: flex; }
   .topbar { flex-wrap: wrap; }
+  /* Phone width: the chip collapses to just its colored dot (state is
+     still in its tooltip and the Settings page) so the bar stays on one row. */
+  .bot-chip { padding: 8px; }
+  .bot-chip .bot-label { display: none; }
 }

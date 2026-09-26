@@ -17,10 +17,26 @@
     <h1>Trucks</h1>
     <div class="action-row">
       <button id="map-toggle-btn" class="btn" type="button">🗺️ Show map</button>
+      <button id="import-toggle-btn" class="btn" type="button">⇄ Import / export</button>
       <button id="add-truck-btn" class="btn btn-primary" type="button">+ Add truck</button>
     </div>
   </div>
   <p class="hint" style="margin-top:-6px;">ℹ️ This fleet list is what standalone mode (the server-side poller, and this dashboard) matches loads against. The desktop app still sends its own separately-configured truck list with every parse, so edits here don't affect the desktop's own matching — only standalone/web-triggered matching.</p>
+
+  <section class="panel" id="import-panel" hidden>
+    <div class="panel-header"><h2>Import / export — desktop truck format</h2></div>
+    <p class="note-text" style="padding-top:12px;">One truck per line, exactly like the desktop app's Trucks box:
+      <code>VEHICLE:DRIVER:LxWxH:MAXLBS:EQUIPMENT:STATES:ZIP:DATE:RADIUS:CHAT_ID:LOADED_MILES</code>
+      (first 4 fields required, trailing fields optional; states may be codes or East Coast / Midwest / West Coast;
+      ZIP is required here so loads can be matched). Paste your desktop lines below, or load the current fleet to copy them into the desktop.</p>
+    <div style="padding:0 18px;"><textarea id="import-text" rows="7" style="width:100%;font-family:monospace;font-size:.82rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);" placeholder="LARGE STRAIGHT:GRISHA:312x102x96:20000::OH,PA:44101"></textarea></div>
+    <div class="form-actions" style="padding-top:12px;align-items:center;flex-wrap:wrap;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;"><input type="checkbox" id="import-replace"> Replace the whole current fleet</label>
+      <button type="button" id="import-run" class="btn btn-primary">Import trucks</button>
+      <button type="button" id="import-export" class="btn">Load current fleet as lines</button>
+      <button type="button" id="import-close" class="btn">Close</button>
+    </div>
+  </section>
 
   <section class="panel" id="add-truck-panel" hidden>
     <div class="panel-header"><h2 id="truck-form-title">New truck</h2></div>
@@ -38,6 +54,7 @@
         <div class="field"><label>Max radius (miles)</label><input name="radius_miles" type="number" placeholder="blank = use the fleet default"></div>
         <div class="field"><label>Loaded miles — min</label><input name="loaded_miles_min" type="number" placeholder="blank = no minimum"></div>
         <div class="field"><label>Loaded miles — max</label><input name="loaded_miles_max" type="number" placeholder="blank = no maximum"></div>
+        <div class="field"><label>Driver Telegram chat ID</label><input name="telegram_chat_id" type="number" placeholder="optional — for the driver bot (negative for groups)"></div>
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary" id="truck-form-submit">Save truck</button>
@@ -57,7 +74,7 @@
     <div class="table-scroll">
       <table>
         <thead>
-          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th>Loaded miles</th><th></th></tr>
+          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th>Loaded miles</th><th>Driver chat</th><th></th></tr>
         </thead>
         <tbody id="trucks-body"></tbody>
       </table>
@@ -122,6 +139,7 @@ function openEditForm(id) {
   addForm.elements["radius_miles"].value = t.radius_miles ?? "";
   addForm.elements["loaded_miles_min"].value = t.loaded_miles_min ?? "";
   addForm.elements["loaded_miles_max"].value = t.loaded_miles_max ?? "";
+  addForm.elements["telegram_chat_id"].value = t.telegram_chat_id ?? "";
   formTitle.textContent = `Edit truck — ${t.driver_name}`;
   formSubmitBtn.textContent = "Save changes";
   addPanel.hidden = false; addBtn.hidden = true;
@@ -148,6 +166,7 @@ addForm.addEventListener("submit", async (e) => {
     radius_miles: fd.get("radius_miles") ? Number(fd.get("radius_miles")) : null,
     loaded_miles_min: fd.get("loaded_miles_min") ? Number(fd.get("loaded_miles_min")) : null,
     loaded_miles_max: fd.get("loaded_miles_max") ? Number(fd.get("loaded_miles_max")) : null,
+    telegram_chat_id: fd.get("telegram_chat_id") ? Number(fd.get("telegram_chat_id")) : null,
     allowed_states: allowedStatesRaw
       ? allowedStatesRaw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
       : null,
@@ -247,7 +266,7 @@ function renderTrucks(items) {
   const body = document.getElementById("trucks-body");
   trucksById = {};
   if (!items || items.length === 0) {
-    body.innerHTML = '<tr><td colspan="10" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
     return;
   }
   items.forEach((t) => { trucksById[t.id] = t; });
@@ -262,6 +281,7 @@ function renderTrucks(items) {
       <td>${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</td>
       <td>${t.radius_miles ? t.radius_miles + " mi" : "fleet default"}</td>
       <td>${fmtLoadedMiles(t.loaded_miles_min, t.loaded_miles_max)}</td>
+      <td>${t.telegram_chat_id != null ? MB.esc(String(t.telegram_chat_id)) : "—"}</td>
       <td><div class="action-row">
         <button class="btn btn-sm" data-edit-id="${t.id}">Edit</button>
         <button class="btn btn-sm btn-danger" data-id="${t.id}" data-name="${MB.esc(t.driver_name)}">Remove</button>
@@ -314,7 +334,40 @@ async function loadTrucks() {
   }
 }
 
-document.getElementById("trucks-body").innerHTML = MB.skeletonRows(10, 3);
+// ── Import / export in the desktop's truck-line format ───────────────
+const importPanel = document.getElementById("import-panel");
+document.getElementById("import-toggle-btn").addEventListener("click", () => {
+  importPanel.hidden = !importPanel.hidden;
+  if (!importPanel.hidden) MB.popIn(importPanel);
+});
+document.getElementById("import-close").addEventListener("click", () => { importPanel.hidden = true; });
+document.getElementById("import-export").addEventListener("click", async () => {
+  try {
+    const res = await MB.apiGet("/api/web/trucks/export");
+    document.getElementById("import-text").value = res.text || "";
+    showToast(res.text ? "Current fleet loaded — copy these lines into the desktop app if you like" : "No trucks yet");
+  } catch (err) { showToast(err.message || "Export failed", true); }
+});
+document.getElementById("import-run").addEventListener("click", async () => {
+  const text = document.getElementById("import-text").value;
+  const replace = document.getElementById("import-replace").checked;
+  if (!text.trim()) { showToast("Paste at least one truck line first", true); return; }
+  if (replace && !confirm("Replace the whole current fleet with these trucks?")) return;
+  const btn = document.getElementById("import-run");
+  btn.disabled = true;
+  try {
+    const res = await MB.apiPost("/api/web/trucks/import", { text, replace });
+    showToast(`Imported ${res.added} truck(s)` + (res.removed ? ` (replaced ${res.removed})` : ""));
+    document.getElementById("import-text").value = "";
+    importPanel.hidden = true;
+    loadTrucks();
+  } catch (err) {
+    // Multi-line validation errors (one per problem line), like the desktop shows.
+    alert(err.message || "Import failed");
+  } finally { btn.disabled = false; }
+});
+
+document.getElementById("trucks-body").innerHTML = MB.skeletonRows(11, 3);
 loadTrucks();
 </script>
 </body>
