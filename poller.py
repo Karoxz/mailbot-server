@@ -178,24 +178,33 @@ def _gmail_url(order_id, broker_email, thread_id=None):
     return f"https://mail.google.com/mail/u/0/#search/{quote(q)}"
 
 
-# ── Telegram button callbacks ───────────────────────────────────────
-# bid   = BID PC   -> reply with the price+map page link (plain text, so
-#                     no "Open this link?" prompt) — the web equivalent
-#                     of the desktop's price dialog; that page records
-#                     the bid, copies the text and lands on the thread.
-# phone = BID PHONE, text = DRAFT -> record + reply with the bid text.
+# ── Telegram button callbacks — port of the desktop's handle_bid_callbacks ──
+#   bid   = BID PC    -> the web equivalent of the desktop's price dialog:
+#                        reply with the price+map page link (plain text, so
+#                        no "Open this link?" prompt). That page records the
+#                        bid, copies the text and lands on the exact thread.
+#   phone = BID PHONE -> send the bid text, create a REAL empty Gmail reply
+#                        draft on the thread, record the bid, send an
+#                        "Open Draft & Send" button.
+#   text  = DRAFT     -> record the bid and send the bid text.
+# With several matched trucks the desktop first asks which driver
+# ("👤 Select driver for Order #X"); callback_data then carries ":idx".
 _TG_METHOD_MAP = {
     "bid":   ("pc",    "💵 BID PC"),
     "phone": ("phone", "💵 BID PHONE"),
     "text":  ("draft", "📋 DRAFT"),
 }
+_DRIVER_EMOJI = {"bid": "🚛", "phone": "📱", "text": "📋"}
+_DRIVER_PROMPT_SUFFIX = {"bid": "", "phone": " (Phone)", "text": " (Draft)"}
 
 
 def _record_bid_and_build_text(license_key: str, order_id: str, method: str,
-                                price: float = None, rate_per_mile: float = None):
+                                price: float = None, rate_per_mile: float = None,
+                                truck: dict = None):
     """Thin wrapper around the shared bid_actions helper — adds the
     gmail_url this caller needs."""
-    result = bid_actions.record_bid_and_build_text(license_key, order_id, method, price, rate_per_mile)
+    result = bid_actions.record_bid_and_build_text(license_key, order_id, method,
+                                                    price, rate_per_mile, truck)
     if not result:
         return None
     result["gmail_url"] = _gmail_url(order_id, result["broker_email"], result["thread_id"])
@@ -209,53 +218,120 @@ def _answer_callback_query(bot_token: str, callback_query_id: str, text: str = N
     _tg_api(bot_token, "answerCallbackQuery", body, timeout=10)
 
 
-def _handle_bid_pc(bot_token: str, license_key: str, order_id: str, chat_id, callback_id: str):
-    load = load_store.get_load(license_key, order_id)
-    if not load:
-        _answer_callback_query(bot_token, callback_id, text="Order not found in the current live feed.")
-        return
-    _answer_callback_query(bot_token, callback_id)
-    if not chat_id:
-        return
+def _reply_chats(license_key: str, pressed_chat_id) -> list:
+    """The desktop's callback replies go to ALL configured chats
+    (send_to_telegram); fall back to the chat that pressed the button
+    if none are configured."""
+    s = license_db.get_standalone_settings(license_key) or {}
+    chats = _parse_chat_ids(s.get("chat_ids", ""))
+    return chats or ([pressed_chat_id] if pressed_chat_id else [])
+
+
+def _driver_buttons(action: str, order_id: str, all_trucks: list) -> list:
+    rows = []
+    for i, t in enumerate(all_trucks):
+        name = t.get("driver_name", f"Driver {i + 1}")
+        dh = t.get("google_deadhead", "?")
+        rows.append([{"text": f"{_DRIVER_EMOJI[action]} {name}  —  {dh} mi out",
+                      "callback_data": f"{action}:{order_id}:{i}"}])
+    return rows
+
+
+def _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx):
     if WEB_BASE_URL:
         tok = map_token.make_bid_token(license_key, order_id)
-        _tg_send(bot_token, chat_id,
-                 f"💵 BID PC — Order #{order_id}\nEnter your price:\n"
-                 f"{WEB_BASE_URL}/app/bid_price.html?t={tok}")
+        url = f"{WEB_BASE_URL}/app/bid_price.html?t={tok}"
+        if truck is not None and idx is not None:
+            url += f"&truck={idx}"
+        who = f" — {truck.get('driver_name')}" if truck else ""
+        _tg_broadcast(bot_token, chats,
+                      f"💵 BID PC — Order #{order_id}{who}\nEnter your price:\n{url}")
         return
     # No public web origin configured: fall back to a price-less bid.
-    result = _record_bid_and_build_text(license_key, order_id, "pc")
+    result = _record_bid_and_build_text(license_key, order_id, "pc", truck=truck)
     if result:
-        _tg_send(bot_token, chat_id, f"💵 BID PC — Order #{order_id}\n\n{result['bid_text']}",
-                 [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
+        _tg_broadcast(bot_token, chats, f"💵 BID PC — Order #{order_id}\n\n{result['bid_text']}",
+                      [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
+
+
+def _bid_phone(bot_token, chats, license_key, order_id, load, truck):
+    body = bid_actions.build_bid_text(load, order_id, license_key, truck)
+    try:
+        _tg_broadcast(bot_token, chats, body)
+        msg_id = (load.get("original_msg_full") or {}).get("id") or ""
+        if not msg_id:
+            raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
+        service = gmail_client.build_service(license_key)
+        headers = gmail_client.get_message_headers(service, msg_id)
+        draft = gmail_client.create_reply_draft(service, headers)
+        draft_id = draft.get("id", "")
+        bid_actions.record_bid(load, order_id, license_key, "phone", truck)
+        activity_log.log_event(license_key, "bid_recorded", f"Recorded PHONE bid on order #{order_id}")
+        if draft_id:
+            head = (f"✅ Draft created for {truck['driver_name']} — Order #{order_id}\n"
+                    if truck else f"✅ Draft created for Order #{order_id}\n")
+            _tg_broadcast(bot_token, chats,
+                          head + "Tap below → opens Gmail draft ready to send:",
+                          [[{"text": "📨 Open Draft & Send",
+                             "url": f"https://mail.google.com/mail/u/0/#drafts/{draft_id}"}]])
+        else:
+            _tg_broadcast(bot_token, chats,
+                          f"✅ Draft created for Order #{order_id} — open your Drafts:",
+                          [[{"text": "📂 Open Gmail Drafts",
+                             "url": "https://mail.google.com/mail/u/0/#drafts"}]])
+    except Exception as e:
+        logger.error(f"[{license_key}] BID PHONE failed: {e}")
+        _tg_broadcast(bot_token, chats, f"❌ Failed to create draft: {e}")
+
+
+def _bid_text(bot_token, chats, license_key, order_id, load, truck):
+    body = bid_actions.build_bid_text(load, order_id, license_key, truck)
+    if not body:
+        return
+    bid_actions.record_bid(load, order_id, license_key, "draft", truck)
+    activity_log.log_event(license_key, "bid_recorded", f"Recorded DRAFT bid on order #{order_id}")
+    head = f"📋 ORDER #{order_id} — {truck['driver_name']}:" if truck else f"📋 ORDER #{order_id}:"
+    _tg_broadcast(bot_token, chats, f"{head}\n\n{body}")
 
 
 def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
     callback_id = cq.get("id")
-    chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
-    data = cq.get("data", "")
-    action, _, order_id = data.partition(":")
-
-    if action not in _TG_METHOD_MAP or not order_id:
+    pressed_chat = (cq.get("message") or {}).get("chat", {}).get("id")
+    parts = (cq.get("data") or "").split(":")
+    action = parts[0]
+    if action not in _TG_METHOD_MAP or len(parts) < 2 or not parts[1]:
         _answer_callback_query(bot_token, callback_id)
         return
+    order_id = parts[1]
+    idx = parts[2] if len(parts) > 2 else None
 
-    if action == "bid":
-        _handle_bid_pc(bot_token, license_key, order_id, chat_id, callback_id)
-        return
-
-    method, label = _TG_METHOD_MAP[action]
-    result = _record_bid_and_build_text(license_key, order_id, method)
-    if not result:
+    load = load_store.get_load(license_key, order_id)
+    if not load:
         _answer_callback_query(bot_token, callback_id,
                                text="Order not found in the current live feed.")
         return
+    _answer_callback_query(bot_token, callback_id)      # desktop answers with an empty toast
 
-    _answer_callback_query(bot_token, callback_id, text=f"Recorded {label}")
-    if not chat_id:
+    chats = _reply_chats(license_key, pressed_chat)
+    all_trucks = load.get("all_trucks") or []
+    truck = None
+    if idx is not None:
+        truck = bid_actions.get_truck(load, idx)
+        if truck is None:
+            return
+    elif len(all_trucks) > 1:
+        # Several matched trucks: ask which driver first (desktop behavior).
+        _tg_broadcast(bot_token, chats,
+                      f"👤 Select driver for Order #{order_id}{_DRIVER_PROMPT_SUFFIX[action]}:",
+                      _driver_buttons(action, order_id, all_trucks))
         return
-    _tg_send(bot_token, chat_id, f"{label} — Order #{order_id}\n\n{result['bid_text']}",
-             [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
+
+    if action == "bid":
+        _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx)
+    elif action == "phone":
+        _bid_phone(bot_token, chats, license_key, order_id, load, truck)
+    else:
+        _bid_text(bot_token, chats, license_key, order_id, load, truck)
 
 
 def _telegram_callback_loop(bot_token: str, license_key: str):

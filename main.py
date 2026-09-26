@@ -38,6 +38,7 @@ import map_token
 import route_calibration
 import zip_geocode
 import activity_log
+import tg_notify
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mailbot")
@@ -803,15 +804,31 @@ def _resolve_bid_price_auth(t: str, license_key: str, order_id: str = None):
 
 
 @app.get("/api/web/bid_price/context")
-def web_bid_price_context(t: str = None, license_key: str = None, order_id: str = None):
+def web_bid_price_context(t: str = None, license_key: str = None, order_id: str = None,
+                           truck: str = None):
     """Everything bid_price.html needs to render: route/order info for
-    the header, plus the fields /api/web/bid_price/route_map needs."""
+    the header, plus the fields /api/web/bid_price/route_map needs.
+
+    `truck` (2026-09-26, desktop parity): index into the load's
+    all_trucks when the dispatcher picked a specific driver in Telegram —
+    the header then shows THAT truck's deadhead/driver and the total
+    miles (loaded + that truck's deadhead) the rate/mile is computed
+    from, like the desktop's price dialog for a selected truck."""
     license_key, order_id = _resolve_bid_price_auth(t, license_key, order_id)
     load = load_store.get_load(license_key, order_id)
     if not load:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
     order = {k: v for k, v in load.items() if k != "original_msg_full"}
     order["order_id"] = order_id
+    sel = bid_actions.get_truck(load, truck)
+    if sel:
+        for k in ("driver_name", "google_deadhead", "deadhead_eta_minutes",
+                  "truck_type", "truck_dimensions", "truck_equipment"):
+            if k in sel:
+                order[k] = sel[k]
+        loaded, dh = load.get("loaded_miles"), sel.get("google_deadhead")
+        if isinstance(loaded, (int, float)) and isinstance(dh, (int, float)):
+            order["total_miles"] = loaded + dh
     return {"success": True, "order": order}
 
 
@@ -851,13 +868,26 @@ def web_bid_price_submit(req: dict):
     except (TypeError, ValueError):
         rate_per_mile = None
 
-    result = bid_actions.record_bid_and_build_text(license_key, order_id, "pc", price, rate_per_mile)
+    load = load_store.get_load(license_key, order_id)
+    sel = bid_actions.get_truck(load, req.get("truck")) if load else None
+    result = bid_actions.record_bid_and_build_text(license_key, order_id, "pc", price,
+                                                    rate_per_mile, sel)
     if not result:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
     logger.info(f"[WEB] bid_price submit: order={order_id} price={price} bid_id={result['bid_id']}")
     activity_log.log_event(license_key, "bid_recorded",
                             f"Recorded PC bid on order #{order_id} at ${price:g}")
+    # Desktop parity: after a confirmed BID PC price the desktop sends
+    # "📋 Bid text copied — $X ($Y/mi). Press Reply and paste (Ctrl+V)."
+    # (or "Bid for <driver> copied — ..." for a chosen truck) to Telegram.
+    try:
+        who = f"Bid for {sel['driver_name']} copied" if sel else "Bid text copied"
+        per_mile = f" (${rate_per_mile:.2f}/mi)" if rate_per_mile else ""
+        tg_notify.send_to_license(
+            license_key, f"📋 {who} — ${price:,.0f}{per_mile}. Press Reply and paste (Ctrl+V).")
+    except Exception as e:
+        logger.warning(f"bid_price Telegram confirmation failed (non-fatal): {e}")
     return {"success": True, "bid_text": result["bid_text"],
             "thread_id": result["thread_id"], "broker_email": result["broker_email"]}
 

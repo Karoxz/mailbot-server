@@ -9,6 +9,7 @@ Exit code 0 = all pass. Uses throwaway license keys and cleans up.
 
 import os
 import sys
+import json
 import base64
 import sqlite3
 import datetime
@@ -16,6 +17,10 @@ import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.chdir(HERE)
+try:                                   # test names contain emoji; Windows consoles default to cp1252
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 import httplib2
 from googleapiclient.errors import HttpError
@@ -75,7 +80,7 @@ class FakeGmail:
         g = self
 
         class M:
-            def get(self, userId, id, format):
+            def get(self, userId, id, format, metadataHeaders=None):
                 def run():
                     fails = g.get_failures.get(id)
                     if fails:
@@ -442,20 +447,189 @@ def _():
 
 
 # ── 5. Telegram callbacks ──────────────────────────────────────────────
-@test("BID PC button replies with the price-page link (no interstitial button); unknown order -> toast")
+import load_store
+import bid_history
+import bid_actions
+import gmail_client
+load_store.init_db()
+bid_history.init_db()
+poller.WEB_BASE_URL = "https://plutus.example"
+os.environ["MAP_TOKEN_SECRET"] = "parity-test-secret"
+
+
+def seed_load(order_id, all_trucks=None, mid="mid9", **extra):
+    data = {"order": order_id, "vehicle_required": "LARGE STRAIGHT", "pickup_loc": "Cleveland, OH",
+            "delivery_loc": "Columbus, OH", "pickup_dt": "", "delivery_dt": "", "google_deadhead": 10,
+            "driver_name": "GRISHA", "truck_type": "LARGE STRAIGHT", "truck_dimensions": "312x102x96",
+            "deadhead_eta_minutes": 30, "truck_equipment": "", "broker_name": "B", "broker_email": "b@x.com",
+            "loaded_miles": 140, "total_miles": 150,
+            "bid_template": "Truck {driver_name} is {google_deadhead} miles out",
+            "original_msg_full": {"threadId": "th9", "id": mid, "payload": {"headers": []}, "labelIds": []},
+            "all_trucks": all_trucks or []}
+    data.update(extra)
+    load_store.put_load(LK, order_id, data)
+
+
+TRUCKS2 = [{"driver_name": "T1", "google_deadhead": 12, "truck_type": "LARGE STRAIGHT",
+            "truck_dimensions": "d1", "truck_equipment": "", "deadhead_eta_minutes": 20},
+           {"driver_name": "T2", "google_deadhead": 33, "truck_type": "SMALL STRAIGHT",
+            "truck_dimensions": "d2", "truck_equipment": "", "deadhead_eta_minutes": 50}]
+
+
+def cleanup_loads():
+    for path, sql in ((load_store.DB_PATH, "DELETE FROM loads WHERE license_key=?"),
+                      (bid_history.DB_PATH, "DELETE FROM bids WHERE license_key=?")):
+        c = sqlite3.connect(path)
+        c.execute(sql, (LK,))
+        c.commit()
+        c.close()
+
+
+def press(data, chat=CHAT):
+    tg.calls.clear()
+    poller._handle_callback_query(BOT, {"id": "cb", "data": data, "message": {"chat": {"id": chat}}}, LK)
+    return tg.sends()
+
+
+def gmail_with_original():
+    g = FakeGmail()
+    g.msgs["mid9"] = make_msg("mid9", "Bid on Order #777 LARGE STRAIGHT", "x", thread="th9")
+    g.msgs["mid9"]["payload"]["headers"] += [
+        {"name": "From", "value": "Broker Bob <bob@broker.com>"},
+        {"name": "Message-ID", "value": "<orig123@broker.com>"},
+        {"name": "References", "value": "<older@broker.com>"}]
+    poller.gmail_client.build_service = lambda lk: g
+    return g
+
+
+@test("BID PC: single truck -> price-page link (plain text, no button); unknown order -> toast")
 def _():
-    import load_store
-    load_store.init_db()
-    poller.WEB_BASE_URL = "https://plutus.example"
-    load_store.get_load = lambda lk, oid: {"order": oid} if oid == "555" else None
-    tg.calls.clear()
-    poller._handle_callback_query(BOT, {"id": "cb1", "data": "bid:555", "message": {"chat": {"id": CHAT}}}, LK)
-    sent = tg.sends()
-    assert len(sent) == 1 and "bid_price.html?t=" in sent[0]["text"] and "reply_markup" not in sent[0]
-    tg.calls.clear()
-    poller._handle_callback_query(BOT, {"id": "cb2", "data": "bid:404", "message": {"chat": {"id": CHAT}}}, LK)
-    ans = [p for m, p in tg.calls if m == "answerCallbackQuery"]
-    assert ans and "not found" in ans[0].get("text", "").lower()
+    seed_load("555")
+    try:
+        sent = press("bid:555")
+        assert len(sent) == 1 and "bid_price.html?t=" in sent[0]["text"] and "reply_markup" not in sent[0]
+        assert "&truck=" not in sent[0]["text"]
+        tg.calls.clear()
+        poller._handle_callback_query(BOT, {"id": "c2", "data": "bid:404", "message": {"chat": {"id": CHAT}}}, LK)
+        ans = [p for m, p in tg.calls if m == "answerCallbackQuery"]
+        assert ans and "not found" in ans[0].get("text", "").lower()
+    finally:
+        cleanup_loads()
+
+
+@test("several matched trucks: 'Select driver' prompt with the desktop's exact button text per action")
+def _():
+    seed_load("777", TRUCKS2)
+    try:
+        s = press("phone:777")[0]
+        assert s["text"] == "👤 Select driver for Order #777 (Phone):"
+        kb = json.loads(s["reply_markup"])["inline_keyboard"]
+        assert kb == [[{"text": "📱 T1  —  12 mi out", "callback_data": "phone:777:0"}],
+                      [{"text": "📱 T2  —  33 mi out", "callback_data": "phone:777:1"}]]
+        assert press("bid:777")[0]["text"] == "👤 Select driver for Order #777:"
+        assert press("text:777")[0]["text"] == "👤 Select driver for Order #777 (Draft):"
+    finally:
+        cleanup_loads()
+
+
+@test("BID PC after choosing a driver: price link carries the truck index and driver name")
+def _():
+    seed_load("777", TRUCKS2)
+    try:
+        t = press("bid:777:1")[0]["text"]
+        assert "— T2" in t and "&truck=1" in t and "bid_price.html?t=" in t
+    finally:
+        cleanup_loads()
+
+
+@test("BID PHONE: sends bid text, creates a REAL threaded Gmail draft, records the phone bid for THAT truck, Open Draft button")
+def _():
+    seed_load("777", TRUCKS2)
+    g = gmail_with_original()
+    drafts = []
+    g.drafts = lambda: type("D", (), {"create": lambda self, userId, body: _Exec(
+        lambda: drafts.append(body) or {"id": "draft123"})})()
+    try:
+        sent = press("phone:777:1")
+        assert sent[0]["text"] == "Truck T2 is 33 miles out"           # body built from the chosen truck
+        raw = base64.urlsafe_b64decode(drafts[0]["message"]["raw"]).decode()
+        assert "To: bob@broker.com" in raw and "Subject: Re: Bid on Order #777 LARGE STRAIGHT" in raw
+        assert "In-Reply-To: <orig123@broker.com>" in raw and "<older@broker.com> <orig123@broker.com>" in raw
+        assert drafts[0]["message"]["threadId"] == "th9"
+        assert sent[1]["text"] == "✅ Draft created for T2 — Order #777\nTap below → opens Gmail draft ready to send:"
+        assert "#drafts/draft123" in sent[1]["reply_markup"] and "Open Draft & Send" in sent[1]["reply_markup"]
+        bids = bid_history.get_bids_for_order(LK, "777")
+        assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["driver_name"] == "T2"
+        assert bids[0]["deadhead_miles"] == 33 and bids[0]["vehicle_type"] == "SMALL STRAIGHT"
+    finally:
+        cleanup_loads()
+
+
+@test("BID PHONE single truck uses the single-driver wording; failure sends '❌ Failed to create draft'")
+def _():
+    seed_load("778")
+    g = gmail_with_original()
+    g.drafts = lambda: type("D", (), {"create": lambda self, userId, body: _Exec(lambda: {"id": "d1"})})()
+    try:
+        sent = press("phone:778")
+        assert sent[1]["text"] == "✅ Draft created for Order #778\nTap below → opens Gmail draft ready to send:"
+        seed_load("779", mid="")            # no original message -> cannot draft
+        sent = press("phone:779")
+        assert sent[-1]["text"].startswith("❌ Failed to create draft:"), sent[-1]["text"]
+        assert not bid_history.get_bids_for_order(LK, "779"), "no bid is recorded when the draft fails"
+    finally:
+        cleanup_loads()
+
+
+@test("DRAFT: '📋 ORDER #X:' (single) / '📋 ORDER #X — driver:' (chosen truck) + bid recorded as 'draft'")
+def _():
+    seed_load("778")
+    seed_load("777", TRUCKS2)
+    try:
+        assert press("text:778")[0]["text"] == "📋 ORDER #778:\n\nTruck GRISHA is 10 miles out"
+        assert press("text:777:1")[0]["text"] == "📋 ORDER #777 — T2:\n\nTruck T2 is 33 miles out"
+        assert bid_history.get_bids_for_order(LK, "777")[0]["bid_method"] == "draft"
+    finally:
+        cleanup_loads()
+
+
+@test("bid_actions without a truck is unchanged (records the load's own driver/deadhead)")
+def _():
+    seed_load("780")
+    try:
+        r = bid_actions.record_bid_and_build_text(LK, "780", "pc", 500.0, 3.33)
+        assert r["bid_text"] == "Truck GRISHA is 10 miles out"
+        b = bid_history.get_bids_for_order(LK, "780")[0]
+        assert b["driver_name"] == "GRISHA" and b["deadhead_miles"] == 10 and b["bid_amount"] == 500.0
+    finally:
+        cleanup_loads()
+
+
+@test("price page: ?truck= overrides driver/deadhead/total miles, records THAT truck, sends the desktop's confirmation note")
+def _():
+    from fastapi.testclient import TestClient
+    import main
+    enable_license()
+    seed_load("777", TRUCKS2)
+    notes = []
+    main.tg_notify.send_to_license = lambda lk, text, keyboard=None: notes.append((lk, text)) or 1
+    try:
+        with TestClient(main.app) as c:
+            ctx = c.get(f"/api/web/bid_price/context?license_key={LK}&order_id=777&truck=1").json()["order"]
+            assert ctx["driver_name"] == "T2" and ctx["google_deadhead"] == 33 and ctx["total_miles"] == 173
+            base = c.get(f"/api/web/bid_price/context?license_key={LK}&order_id=777").json()["order"]
+            assert base["driver_name"] == "GRISHA" and base["total_miles"] == 150      # no truck: unchanged
+            r = c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "777",
+                                                          "truck": "1", "price": 692, "rate_per_mile": 4.0})
+            assert r.status_code == 200 and r.json()["bid_text"] == "Truck T2 is 33 miles out"
+            b = bid_history.get_bids_for_order(LK, "777")[0]
+            assert b["driver_name"] == "T2" and b["bid_amount"] == 692 and b["bid_method"] == "pc"
+            assert notes[-1] == (LK, "📋 Bid for T2 copied — $692 ($4.00/mi). Press Reply and paste (Ctrl+V).")
+            c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "777", "price": 500})
+            assert notes[-1][1] == "📋 Bid text copied — $500. Press Reply and paste (Ctrl+V)."
+    finally:
+        cleanup_loads()
+        cleanup_license()
 
 
 # ── run ────────────────────────────────────────────────────────────────

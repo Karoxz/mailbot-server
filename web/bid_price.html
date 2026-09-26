@@ -136,6 +136,8 @@ function showError(msg) {
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get("t");
 const URL_ORDER_ID = params.get("order_id");
+// Driver picked in Telegram when several trucks matched (index into the load's all_trucks).
+const TRUCK = params.get("truck");
 
 if (!TOKEN) {
   // No token — this is the dashboard path. Same as every other page.
@@ -149,7 +151,8 @@ if (!TOKEN) {
 }
 
 async function bidFetch(method, path, bodyOrParams) {
-  const auth = TOKEN ? { t: TOKEN } : { license_key: MB.getLicenseKey() };
+  const auth = { ...(TOKEN ? { t: TOKEN } : { license_key: MB.getLicenseKey() }),
+                 ...(TRUCK !== null ? { truck: TRUCK } : {}) };
   if (method === "GET") {
     const usp = new URLSearchParams({ ...auth, ...(bodyOrParams || {}) });
     const res = await fetch(`${path}?${usp.toString()}`);

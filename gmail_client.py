@@ -14,9 +14,13 @@
 # instead of a local token.json file.
 # =============================================================
 
+import base64
 import json
 import os
 import string
+import time
+from email.mime.text import MIMEText
+from email.utils import parseaddr
 from random import SystemRandom
 from typing import Optional
 
@@ -273,3 +277,57 @@ def get_profile_email(creds: Credentials) -> str:
     service = build("gmail", "v1", credentials=creds, cache_discovery=False,
                     static_discovery=False)
     return service.users().getProfile(userId="me").execute().get("emailAddress", "")
+
+
+# ── Real Gmail draft for BID PHONE (2026-09-26, desktop parity) ──────────
+# Port of the desktop's create_reply_draft(..., empty=True) — the only
+# form its callers ever use: an EMPTY reply draft on the original thread
+# (To = the sender, "Re:" subject, In-Reply-To/References so it threads
+# correctly) that the dispatcher opens from Telegram, types/pastes into
+# and sends. Needs the gmail.compose scope (already in SCOPES).
+def get_message_headers(service, message_id: str) -> dict:
+    """The original message's threading headers, as a lowercase-keyed
+    dict — a metadata fetch is enough (no body needed)."""
+    msg = service.users().messages().get(
+        userId="me", id=message_id, format="metadata",
+        metadataHeaders=["From", "Subject", "Message-ID", "References"],
+    ).execute()
+    headers = {h["name"].lower(): h["value"]
+               for h in msg.get("payload", {}).get("headers", [])}
+    headers["_thread_id"] = msg.get("threadId", "")
+    return headers
+
+
+def create_reply_draft(service, original: dict, retries: int = 3) -> dict:
+    """original: {"from", "subject", "message-id", "references", "_thread_id"}
+    (from get_message_headers). Returns Gmail's draft resource ({"id":...}).
+    Retries on connection-level errors like the desktop does."""
+    to_addr = parseaddr(original.get("from", ""))[1]
+    subject = original.get("subject", "")
+    message_id = original.get("message-id", "")
+    references = (original.get("references") or "").strip()
+    if not subject.lower().startswith("re:"):
+        subject = "Re: " + subject
+    mime = MIMEText("", "plain", "utf-8")
+    mime["To"] = to_addr
+    mime["Subject"] = subject
+    if message_id:
+        mime["In-Reply-To"] = message_id
+        mime["References"] = f"{references} {message_id}".strip() if references else message_id
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
+
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return service.users().drafts().create(
+                userId="me",
+                body={"message": {"raw": raw, "threadId": original.get("_thread_id") or None}},
+            ).execute()
+        except Exception as e:
+            last_err = e
+            if any(x in str(e) for x in ("10053", "10054", "ConnectionReset",
+                                          "ConnectionAborted", "BrokenPipe")) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_err if last_err else RuntimeError("create_reply_draft failed")
