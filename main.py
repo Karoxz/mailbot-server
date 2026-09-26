@@ -320,7 +320,7 @@ def _fetch_route_map(pickup_loc: str, delivery_loc: str, frame_w=None, frame_h=N
     # image to fill its frame, so the ~17% fewer pixels requested here
     # just get upscaled back to display size on arrival — an
     # imperceptible quality cost for a deliberate 20% adjustment.
-    _MAP_ZOOM_BOOST = 1.2
+    _MAP_ZOOM_BOOST = 1.0
     fetch_size_param = f"{max(1, round(size_w / _MAP_ZOOM_BOOST))}x{max(1, round(size_h / _MAP_ZOOM_BOOST))}"
 
     # Real driving route, not a straight line — client feedback,
