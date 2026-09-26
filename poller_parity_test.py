@@ -249,7 +249,8 @@ def _():
     assert rec[0]["thread_id"] == "t1" and rec[0]["message_id"] == "m1"
     sent = tg.sends()
     assert len(sent) == 1 and sent[0]["text"] == "LOAD TEXT" and sent[0]["chat_id"] == CHAT
-    assert "reply_markup" in sent[0] and "bid:555" in sent[0]["reply_markup"]
+    assert "reply_markup" in sent[0] and "phone:555" in sent[0]["reply_markup"]
+    assert ("bid:555" in sent[0]["reply_markup"]) or ("bid_price.html" in sent[0]["reply_markup"])   # callback, or web_app when a web origin is configured
     assert g.modified == ["m1"]
 
 
@@ -681,6 +682,77 @@ def _():
     finally:
         thread_backfill.run_backfill = orig
         cleanup_license()
+
+
+# ── 6b. BID PC opens the price page straight away (web_app) + Maps-verified driver miles ──
+GROUP = -100999888
+
+
+@test("BID PC is a web_app button (opens the price page immediately, no link message) for single-truck loads in PRIVATE chats; groups keep the callback")
+def _():
+    tg.calls.clear()
+    res = {"success": True, "formatted": "LOAD TEXT", "order_id": "555",
+           "load_data": {"route_url": "https://r", "all_trucks": [{"driver_name": "GRISHA"}]}}
+    ctx = fresh_ctx(chat_ids=[CHAT, GROUP])
+    assert poller._deliver_to_dispatcher(ctx, res, "th") == "sent"
+    by_chat = {s["chat_id"]: json.loads(s["reply_markup"])["inline_keyboard"] for s in tg.sends()}
+    pc_private = by_chat[CHAT][0][0]
+    assert pc_private["text"] == "💵 BID PC" and pc_private["web_app"]["url"].startswith(
+        "https://plutus.example/app/bid_price.html?t=") and "callback_data" not in pc_private
+    assert [b["text"] for b in by_chat[CHAT][0]] == ["💵 BID PC", "💵 BID PHONE", "📋 DRAFT"]
+    assert by_chat[GROUP][0][0] == {"text": "💵 BID PC", "callback_data": "bid:555"}     # groups can't use web_app
+    assert by_chat[CHAT][1] == [{"text": "🚩ROUTE🚩", "url": "https://r"}]
+
+
+@test("several trucks: load message keeps the BID PC callback; the driver prompt then opens the page per driver (web_app, ?truck=N) — callbacks in groups")
+def _():
+    tg.calls.clear()
+    res = {"success": True, "formatted": "LOAD TEXT", "order_id": "777",
+           "load_data": {"all_trucks": TRUCKS2}}
+    poller._deliver_to_dispatcher(fresh_ctx(), res, "th")
+    assert json.loads(tg.sends()[0]["reply_markup"])["inline_keyboard"][0][0] == \
+        {"text": "💵 BID PC", "callback_data": "bid:777"}
+    seed_load("777", TRUCKS2)
+    try:
+        s = press("bid:777")[0]
+        kb = json.loads(s["reply_markup"])["inline_keyboard"]
+        assert kb[0][0]["text"] == "🚛 T1  —  12 mi out" and kb[1][0]["text"] == "🚛 T2  —  33 mi out"
+        assert kb[0][0]["web_app"]["url"].endswith("&truck=0") and kb[1][0]["web_app"]["url"].endswith("&truck=1")
+        gk = poller._driver_keyboard("bid", "777", TRUCKS2, LK)(GROUP)
+        assert gk[1][0] == {"text": "🚛 T2  —  33 mi out", "callback_data": "bid:777:1"}
+    finally:
+        cleanup_loads()
+
+
+@test("driver-selection miles are the Google-Maps-VERIFIED figure (same as the notification's Out Miles), not raw GraphHopper")
+def _():
+    load = {"driver_name": "GRISHA", "pickup_loc": "Flat Rock, MI 48134", "loaded_miles": 2347,
+            "maps_verification": {"maps_miles": 183},
+            "all_trucks": [{"driver_name": "GRISHA", "google_deadhead": 176, "truck_zip": "43001"},
+                           {"driver_name": "IULIONAS", "google_deadhead": 240, "truck_zip": "90001"},
+                           {"driver_name": "NOZIP", "google_deadhead": 50}]}
+    pc = bid_actions.parser_core
+    orig = (pc.photon_geocode, pc.verify_route_with_google_maps_cached)
+    seen = []
+    pc.photon_geocode = lambda place: [1.0, 2.0]
+    pc.verify_route_with_google_maps_cached = lambda o, d, gh, label="": seen.append(gh["miles"]) or {"maps_miles": 251}
+    try:
+        vt = bid_actions.verified_trucks(load)
+        assert [t["google_deadhead"] for t in vt] == [183, 251, 50]      # winner reuses parse-time value; other verified; no-zip left as-is
+        assert seen == [240], seen                                        # only the non-winning truck needed a lookup
+        kb = poller._driver_keyboard("phone", "9", vt, LK)(CHAT)
+        assert [r[0]["text"] for r in kb] == ["📱 GRISHA  —  183 mi out", "📱 IULIONAS  —  251 mi out", "📱 NOZIP  —  50 mi out"]
+        assert bid_actions.get_truck(load, 1)["google_deadhead"] == 251   # the picked truck's bid text/record use it too
+        assert load["all_trucks"][1]["google_deadhead"] == 240            # stored load not mutated
+    finally:
+        pc.photon_geocode, pc.verify_route_with_google_maps_cached = orig
+
+
+@test("notification text no longer contains a suggested bid")
+def _():
+    import parser_core
+    src = open(os.path.join(HERE, "parser_core.py"), encoding="utf-8").read()
+    assert 'f"💡 Suggested bid' not in src
 
 
 # ── 7. driver bot (desktop: client/driver_bot.py) ─────────────────────

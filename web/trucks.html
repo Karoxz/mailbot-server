@@ -72,9 +72,9 @@
   <section class="panel">
     <div id="trucks-controls"></div>
     <div class="table-scroll">
-      <table>
+      <table class="fit-table">
         <thead>
-          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Dimensions</th><th>Payload</th><th>Equipment</th><th>States</th><th>Radius</th><th>Loaded miles</th><th>Driver chat</th><th></th></tr>
+          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Specs</th><th>Limits</th><th>Driver chat</th><th></th></tr>
         </thead>
         <tbody id="trucks-body"></tbody>
       </table>
@@ -201,6 +201,16 @@ async function deleteTruck(id, driverName) {
   }
 }
 
+// Dimensions / payload / equipment folded into one compact cell so the
+// whole table fits the page width with no horizontal scrollbar.
+function specs(t) {
+  const bits = [];
+  if (t.dimensions) bits.push(`<div>${MB.esc(t.dimensions)}</div>`);
+  if (t.max_payload_lbs) bits.push(`<div>${t.max_payload_lbs.toLocaleString()} lbs</div>`);
+  if (t.equipment) bits.push(`<div>${MB.esc(t.equipment)}</div>`);
+  return bits.length ? bits.join("") : "—";
+}
+
 function fmtLoadedMiles(min, max) {
   if (min == null && max == null) return "any";
   if (min != null && max != null) return `${min}–${max} mi`;
@@ -266,21 +276,21 @@ function renderTrucks(items) {
   const body = document.getElementById("trucks-body");
   trucksById = {};
   if (!items || items.length === 0) {
-    body.innerHTML = '<tr><td colspan="11" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty-note">No trucks yet — add your fleet above.</td></tr>';
     return;
   }
   items.forEach((t) => { trucksById[t.id] = t; });
   body.innerHTML = items.map((t) => `
     <tr class="enter-anim">
-      <td>${MB.esc(t.driver_name)}</td>
+      <td><strong>${MB.esc(t.driver_name)}</strong></td>
       <td>${MB.esc(t.vehicle)}</td>
       <td>${MB.esc(t.zip_location)}</td>
-      <td>${MB.esc(t.dimensions || "—")}</td>
-      <td>${t.max_payload_lbs ? t.max_payload_lbs.toLocaleString() + " lbs" : "—"}</td>
-      <td>${MB.esc(t.equipment || "—")}</td>
-      <td>${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</td>
-      <td>${t.radius_miles ? t.radius_miles + " mi" : "fleet default"}</td>
-      <td>${fmtLoadedMiles(t.loaded_miles_min, t.loaded_miles_max)}</td>
+      <td class="cell-stack">${specs(t)}</td>
+      <td class="cell-stack">
+        <div>States: ${t.allowed_states ? MB.esc(t.allowed_states.join(", ")) : "any"}</div>
+        <div>Radius: ${t.radius_miles ? t.radius_miles + " mi" : "fleet default"}</div>
+        <div>Loaded miles: ${fmtLoadedMiles(t.loaded_miles_min, t.loaded_miles_max)}</div>
+      </td>
       <td>${t.telegram_chat_id != null ? MB.esc(String(t.telegram_chat_id)) : "—"}</td>
       <td><div class="action-row">
         <button class="btn btn-sm" data-edit-id="${t.id}">Edit</button>
@@ -367,7 +377,7 @@ document.getElementById("import-run").addEventListener("click", async () => {
   } finally { btn.disabled = false; }
 });
 
-document.getElementById("trucks-body").innerHTML = MB.skeletonRows(11, 3);
+document.getElementById("trucks-body").innerHTML = MB.skeletonRows(7, 3);
 loadTrucks();
 </script>
 </body>

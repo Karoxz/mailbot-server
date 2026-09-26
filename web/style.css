@@ -364,6 +364,13 @@ main.content { animation: fadeIn .25s ease both; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .88rem; min-width: 640px; }
 th, td { text-align: left; padding: 10px 18px; white-space: nowrap; }
+
+/* Compact table that always fits its panel (Trucks): no min-width, cells wrap,
+   multi-value cells stack — so there is never a horizontal scrollbar. */
+.table-scroll table.fit-table { min-width: 0; table-layout: auto; }
+table.fit-table th, table.fit-table td { padding: 10px 12px; white-space: normal; vertical-align: top; }
+table.fit-table .cell-stack div { font-size: .8rem; color: var(--text-dim); line-height: 1.45; }
+table.fit-table .action-row { flex-wrap: nowrap; }
 thead th { color: var(--text-dim); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
 tbody tr { border-bottom: 1px solid var(--border); transition: background .15s ease; }
 tbody tr:last-child { border-bottom: none; }
@@ -440,6 +447,34 @@ tbody tr:hover { background: var(--bg-card); }
   padding: 0 18px 16px;
 }
 .note-text { color: var(--text-dim); font-size: .82rem; padding: 0 18px 14px; }
+
+/* ── Settings: Standalone panel ─────────────────────────────── */
+.sa-statusbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  margin: 16px 18px 6px; padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+}
+.sa-status-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sa-status { font-weight: 700; font-size: 1rem; }
+.sa-sub { font-size: .8rem; color: var(--text-dim); }
+.sa-hint { padding-top: 4px; }
+.sa-section { padding: 6px 18px 4px; }
+.sa-section h3 {
+  font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--text-dim); font-weight: 700; margin: 12px 0 10px;
+}
+.sa-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 16px; align-items: start; }
+.sa-grid .field label { white-space: nowrap; }
+.sa-grid .field small { color: var(--text-dim); font-size: .74rem; line-height: 1.35; }
+.sa-opt { font-weight: 400; color: var(--text-dim); }
+.sa-warn {
+  margin-top: 12px; padding: 10px 12px; font-size: .8rem; line-height: 1.5;
+  color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 8px; background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.sa-details { margin: 0 18px 16px; font-size: .84rem; color: var(--text-dim); }
+.sa-details summary { cursor: pointer; font-weight: 600; color: var(--text); padding: 6px 0; }
+.sa-details p { margin: 6px 0; line-height: 1.55; }
 
 /* ── Action cell (row buttons in tables/cards) ─────────────── */
 .action-row { display: flex; gap: 6px; flex-wrap: wrap; }

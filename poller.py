@@ -143,7 +143,8 @@ def _tg_broadcast(bot_token: str, chat_ids: list, text: str, keyboard=None) -> i
     results = []
 
     def _one(cid):
-        results.append(_tg_send(bot_token, cid, text, keyboard))
+        kb = keyboard(cid) if callable(keyboard) else keyboard   # keyboards may differ per chat
+        results.append(_tg_send(bot_token, cid, text, kb))
 
     threads = [threading.Thread(target=_one, args=(cid,), daemon=True) for cid in chat_ids]
     for t in threads:
@@ -153,13 +154,35 @@ def _tg_broadcast(bot_token: str, chat_ids: list, text: str, keyboard=None) -> i
     return sum(1 for ok in results if ok)
 
 
-def _load_keyboard(order_id, route_url) -> list:
-    """Identical to the desktop's load message buttons: row 1 is
-    BID PC | BID PHONE | DRAFT (callbacks), row 2 is the ROUTE url."""
+def _web_app_ok(chat_id) -> bool:
+    """Telegram only allows web_app buttons in PRIVATE chats (positive
+    ids); groups/channels have negative ids and get the link fallback."""
+    return isinstance(chat_id, int) and chat_id > 0
+
+
+def _bid_pc_url(license_key: str, order_id: str, truck_idx=None):
+    """Signed link to the price+map page (None when no public web origin
+    is configured). 48h token, same as the price-page links always were."""
+    if not WEB_BASE_URL:
+        return None
+    url = f"{WEB_BASE_URL}/app/bid_price.html?t={map_token.make_bid_token(license_key, order_id)}"
+    if truck_idx is not None:
+        url += f"&truck={truck_idx}"
+    return url
+
+
+def _load_keyboard(order_id, route_url, bid_pc_url=None) -> list:
+    """Identical layout to the desktop's load message buttons: row 1 is
+    BID PC | BID PHONE | DRAFT, row 2 is the ROUTE url. bid_pc_url (set
+    for single-truck loads in private chats) makes BID PC a web_app
+    button: one tap opens the price page straight away inside Telegram,
+    no "Open this link?" prompt and no separate link message."""
     rows = []
     if order_id:
+        bid_pc = ({"text": "💵 BID PC", "web_app": {"url": bid_pc_url}} if bid_pc_url
+                  else {"text": "💵 BID PC", "callback_data": f"bid:{order_id}"})
         rows.append([
-            {"text": "💵 BID PC",    "callback_data": f"bid:{order_id}"},
+            bid_pc,
             {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
             {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
         ])
@@ -228,14 +251,22 @@ def _reply_chats(license_key: str, pressed_chat_id) -> list:
     return chats or ([pressed_chat_id] if pressed_chat_id else [])
 
 
-def _driver_buttons(action: str, order_id: str, all_trucks: list) -> list:
-    rows = []
-    for i, t in enumerate(all_trucks):
-        name = t.get("driver_name", f"Driver {i + 1}")
-        dh = t.get("google_deadhead", "?")
-        rows.append([{"text": f"{_DRIVER_EMOJI[action]} {name}  —  {dh} mi out",
-                      "callback_data": f"{action}:{order_id}:{i}"}])
-    return rows
+def _driver_keyboard(action: str, order_id: str, trucks: list, license_key: str):
+    """Per-chat keyboard for the "Select driver" prompt. `trucks` are the
+    Maps-VERIFIED entries (bid_actions.verified_trucks) so the miles match
+    the notification's "Out Miles". For BID PC in a private chat each
+    driver button opens the price page directly (web_app)."""
+    def build(chat_id):
+        rows = []
+        for i, t in enumerate(trucks):
+            name = t.get("driver_name", f"Driver {i + 1}")
+            text = f"{_DRIVER_EMOJI[action]} {name}  —  {t.get('google_deadhead', '?')} mi out"
+            if action == "bid" and _web_app_ok(chat_id) and WEB_BASE_URL:
+                rows.append([{"text": text, "web_app": {"url": _bid_pc_url(license_key, order_id, i)}}])
+            else:
+                rows.append([{"text": text, "callback_data": f"{action}:{order_id}:{i}"}])
+        return rows
+    return build
 
 
 def _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx):
@@ -324,7 +355,7 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
         # Several matched trucks: ask which driver first (desktop behavior).
         _tg_broadcast(bot_token, chats,
                       f"👤 Select driver for Order #{order_id}{_DRIVER_PROMPT_SUFFIX[action]}:",
-                      _driver_buttons(action, order_id, all_trucks))
+                      _driver_keyboard(action, order_id, bid_actions.verified_trucks(load), license_key))
         return
 
     if action == "bid":
@@ -572,8 +603,12 @@ def _deliver_to_dispatcher(ctx: dict, result: dict, thread_id: str) -> str:
         logger.info(f"[{lk}] #{order_id} matched — no bot token / chat IDs configured")
         activity_log.log_event(lk, "load_matched", f"Load #{order_id} matched (no bot token/chat ID set — not sent)")
         return "no_recipient"
+    route_url = load_data.get("route_url")
+    pc_url = (_bid_pc_url(lk, order_id)
+              if order_id and len(load_data.get("all_trucks") or []) <= 1 else None)
     sent = _tg_broadcast(ctx["bot_token"], ctx["chat_ids"], result["formatted"],
-                         _load_keyboard(order_id, load_data.get("route_url")))
+                         lambda cid: _load_keyboard(order_id, route_url,
+                                                    pc_url if _web_app_ok(cid) else None))
     if not sent:
         logger.warning(f"[{lk}] #{order_id} Telegram send FAILED")
         activity_log.log_event(lk, "send_failed", f"Load #{order_id} matched but the Telegram send failed")

@@ -147,18 +147,14 @@ function renderLoads(items) {
     html: (it) => {
       const decision = it.load_decision?.decision;
       const decisionBadge = decision
-        ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}
-             ${it.load_decision.confidence != null ? `(${Math.round(it.load_decision.confidence * 100)}%)` : ""}</span>`
+        ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}</span>`
         : "";
       const miles = it.google_deadhead != null ? `${it.google_deadhead}mi deadhead` : "";
       const eta = it.deadhead_eta_minutes != null ? `${Math.round(it.deadhead_eta_minutes / 60)}h ETA` : "";
-      const suggested = it.bid_recommendation?.suggested_amount
-        ? `Suggested ${MB.fmtMoney(it.bid_recommendation.suggested_amount)} (${it.bid_recommendation.basis})`
-        : "";
       const broker = it.broker_name || it.broker_email
         ? `Broker: ${MB.esc(it.broker_name || it.broker_email)}`
         : "";
-      const meta = [it.driver_name, miles, eta, suggested, broker].filter(Boolean).map(MB.esc).join(" · ");
+      const meta = [it.driver_name, miles, eta, broker].filter(Boolean).map(MB.esc).join(" · ");
       const reasons = (it.load_decision?.reasons || []).slice(0, 3)
         .map((r) => `<div class="meta">• ${MB.esc(r)}</div>`).join("");
       const orderId = MB.esc(it.order || "");

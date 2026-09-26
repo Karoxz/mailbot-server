@@ -2447,17 +2447,11 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             vehicle_type=vehicle_required,
             miles=_rec_miles,
         )
-        if bid_recommendation:
-            # Shortened on request (2026-09-11): just the dollar amount
-            # and the per-mile rate — basis/sample-size breakdown dropped,
-            # it wasn't needed on the notification itself. bid_recommendation
-            # still carries 'basis'/'sample_size' for anything else that
-            # wants them (e.g. the web dashboard).
-            lines.append("")
-            lines.append(
-                f"💡 Suggested bid: ${bid_recommendation['suggested_amount']:,.0f}  "
-                f"(${bid_recommendation['rate_per_mile']:.2f}/mi)"
-            )
+        # The suggested-bid line (dollar amount + $/mi) was REMOVED from the
+        # notification text on request (2026-09-26, for both the desktop's
+        # and the web version's Telegram messages - they share this
+        # builder). bid_recommendation is still computed and returned in
+        # load_data for anything else that wants it.
 
     # ── NEW: decision engine — Accept/Bid/Negotiate/Reject ──────────
     # Pure deterministic scoring over signals already computed above

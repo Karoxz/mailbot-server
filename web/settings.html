@@ -116,31 +116,45 @@
       <h2>Standalone mode</h2>
       <span class="panel-hint">Runs the whole bot server-side — reads Gmail, matches loads, notifies — with no desktop app needing to be open at all.</span>
     </div>
-    <div class="form-grid">
-      <div class="field"><label>Allowed vehicles (comma-separated)</label><input id="sa-vehicles" placeholder="e.g. LARGE STRAIGHT, SPRINTER"></div>
-      <div class="field"><label>Max radius (miles)</label><input id="sa-radius" type="number" placeholder="e.g. 300"></div>
-      <div class="field"><label>Telegram chat IDs (comma-separated)</label><input id="sa-chatids" placeholder="e.g. 123456789"></div>
-      <div class="field"><label>Telegram bot token</label><input id="sa-bottoken" type="password" placeholder="paste bot token"></div>
-      <div class="field"><label>Driver bot token (optional)</label><input id="sa-drivertoken" type="password" placeholder="a separate bot for your drivers"></div>
-    </div>
-    <p class="note-text" style="color:var(--warn);padding-top:0;">⚠ Must be a <em>different</em> bot from the one the desktop app (PlutusBot.exe) uses. Don't paste the same token you use there — if both run at once with the same bot, Telegram replies get unpredictably split between the two. Create a separate bot via @BotFather if you don't have one.</p>
-    <p class="note-text" style="padding-top:0;"><strong>Driver bot (optional):</strong> a second, separate bot your drivers message. Give each truck a
-      driver Telegram chat ID on the Trucks page; drivers then get a load card with a 💰 BID button, type their rate, and it's forwarded to you
-      with the BID PC / BID PHONE / DRAFT buttons. It must be a different bot from both the dispatcher bot above and the desktop app's driver bot.</p>
-    <div class="form-actions" style="padding:0 18px 16px;">
-      <button id="sa-save-btn" class="btn" type="button">Save settings</button>
-    </div>
-    <div class="form-actions" style="padding:0 18px 14px;align-items:center;">
-      <span id="sa-status" style="font-weight:600;">Loading…</span>
+    <div class="sa-statusbar">
+      <div class="sa-status-text">
+        <span id="sa-status" class="sa-status">Loading…</span>
+        <span id="sa-poller-status" class="sa-sub"></span>
+      </div>
       <button id="sa-toggle" class="btn btn-primary" type="button" disabled>…</button>
     </div>
-    <p class="note-text"><strong>Web bot and desktop app take turns automatically.</strong> You can connect the same Gmail
-      account to both. While the desktop app is running (after START) the web bot pauses by itself and shows
-      "paused — desktop running"; about a minute after you stop the desktop, the web bot takes over again. They never
-      run at the same time, so they can't fight over the same emails. (The web bot turns Telegram notifications and
-      thread learning ON when you enable it, just like the desktop's START button.)</p>
-    <p id="sa-hint" class="note-text"></p>
-    <p id="sa-poller-status" class="note-text" style="padding-top:0;"></p>
+    <p id="sa-hint" class="note-text sa-hint"></p>
+
+    <div class="sa-section">
+      <h3>What to watch</h3>
+      <div class="sa-grid">
+        <div class="field"><label for="sa-vehicles">Allowed vehicles</label><input id="sa-vehicles" placeholder="e.g. LARGE STRAIGHT, SPRINTER"><small>Comma-separated.</small></div>
+        <div class="field"><label for="sa-radius">Max radius (miles)</label><input id="sa-radius" type="number" placeholder="e.g. 300"><small>Fleet-wide deadhead cap; a truck's own radius overrides it.</small></div>
+        <div class="field"><label for="sa-chatids">Telegram chat IDs</label><input id="sa-chatids" placeholder="e.g. 123456789"><small>Comma-separated; negative for groups.</small></div>
+      </div>
+    </div>
+
+    <div class="sa-section">
+      <h3>Telegram bots</h3>
+      <div class="sa-grid">
+        <div class="field"><label for="sa-bottoken">Dispatcher bot token</label><input id="sa-bottoken" type="password" placeholder="paste bot token"><small>Sends you the loads and the BID PC / PHONE / DRAFT buttons.</small></div>
+        <div class="field"><label for="sa-drivertoken">Driver bot token <span class="sa-opt">(optional)</span></label><input id="sa-drivertoken" type="password" placeholder="a separate bot for your drivers"><small>Drivers get a load card with 💰 BID (set each driver's chat ID on Trucks).</small></div>
+      </div>
+      <div class="sa-warn">⚠ Both tokens must be <em>different</em> bots from each other and from the bots the desktop app (PlutusBot.exe) uses — reusing one makes Telegram replies get split unpredictably between the two. Create separate bots via @BotFather.</div>
+    </div>
+
+    <div class="form-actions" style="padding:4px 18px 16px;">
+      <button id="sa-save-btn" class="btn" type="button">Save settings</button>
+    </div>
+
+    <details class="sa-details">
+      <summary>How the web bot works</summary>
+      <p><strong>Web bot and desktop app take turns automatically.</strong> You can connect the same Gmail account to both. While the
+        desktop app is running (after START) the web bot pauses by itself and shows "paused — desktop running"; about a minute after you stop
+        the desktop, the web bot takes over again. They never run at the same time, so they can't fight over the same emails.</p>
+      <p>Turning the web bot ON does what the desktop's START does: Telegram notifications and thread learning are switched on, you get a
+        "Watching" message, and the last 2 days of unread freight mail are scanned once.</p>
+    </details>
   </section>
 </main>
 
@@ -405,6 +419,7 @@ const saChatIds  = document.getElementById("sa-chatids");
 const saBotToken = document.getElementById("sa-bottoken");
 const saSaveBtn  = document.getElementById("sa-save-btn");
 const saDriverToken = document.getElementById("sa-drivertoken");
+let saDesktopActive = false;
 const saStatus   = document.getElementById("sa-status");
 const saToggle   = document.getElementById("sa-toggle");
 const saHint     = document.getElementById("sa-hint");
@@ -435,8 +450,8 @@ function renderStandaloneGate() {
 }
 
 function renderSaState() {
-  saStatus.textContent = saEnabled ? "🟢 RUNNING" : "⚪ OFF";
-  saStatus.style.color = saEnabled ? "var(--good)" : "var(--text-dim)";
+  saStatus.textContent = saEnabled ? (saDesktopActive ? "🟡 PAUSED — desktop app is running" : "🟢 RUNNING") : "⚪ OFF";
+  saStatus.style.color = saEnabled ? (saDesktopActive ? "var(--warn)" : "var(--good)") : "var(--text-dim)";
   saToggle.textContent = saEnabled ? "Turn off" : "Turn on";
   saToggle.className = saEnabled ? "btn btn-danger" : "btn btn-primary";
   renderStandaloneGate();
@@ -452,6 +467,7 @@ async function loadStandaloneSettings() {
     saDriverToken.value = res.driver_bot_token || "";
     saHasVehicles = !!(res.allowed_vehicles || "").trim();
     saEnabled = !!res.standalone_mode_enabled;
+    saDesktopActive = !!res.desktop_active;
     renderSaState();
     MB.setConn(true);
   } catch (err) {

@@ -32,15 +32,60 @@ import load_store
 import parser_core
 
 
+def verify_truck(load: dict, truck: dict) -> dict:
+    """A copy of `truck` whose google_deadhead is the Google-Maps-VERIFIED
+    figure — the same number the load notification's "Out Miles" shows.
+
+    Why (client-reported 2026-09-26): parse only Maps-verifies the WINNING
+    truck (one paid call per load), so every other truck in all_trucks
+    still carries the raw GraphHopper estimate. The notification said
+    "Out Miles: 183" while the driver-selection button said "176 mi out".
+    Verified lazily here — only when a truck is actually shown/picked in
+    the web version — and cached 30 days per truck-zip/pickup pair
+    (parser_core.verify_route_with_google_maps_cached), so it's a free
+    lookup for any pair seen before. Falls back to the raw figure if
+    verification isn't possible (no zip/coords/key)."""
+    raw = truck.get("google_deadhead")
+    if raw is None:
+        return truck
+    mv = load.get("maps_verification") or {}
+    # The winning truck was already verified at parse time — reuse that.
+    if truck.get("driver_name") == load.get("driver_name") and mv.get("maps_miles") is not None:
+        out = dict(truck)
+        out["google_deadhead"] = mv["maps_miles"]
+        return out
+    zip_loc, pickup = truck.get("truck_zip"), load.get("pickup_loc")
+    if not zip_loc or not pickup:
+        return truck
+    try:
+        origin = parser_core.photon_geocode(zip_loc)
+        dest = parser_core.photon_geocode(pickup)
+        if origin and dest:
+            v = parser_core.verify_route_with_google_maps_cached(
+                origin, dest, {"miles": raw, "minutes": truck.get("deadhead_eta_minutes")},
+                label=f"deadhead:{truck.get('driver_name', '')}")
+            if v and v.get("maps_miles") is not None:
+                out = dict(truck)
+                out["google_deadhead"] = v["maps_miles"]
+                return out
+    except Exception:
+        pass
+    return truck
+
+
+def verified_trucks(load: dict) -> list:
+    return [verify_truck(load, t) for t in ((load or {}).get("all_trucks") or [])]
+
+
 def get_truck(load: dict, truck_idx) -> Optional[dict]:
-    """all_trucks[truck_idx], or None when there's no valid selection
-    (no index, out of range, not a number)."""
+    """all_trucks[truck_idx] (Maps-verified deadhead), or None when
+    there's no valid selection (no index, out of range, not a number)."""
     try:
         idx = int(truck_idx)
     except (TypeError, ValueError):
         return None
     trucks = (load or {}).get("all_trucks") or []
-    return trucks[idx] if 0 <= idx < len(trucks) else None
+    return verify_truck(load, trucks[idx]) if 0 <= idx < len(trucks) else None
 
 
 def build_bid_text(load: dict, order_id: str, license_key: str,
