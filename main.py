@@ -121,6 +121,31 @@ async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ok"}
 
 
+# Desktop/web mutual exclusion WITHOUT any desktop change (2026-09-26).
+# The shipped desktop exe's push-poller thread hits /webhook/poll every
+# ~0.2s, but ONLY while its Gmail loop is running (after START) — so the
+# request itself is a reliable "the desktop is actively polling this
+# license" signal. Recording it lets poller.py (the web/standalone
+# engine) yield that license's Gmail account to the desktop and take it
+# back ~60s after the desktop stops, so the two never race on Gmail's
+# read/unread state. Throttled to one DB write per license per 10s per
+# worker, and wrapped so a failure here can NEVER affect the desktop's
+# poll response.
+_desktop_hb_last: dict = {}
+_DESKTOP_HB_WRITE_EVERY = 10.0
+
+
+def _note_desktop_poll(license_key: str) -> None:
+    now = time.time()
+    if now - _desktop_hb_last.get(license_key, 0.0) < _DESKTOP_HB_WRITE_EVERY:
+        return
+    _desktop_hb_last[license_key] = now
+    try:
+        license_db.record_desktop_poll_heartbeat(license_key)
+    except Exception as e:
+        logger.warning(f"desktop poll heartbeat write failed (non-fatal): {e}")
+
+
 @app.get("/webhook/poll")
 async def poll_push(request: Request):
     check = validate_license(
@@ -129,6 +154,7 @@ async def poll_push(request: Request):
     )
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
+    _note_desktop_poll(request.headers.get("X-License-Key", ""))
     items = push_queue.drain_all()
     if items:
         for history_id, pushed_at in items:
@@ -1093,7 +1119,11 @@ def web_standalone_settings_get(license_key: str):
     settings = license_db.get_standalone_settings(license_key)
     gmail_status = gmail_store.get_status(license_key)
     return {"success": True, **settings, "gmail_connected": gmail_status["connected"],
-            "gmail_connected_email": gmail_status["connected_email"]}
+            "gmail_connected_email": gmail_status["connected_email"],
+            # True while a desktop app is actively polling this license
+            # (seen via its /webhook/poll traffic) — the web bot yields
+            # to it, so the UI shows "paused — desktop running".
+            "desktop_active": license_db.is_desktop_recently_active(license_key)}
 
 
 @app.post("/api/web/standalone/settings")
@@ -1166,7 +1196,8 @@ def web_standalone_poller_status(license_key: str):
     if not check["valid"]:
         raise HTTPException(status_code=403, detail=check["reason"])
     hb = load_store.get_poller_heartbeat()
-    return {"success": True, "heartbeat": hb}
+    return {"success": True, "heartbeat": hb,
+            "desktop_active": license_db.is_desktop_recently_active(license_key)}
 
 
 # Real bug, found 2026-09-25: StaticFiles serves no Cache-Control header
