@@ -672,6 +672,55 @@ def _note_yield(license_key: str, yielding: bool):
         activity_log.log_event(license_key, "web_resumed", "Web bot resumed — the desktop app stopped")
 
 
+# ── Automatic thread learning (desktop parity) ────────────────────────
+# The desktop, while running, does a light 3-day thread-learning pass
+# every 15 minutes (reads the dispatcher's own quoted rates out of
+# "bid"-labeled threads and confirms wins via the "RC" label) whenever
+# the server-side thread_learning_enabled toggle is on. Same here, on a
+# background thread so it never delays the 3s intake loop, one at a time
+# per license. First pass is 15 minutes after the license is first seen
+# (like the desktop's first timer tick). Failures are logged to the
+# activity feed instead of dying silently in a log nobody reads.
+LEARNING_INTERVAL_SEC = 15 * 60
+LEARNING_DAYS_BACK = 3
+_learning_last = {}      # license -> ts of last pass start (or first sighting)
+_learning_thread = {}    # license -> running Thread
+
+
+def _maybe_run_thread_learning(license_key: str):
+    if not license_db.get_thread_learning_enabled(license_key):
+        return None
+    now = time.time()
+    if license_key not in _learning_last:
+        _learning_last[license_key] = now
+        return None
+    if now - _learning_last[license_key] < LEARNING_INTERVAL_SEC:
+        return None
+    running = _learning_thread.get(license_key)
+    if running is not None and running.is_alive():
+        return None
+    _learning_last[license_key] = now
+
+    def _run():
+        try:
+            import thread_backfill
+            res = thread_backfill.run_backfill(license_key, days_back=LEARNING_DAYS_BACK)
+            if res.get("processed") or res.get("errors"):
+                activity_log.log_event(
+                    license_key, "thread_learning",
+                    f"Thread learning pass: {res.get('processed', 0)} processed, "
+                    f"{res.get('skipped', 0)} skipped, {res.get('errors', 0)} errors")
+        except Exception as e:
+            logger.error(f"[{license_key}] thread learning pass failed:\n{traceback.format_exc()}")
+            activity_log.log_event(license_key, "poller_error",
+                                   f"Thread learning pass failed: {str(e)[:100]}")
+
+    t = threading.Thread(target=_run, daemon=True, name="thread-learning")
+    _learning_thread[license_key] = t
+    t.start()
+    return t
+
+
 def _initial_scan(ctx: dict, service, label_map: dict):
     """The desktop's START: a 'Watching' Telegram message plus a one-time
     catch-up scan of the last 2 days of unread freight mail. Runs once
@@ -713,6 +762,8 @@ def run_one_license_cycle(license_key: str):
     except GmailAuthError as e:
         logger.warning(f"[{license_key}] skipped: {e}")
         return
+
+    _maybe_run_thread_learning(license_key)
 
     ctx = {
         "license_key":      license_key,

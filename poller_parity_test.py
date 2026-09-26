@@ -632,6 +632,57 @@ def _():
         cleanup_license()
 
 
+# ── 6. automatic thread learning (desktop: every 15 min, 3-day pass, gated on the toggle) ──
+@test("thread learning: off -> never runs; on -> first pass 15 min after first sighting, then every 15 min, one at a time")
+def _():
+    import thread_backfill, time as _t
+    enable_license()
+    calls = []
+    orig = thread_backfill.run_backfill
+    thread_backfill.run_backfill = lambda lk, days_back=45: calls.append((lk, days_back)) or {
+        "processed": 3, "skipped": 1, "errors": 0}
+    poller._learning_last.clear()
+    poller._learning_thread.clear()
+    try:
+        license_db.set_thread_learning_enabled(LK, False)
+        poller._learning_last[LK] = _t.time() - 99999
+        assert poller._maybe_run_thread_learning(LK) is None and not calls          # toggle off
+        license_db.set_thread_learning_enabled(LK, True)
+        poller._learning_last.clear()
+        assert poller._maybe_run_thread_learning(LK) is None and not calls          # first sighting only arms the timer
+        assert poller._maybe_run_thread_learning(LK) is None and not calls          # <15 min: nothing
+        poller._learning_last[LK] = _t.time() - 901
+        t = poller._maybe_run_thread_learning(LK)
+        t.join(5)
+        assert calls == [(LK, 3)], calls                                            # 3-day window
+        assert any("3 processed" in e["message"] for e in events("thread_learning"))
+        assert poller._maybe_run_thread_learning(LK) is None                        # timer reset
+    finally:
+        thread_backfill.run_backfill = orig
+        cleanup_license()
+
+
+@test("thread learning failure is surfaced in the activity feed (not silent)")
+def _():
+    import thread_backfill, time as _t
+    enable_license()
+    orig = thread_backfill.run_backfill
+
+    def boom(lk, days_back=45):
+        raise RuntimeError("gmail exploded")
+    thread_backfill.run_backfill = boom
+    poller._learning_last.clear()
+    poller._learning_thread.clear()
+    try:
+        license_db.set_thread_learning_enabled(LK, True)
+        poller._learning_last[LK] = _t.time() - 901
+        poller._maybe_run_thread_learning(LK).join(5)
+        assert any("gmail exploded" in e["message"] for e in events("poller_error"))
+    finally:
+        thread_backfill.run_backfill = orig
+        cleanup_license()
+
+
 # ── run ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print()
