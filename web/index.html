@@ -39,15 +39,12 @@
         <div class="field"><label for="sa-chatids">Telegram chat IDs</label><input id="sa-chatids" placeholder="e.g. 123456789"><small>Comma-separated; negative for groups.</small></div>
       </div>
     </div>
-
-    <div class="sa-section">
-      <h3>Telegram bots</h3>
-      <div class="sa-grid">
-        <div class="field"><label for="sa-bottoken">Dispatcher bot token</label><input id="sa-bottoken" type="password" placeholder="paste bot token"><small>Sends you the loads and the BID PC / PHONE / DRAFT buttons.</small></div>
-        <div class="field"><label for="sa-drivertoken">Driver bot token <span class="sa-opt">(optional)</span></label><input id="sa-drivertoken" type="password" placeholder="a separate bot for your drivers"><small>Drivers get a load card with 💰 BID (set each driver's chat ID on Trucks).</small></div>
-      </div>
-      <div class="sa-warn">⚠ Both tokens must be <em>different</em> bots from each other and from the bots the desktop app (PlutusBot.exe) uses — reusing one makes Telegram replies get split unpredictably between the two. Create separate bots via @BotFather.</div>
-    </div>
+    <!-- Dispatcher/driver bot tokens — 2026-09-29 (client: "make
+         dispatcher bot token and driver bot token hardcoded, the client
+         doesnt need to type it in"). No longer a form field at all: the
+         server applies a pre-made bot automatically for any license that
+         hasn't saved its own (license_db.DEFAULT_STANDALONE_BOT_TOKEN),
+         so there's nothing to create on @BotFather or paste here. -->
 
     <div class="form-actions" style="padding:4px 18px 16px;">
       <button id="sa-save-btn" class="btn" type="button">Save settings</button>
@@ -194,10 +191,6 @@ function renderLoads(items) {
     isRow: false,
     emptyHtml: '<p class="empty-note">No matched loads yet.</p>',
     html: (it) => {
-      const decision = it.load_decision?.decision;
-      const decisionBadge = decision
-        ? `<span class="badge decision-${decision.toLowerCase()}">${MB.esc(decision)}</span>`
-        : "";
       const orderId = MB.esc(it.order || "");
       const brokerEmail = it.broker_email || "";
       const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, it.thread_id);
@@ -226,12 +219,16 @@ function renderLoads(items) {
         it.driver_name ? `<strong>${MB.esc(it.driver_name)}</strong>` : "",
         it.truck_dimensions ? MB.esc(it.truck_dimensions) : "",
       ].filter(Boolean);
+      // Each piece is escaped BEFORE being wrapped in <strong> — mapping
+      // MB.esc over the joined array afterward (the earlier bug here)
+      // re-escapes the tag itself, so it prints literally instead of
+      // rendering bold. Build the already-safe HTML fragments directly.
       const brokerBits = [
         it.broker_name ? `<strong>${MB.esc(it.broker_name)}</strong>` : "",
-        it.broker_company || "",
-        it.broker_phone || "",
-        brokerEmail || "",
-      ].filter(Boolean).map(MB.esc);
+        it.broker_company ? MB.esc(it.broker_company) : "",
+        it.broker_phone ? MB.esc(it.broker_phone) : "",
+        brokerEmail ? MB.esc(brokerEmail) : "",
+      ].filter(Boolean);
 
       const metaRow = (bits) => bits.length ? `<div class="meta">${bits.join(" · ")}</div>` : "";
       const reasons = (it.load_decision?.reasons || []).slice(0, 3)
@@ -239,16 +236,15 @@ function renderLoads(items) {
 
       return `
         <div class="feed-card">
-          <div class="order">#${orderId} <span style="color:var(--text-dim);font-weight:400;">${MB.esc(it.vehicle_required || "")}</span></div>
+          <div class="order">#${orderId} <span style="font-weight:600;">${MB.esc(it.vehicle_required || "")}</span></div>
           <div class="ago">${MB.esc(ago)}</div>
-          ${decisionBadge}
           <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
           <div class="meta">${pickupLine} &nbsp;·&nbsp; ${deliverLine}</div>
           ${metaRow(milesBits)}
           ${metaRow(driverBits)}
           ${metaRow(etaBits)}
           ${metaRow(freightBits)}
-          ${brokerBits.length ? `<div class="meta">🤝 ${brokerBits.join(" · ")}</div>` : ""}
+          ${brokerBits.length ? `<div class="meta">${brokerBits.join(" · ")}</div>` : ""}
           ${it.notes ? `<div class="notes">🔔 ${MB.esc(it.notes)}</div>` : ""}
           ${reasons}
           <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
@@ -336,9 +332,7 @@ setInterval(refresh, 10000);
 const saVehicles = document.getElementById("sa-vehicles");
 const saRadius   = document.getElementById("sa-radius");
 const saChatIds  = document.getElementById("sa-chatids");
-const saBotToken = document.getElementById("sa-bottoken");
 const saSaveBtn  = document.getElementById("sa-save-btn");
-const saDriverToken = document.getElementById("sa-drivertoken");
 let saDesktopActive = false;
 const saStatus   = document.getElementById("sa-status");
 const saToggle   = document.getElementById("sa-toggle");
@@ -386,8 +380,6 @@ async function loadStandaloneSettings() {
     saVehicles.value = res.allowed_vehicles || "";
     saRadius.value = res.max_radius_miles ?? "";
     saChatIds.value = res.chat_ids || "";
-    saBotToken.value = res.bot_token || "";
-    saDriverToken.value = res.driver_bot_token || "";
     saHasVehicles = !!(res.allowed_vehicles || "").trim();
     saEnabled = !!res.standalone_mode_enabled;
     saDesktopActive = !!res.desktop_active;
@@ -407,8 +399,6 @@ saSaveBtn.addEventListener("click", async () => {
       allowed_vehicles: saVehicles.value.trim(),
       max_radius_miles: saRadius.value ? Number(saRadius.value) : null,
       chat_ids: saChatIds.value.trim(),
-      bot_token: saBotToken.value.trim(),
-      driver_bot_token: saDriverToken.value.trim(),
     });
     showToast("Standalone settings saved");
     await loadStandaloneSettings();

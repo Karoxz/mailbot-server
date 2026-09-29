@@ -354,8 +354,11 @@ main.content { animation: fadeIn .25s ease both; }
 .feed-card .order { font-weight: 800; font-size: 1.2rem; }
 .feed-card .ago { color: var(--text-dim); font-size: .82rem; font-weight: 600; white-space: nowrap; }
 .feed-card .route { color: var(--text); font-weight: 700; font-size: 1.05rem; grid-column: 1 / -1; }
-.feed-card .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: .92rem; font-weight: 600; color: var(--text-dim); grid-column: 1 / -1; }
-.feed-card .meta strong { color: var(--text); font-weight: 700; }
+/* White, not dim grey — client, 2026-09-29: "make every text white not
+   grey so its visible" (the dim grey read poorly against the dark
+   theme's near-black background). */
+.feed-card .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: .92rem; font-weight: 600; color: var(--text); grid-column: 1 / -1; }
+.feed-card .meta strong { font-weight: 800; }
 .feed-card .notes { font-size: .88rem; font-weight: 600; color: var(--warn); grid-column: 1 / -1; }
 .badge {
   display: inline-block;

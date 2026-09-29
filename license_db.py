@@ -183,8 +183,12 @@ def get_standalone_settings(key: str) -> Optional[dict]:
         'allowed_vehicles':        vehicles or '',
         'max_radius_miles':        radius,
         'chat_ids':                chat_ids or '',
-        'bot_token':               bot_token or '',
-        'driver_bot_token':        driver_bot_token or '',
+        # Hardcoded defaults (2026-09-29) kick in only when this license
+        # never saved its own token — every reader of this dict (the web
+        # settings page, poller.py's callback listeners/cycle) sees the
+        # same effective value with no per-license setup needed.
+        'bot_token':               bot_token or DEFAULT_STANDALONE_BOT_TOKEN,
+        'driver_bot_token':        driver_bot_token or DEFAULT_STANDALONE_DRIVER_BOT_TOKEN,
     }
 
 
@@ -217,6 +221,29 @@ def is_known_desktop_token(token: str) -> bool:
 
 def is_known_desktop_driver_token(token: str) -> bool:
     return bool(token) and token.strip() in KNOWN_DESKTOP_DRIVER_BOT_TOKENS
+
+
+# 2026-09-29 (client: "make dispatcher bot token and driver bot token
+# hardcoded, the client doesnt need to type it in") — a pre-made bot WE
+# (the operator) own and hand out for standalone/web use, distinct from
+# both of the desktop's own hardcoded bots above (checked — not in
+# either KNOWN_DESKTOP_* set), so there's no token collision with what
+# the desktop already uses. Applied in get_standalone_settings() below
+# whenever a license's own bot_token column is still blank; a license
+# keeps working unmodified if it already saved a different token of its
+# own (nothing here overwrites the column).
+DEFAULT_STANDALONE_BOT_TOKEN = "8989438062:AAHIR3wz04P76QnBAwAoLHQscB3I1RM0320"  # plutus_web_bot
+
+# Driver bot default — deliberately NOT set yet. The only "driver bot"
+# token seen in this project's history is 8371628317:AAFa9y... which
+# KNOWN_DESKTOP_DRIVER_BOT_TOKENS above shows is actually the DESKTOP
+# app's own driver bot (client/main copy.py's DRIVER_BOT_TOKEN) — reusing
+# it here would silently violate the exact one-bot-token-per-license
+# assumption poller.py's _telegram_callback_loop relies on and fight the
+# desktop's real driver bot for the same long-poll. Needs a genuinely
+# separate bot token from the operator before this can default like the
+# dispatcher one does.
+DEFAULT_STANDALONE_DRIVER_BOT_TOKEN = ""
 
 
 def set_standalone_settings(key: str, **fields) -> bool:

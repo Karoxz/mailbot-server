@@ -440,7 +440,6 @@
   const NAV_ITEMS = [
     { href: "index.html",       label: "Dashboard" },
     { href: "trucks.html",      label: "Trucks" },
-    { href: "brokers.html",     label: "Brokers" },
     { href: "bid_history.html", label: "Bid History" },
     { href: "activity.html",    label: "Activity" },
     { href: "settings.html",    label: "Settings" },
