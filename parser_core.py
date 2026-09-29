@@ -2340,12 +2340,14 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     if weight:
         lines.append(f"Weight: {weight}")
 
+    freight_dims_display = None
     if dims_raw:
         dc = dims_raw.strip()
         if (dc and not re.fullmatch(r"[0\s xXlLwWhH]+", dc)
                 and not re.search(r"no\s+dim", dc, re.I)
                 and not re.search(r"not?\s+specified|n/?a", dc, re.I)):
             lines.append(f"Dims: {dc}")
+            freight_dims_display = dc
 
     stackable = _find(r"Stackable:\s*(Yes|No)", t)
     if stackable:
@@ -2515,6 +2517,26 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 "broker_notes":         broker_notes,     # ← NEW
                 "freight_fit":          freight_fit,      # ← NEW
                 "load_decision":        load_decision,        # ← NEW   # ← NEW
+                # 2026-09-29 (client: "incoming loads should have the same
+                # info as the telegram notification") — the rest of what
+                # the Telegram message text already shows (see the `lines`
+                # build above) but that never made it into the stored dict
+                # before, so the web feed card was always a strict subset.
+                "email_time":           format_email_time_from_internal_date(internal_date_ms),
+                "pickup_asap":          pickup_asap,
+                "pickup_direct":        pickup_direct,
+                "delivery_asap":        delivery_asap,
+                "deliver_direct":       deliver_direct,
+                "stops":                stops,
+                "pieces":               pieces_raw,
+                "weight":               weight,
+                "freight_dims":         freight_dims_display,
+                "stackable":            stackable,
+                "notes":                notes,
+                "broker_company":       broker_company,
+                "broker_phone":         broker_phone,
+                "transit_minutes":      calculate_tt_minutes(estimated_miles_from_email)
+                                        if estimated_miles_from_email else None,
             })
 
     _PE3 = time.perf_counter()

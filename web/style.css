@@ -89,8 +89,8 @@ main.content { animation: fadeIn .25s ease both; }
   box-shadow: var(--shadow);
 }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-.login-logo { width: 44px; height: 44px; border-radius: 10px; object-fit: cover; }
-.login-card h1 { font-size: 1.6rem; }
+.login-logo { width: 60px; height: 60px; border-radius: 12px; object-fit: cover; }
+.login-card h1 { font-size: 1.6rem; text-transform: uppercase; letter-spacing: .5px; }
 .login-card .subtitle { color: var(--text-dim); font-size: .9rem; margin-bottom: 20px; }
 .login-card input {
   width: 100%;
@@ -143,15 +143,19 @@ main.content { animation: fadeIn .25s ease both; }
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-weight: 700;
-  font-size: 1.05rem;
-  letter-spacing: .2px;
+  gap: 10px;
+  font-weight: 800;
+  font-size: 1.2rem;
+  letter-spacing: .6px;
+  text-transform: uppercase;
   margin-right: 28px;
   color: var(--text);
   text-decoration: none;
 }
-.brand-logo { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
+/* Bigger logo — client, 2026-09-29: "make the title Plutus Bot all upper
+   case, and make the logo itself bigger" (title uppercased above via
+   text-transform, so the markup text itself doesn't need touching). */
+.brand-logo { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
 .topnav { display: flex; align-items: center; gap: 4px; flex: 1; overflow-x: auto; }
@@ -331,21 +335,28 @@ main.content { animation: fadeIn .25s ease both; }
 .empty-note { color: var(--text-dim); font-size: .88rem; padding: 22px 18px; text-align: center; }
 
 /* ── Live feed ──────────────────────────────────────────── */
+/* Expanded + bolder — client, 2026-09-29: "expand loads boxes and make
+   loads info text bigger and bolder" (each card now also carries the
+   full Telegram-notification-parity fields, so it needs the extra room
+   regardless). */
 .feed-list { display: flex; flex-direction: column; }
 .feed-card {
-  padding: 14px 18px;
+  padding: 20px 22px;
   border-bottom: 1px solid var(--border);
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 4px 12px;
+  gap: 6px 12px;
   align-items: start;
   transition: background .15s ease;
 }
 .feed-card:hover { background: var(--bg-card); }
 .feed-card:last-child { border-bottom: none; }
-.feed-card .order { font-weight: 700; }
-.feed-card .route { color: var(--text-dim); font-size: .88rem; grid-column: 1 / -1; }
-.feed-card .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: .82rem; color: var(--text-dim); grid-column: 1 / -1; }
+.feed-card .order { font-weight: 800; font-size: 1.2rem; }
+.feed-card .ago { color: var(--text-dim); font-size: .82rem; font-weight: 600; white-space: nowrap; }
+.feed-card .route { color: var(--text); font-weight: 700; font-size: 1.05rem; grid-column: 1 / -1; }
+.feed-card .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: .92rem; font-weight: 600; color: var(--text-dim); grid-column: 1 / -1; }
+.feed-card .meta strong { color: var(--text); font-weight: 700; }
+.feed-card .notes { font-size: .88rem; font-weight: 600; color: var(--warn); grid-column: 1 / -1; }
 .badge {
   display: inline-block;
   padding: 2px 8px;

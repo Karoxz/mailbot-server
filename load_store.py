@@ -174,10 +174,20 @@ def get_recent_loads(license_key: str, limit: int = 30) -> list:
     conn = _connect()
     try:
         cur = conn.execute(
-            "SELECT data_json FROM loads WHERE license_key=? ORDER BY created_at DESC LIMIT ?",
+            "SELECT data_json, created_at FROM loads WHERE license_key=? ORDER BY created_at DESC LIMIT ?",
             (license_key, limit)
         )
-        return [json.loads(r[0]) for r in cur.fetchall()]
+        out = []
+        for data_json, created_at in cur.fetchall():
+            item = json.loads(data_json)
+            # received_at (2026-09-29, "how long ago the load came" on the
+            # web feed): this row's own created_at, the moment put_load
+            # first stored this order — not something data_json carried
+            # itself, so it's stitched on here rather than duplicated into
+            # every write.
+            item["received_at"] = created_at
+            out.append(item)
+        return out
     finally:
         conn.close()
 

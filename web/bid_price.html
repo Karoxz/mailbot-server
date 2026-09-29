@@ -64,7 +64,7 @@
 <main class="content">
   <div class="page-toolbar">
     <h1>Bid PC</h1>
-    <a id="back-link" href="loads.html" class="hint">← Loads</a>
+    <a id="back-link" href="index.html" class="hint">← Dashboard</a>
   </div>
 
   <div class="bid-layout">
@@ -132,7 +132,7 @@ function showError(msg) {
 
 // ── Auth: a signed token (?t=, Telegram/phone — no prior dashboard
 // session on that device) OR the dashboard's normal license_key flow
-// (already in localStorage, linked from loads.html with ?order_id=). ──
+// (already in localStorage, linked from index.html with ?order_id=). ──
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get("t");
 const URL_ORDER_ID = params.get("order_id");
@@ -264,18 +264,29 @@ async function submitBid() {
     document.getElementById("result-gmail").href = gmailUrl;
     document.getElementById("result-panel").style.display = "";
     showToast(copied ? "Bid recorded — text copied, opening the thread…" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
-    // Desktop parity, 2026-09-25 (client: "it should redirect to the
-    // exact thread im bidding to", matching _open_bid_thread's
-    // auto-open on desktop) — navigate the CURRENT tab straight to the
-    // thread rather than window.open()-ing a new one: a new-tab open
-    // this far after the click (past an async fetch + clipboard write)
-    // gets silently popup-blocked on iOS Safari, which is exactly
-    // where this page is mostly opened from (a Telegram-sent link). A
-    // plain location change isn't subject to that. The result panel
-    // above is still rendered first as a fallback — if the redirect
-    // is somehow interrupted, the copy button and thread link are
-    // still right there.
-    window.location.href = gmailUrl;
+    if (TOKEN) {
+      // Desktop parity, 2026-09-25 (client: "it should redirect to the
+      // exact thread im bidding to", matching _open_bid_thread's
+      // auto-open on desktop) — navigate the CURRENT tab straight to
+      // the thread rather than window.open()-ing a new one: a new-tab
+      // open this far after the click (past an async fetch + clipboard
+      // write) gets silently popup-blocked on iOS Safari, which is
+      // exactly where this page is opened from on the TOKEN path (a
+      // Telegram-sent link, no dashboard tab to come back to anyway).
+      // A plain location change isn't subject to that. The result
+      // panel above is still rendered first as a fallback — if the
+      // redirect is somehow interrupted, the copy button and thread
+      // link are still right there.
+      window.location.href = gmailUrl;
+    } else {
+      // Dashboard path (client, 2026-09-29: "when i press make a bid,
+      // it should open gmail thread on the new tab, not the plutus bot
+      // tab") — here the click came from a real dashboard tab the
+      // dispatcher wants to keep, so open the thread in a new one
+      // instead of navigating away from it. Popup blocking isn't a
+      // concern on this path the way it is on mobile Safari.
+      window.open(gmailUrl, "_blank", "noopener");
+    }
   } catch (err) {
     showError(err.message || "Failed to submit bid");
     btn.disabled = false;

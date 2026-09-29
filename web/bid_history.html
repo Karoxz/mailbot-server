@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plutus Bot — Bid History</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/plutus_logo.jpg">
+</head>
+<body>
+
+<header id="app-nav" class="topbar"></header>
+
+<main class="content">
+  <div class="page-toolbar">
+    <h1>Bid History</h1>
+    <span class="hint">Every bid recorded from the desktop app, Telegram, or this dashboard</span>
+  </div>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>All bids</h2>
+      <button id="export-csv-btn" class="btn btn-sm" type="button">⬇ Export CSV</button>
+    </div>
+    <div id="bid-history-controls"></div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Order</th><th>Lane</th><th>Vehicle</th><th>Rate</th><th>$/mi</th><th>Status</th><th>When</th></tr>
+        </thead>
+        <tbody id="bid-table-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+const MB = window.MailBot;
+MB.requireAuth();
+MB.initTheme();
+MB.renderTopbar("bid_history.html");
+
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+function renderBidHistory(items) {
+  const el = document.getElementById("bid-table-body");
+  MB.diffRender(el, items, {
+    key: (b) => b.id,
+    isRow: true,
+    emptyHtml: '<tr><td colspan="7" class="empty-note">No bids yet.</td></tr>',
+    html: (b) => {
+      const status = (b.status || "pending").toLowerCase();
+      return `
+        <tr>
+          <td>#${MB.esc(b.order_id)}</td>
+          <td>${MB.esc(b.lane || "—")}</td>
+          <td>${MB.esc(b.vehicle_type || "—")}</td>
+          <td>${MB.fmtMoney(b.bid_amount)}</td>
+          <td>${MB.fmtRate(b.rate_per_mile)}</td>
+          <td><span class="status-pill status-${status}">${MB.esc(b.status || "pending")}</span></td>
+          <td>${MB.fmtWhen(b.created_at)}</td>
+        </tr>`;
+    },
+  });
+}
+
+let allBidHistory = [];
+const bidHistoryControls = MB.mountListControls(document.getElementById("bid-history-controls"), {
+  searchPlaceholder: "Search bid history (order, lane, vehicle)…",
+  sortOptions: [
+    { key: "created_at", label: "Date" },
+    { key: "order_id", label: "Order #" },
+    { key: "bid_amount", label: "Rate" },
+    { key: "rate_per_mile", label: "$/mi" },
+  ],
+  pageSize: 30,
+  onChange: applyBidHistoryControls,
+});
+// Default to newest-first (matches the server's own ORDER BY), not
+// mountListControls' generic ascending default.
+bidHistoryControls.sortDir = "desc";
+document.getElementById("bid-history-controls").querySelector(".list-sort-dir").textContent = "↓";
+
+function applyBidHistoryControls() {
+  const result = MB.filterSortPaginate(allBidHistory, {
+    searchTerm: bidHistoryControls.searchTerm,
+    searchFields: ["order_id", "lane", "vehicle_type", "broker_email"],
+    sortKey: bidHistoryControls.sortKey,
+    sortDir: bidHistoryControls.sortDir,
+    page: bidHistoryControls.page,
+    pageSize: 30,
+  });
+  bidHistoryControls.page = result.page;
+  bidHistoryControls._updatePager(result.page, result.totalPages);
+  renderBidHistory(result.items);
+}
+
+document.getElementById("export-csv-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("export-csv-btn");
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await MB.apiGet("/api/web/bid_history", { limit: 5000 });
+    MB.exportCsv(`bid_history_${new Date().toISOString().slice(0, 10)}.csv`, res.items, [
+      { key: "order_id", label: "Order" },
+      { key: "lane", label: "Lane" },
+      { key: "pickup_loc", label: "Pickup" },
+      { key: "delivery_loc", label: "Delivery" },
+      { key: "vehicle_type", label: "Vehicle" },
+      { key: "broker_name", label: "Broker name" },
+      { key: "broker_email", label: "Broker email" },
+      { key: "bid_amount", label: "Rate" },
+      { key: "rate_per_mile", label: "$/mi" },
+      { key: "status", label: "Status" },
+      { key: "bid_method", label: "Method" },
+      { key: "created_at", label: "Created" },
+      { key: "outcome_at", label: "Outcome date" },
+    ]);
+  } catch (err) {
+    showToast(err.message || "Export failed");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "⬇ Export CSV";
+  }
+});
+
+async function refresh() {
+  try {
+    const hist = await MB.apiGet("/api/web/bid_history", { limit: 500 });
+    allBidHistory = hist.items;
+    applyBidHistoryControls();
+    MB.setConn(true);
+  } catch (err) {
+    MB.setConn(false);
+    MB.bounceIfAuthError(err);
+  }
+}
+
+document.getElementById("bid-table-body").innerHTML = MB.skeletonRows(7, 6);
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

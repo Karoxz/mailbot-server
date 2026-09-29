@@ -177,6 +177,26 @@
       });
     } catch (e) { return iso; }
   }
+  // "How long ago" — client, 2026-09-29: "on every incoming load there
+  // should be a time info of how long ago the load came". Recomputed on
+  // every poll (the feed card's content signature changes each time, so
+  // diffRender refreshes it in place) rather than a live-ticking timer —
+  // this dashboard already re-renders every 10s, which is granular
+  // enough and needs no extra interval of its own.
+  function fmtAgo(iso) {
+    if (!iso) return "";
+    let then;
+    try { then = new Date(iso).getTime(); } catch (e) { return ""; }
+    if (!then || Number.isNaN(then)) return "";
+    const sec = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (sec < 60) return "just now";
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.round(hr / 24);
+    return `${day}d ago`;
+  }
 
   // ── Diff-render (Slice 3, animation/fluidity pass) ──────────────────
   // Every polling list (renderFeed/renderBidHistory/renderLoads) used to
@@ -418,12 +438,12 @@
 
   // ── Nav ────────────────────────────────────────────────────────────
   const NAV_ITEMS = [
-    { href: "index.html",    label: "Dashboard" },
-    { href: "loads.html",    label: "Loads" },
-    { href: "trucks.html",   label: "Trucks" },
-    { href: "brokers.html",  label: "Brokers" },
-    { href: "activity.html", label: "Activity" },
-    { href: "settings.html", label: "Settings" },
+    { href: "index.html",       label: "Dashboard" },
+    { href: "trucks.html",      label: "Trucks" },
+    { href: "brokers.html",     label: "Brokers" },
+    { href: "bid_history.html", label: "Bid History" },
+    { href: "activity.html",    label: "Activity" },
+    { href: "settings.html",    label: "Settings" },
   ];
   function renderTopbar(activeHref) {
     const mount = document.getElementById("app-nav");
@@ -567,7 +587,7 @@
     getLicenseKey, setLicenseKey, clearLicenseKey, requireAuth,
     initTheme, toggleTheme,
     apiGet, apiPost, apiPatch, apiDelete, bounceIfAuthError,
-    esc, fmtMoney, fmtRate, fmtPct, fmtWhen,
+    esc, fmtMoney, fmtRate, fmtPct, fmtWhen, fmtAgo,
     renderTopbar, setConn, showFatalError, gmailSearchUrl,
     diffRender, skeletonCards, skeletonRows, popIn,
     filterSortPaginate, mountListControls, exportCsv, toast,
