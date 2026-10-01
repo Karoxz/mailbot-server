@@ -6,60 +6,26 @@
 <title>PLUTUS BOT</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/plutus_logo.jpg">
+<style>
+  /* Wider than the shared .content default (1100px) so the feed grid
+     below actually has room to lay out 3-4 cards per row — client,
+     2026-10-01: "make loads in the 3 or 4 rows, see which one fits
+     better". auto-fill in style.css's .feed-list rule does the actual
+     "3 or 4, whichever fits" adapting on its own once there's enough
+     width to work with. */
+  @media (min-width: 900px) {
+    main.content { max-width: 1700px; }
+  }
+</style>
 </head>
 <body>
 
 <header id="app-nav" class="topbar"></header>
 
 <main class="content">
-  <!-- Standalone mode — moved up from Settings, 2026-09-29 (client:
-       "standalone configuration that is in the settings, remove it from
-       settings and move it above the live feed"). Same panel, same
-       IDs/JS, just relocated so turning the web bot on/off and the live
-       feed it produces are on the same screen. -->
-  <section class="panel">
-    <div class="panel-header">
-      <h2>Standalone mode</h2>
-      <span class="panel-hint">Runs the whole bot server-side — reads Gmail, matches loads, notifies — with no desktop app needing to be open at all.</span>
-    </div>
-    <div class="sa-statusbar">
-      <div class="sa-status-text">
-        <span id="sa-status" class="sa-status">Loading…</span>
-        <span id="sa-poller-status" class="sa-sub"></span>
-      </div>
-      <button id="sa-toggle" class="btn btn-primary" type="button" disabled>…</button>
-    </div>
-    <p id="sa-hint" class="note-text sa-hint"></p>
-
-    <div class="sa-section">
-      <h3>What to watch</h3>
-      <div class="sa-grid">
-        <div class="field"><label for="sa-vehicles">Allowed vehicles</label><input id="sa-vehicles" placeholder="e.g. LARGE STRAIGHT, SPRINTER"><small>Comma-separated.</small></div>
-        <div class="field"><label for="sa-radius">Max radius (miles)</label><input id="sa-radius" type="number" placeholder="e.g. 300"><small>Fleet-wide deadhead cap; a truck's own radius overrides it.</small></div>
-        <div class="field"><label for="sa-chatids">Telegram chat IDs</label><input id="sa-chatids" placeholder="e.g. 123456789"><small>Comma-separated; negative for groups.</small></div>
-      </div>
-    </div>
-    <!-- Dispatcher/driver bot tokens — 2026-09-29 (client: "make
-         dispatcher bot token and driver bot token hardcoded, the client
-         doesnt need to type it in"). No longer a form field at all: the
-         server applies a pre-made bot automatically for any license that
-         hasn't saved its own (license_db.DEFAULT_STANDALONE_BOT_TOKEN),
-         so there's nothing to create on @BotFather or paste here. -->
-
-    <div class="form-actions" style="padding:4px 18px 16px;">
-      <button id="sa-save-btn" class="btn" type="button">Save settings</button>
-    </div>
-
-    <details class="sa-details">
-      <summary>How the web bot works</summary>
-      <p><strong>Web bot and desktop app take turns automatically.</strong> You can connect the same Gmail account to both. While the
-        desktop app is running (after START) the web bot pauses by itself and shows "paused — desktop running"; about a minute after you stop
-        the desktop, the web bot takes over again. They never run at the same time, so they can't fight over the same emails.</p>
-      <p>Turning the web bot ON does what the desktop's START does: Telegram notifications and thread learning are switched on, you get a
-        "Watching" message, and the last 2 days of unread freight mail are scanned once. Gmail itself is connected on the Settings page.</p>
-    </details>
-  </section>
-
+  <!-- Standalone mode moved to the Trucks page, 2026-10-01 (client:
+       "move standalone mode block from dashboard page to the top of
+       trucks page"). See trucks.html. -->
   <section class="panel">
     <div class="panel-header">
       <h2>Live feed</h2>
@@ -433,137 +399,6 @@ document.getElementById("loads-list").innerHTML = MB.skeletonCards(4);
 
 refresh();
 setInterval(refresh, 10000);
-
-// ── Standalone mode ───────────────────────────────────────────────
-// Ported as-is from settings.html (2026-09-29 relocation) — same IDs,
-// same endpoints. gmailConnected is fetched fresh here since the
-// Gmail-connect UI itself stays on the Settings page now.
-const saVehicles = document.getElementById("sa-vehicles");
-const saRadius   = document.getElementById("sa-radius");
-const saChatIds  = document.getElementById("sa-chatids");
-const saSaveBtn  = document.getElementById("sa-save-btn");
-let saDesktopActive = false;
-const saStatus   = document.getElementById("sa-status");
-const saToggle   = document.getElementById("sa-toggle");
-const saHint     = document.getElementById("sa-hint");
-
-let saEnabled = false;
-let saHasVehicles = false;
-let gmailConnected = false;
-
-function renderStandaloneGate() {
-  const ready = gmailConnected && saHasVehicles;
-  saToggle.disabled = saEnabled ? false : !ready;
-  if (ready) {
-    saHint.textContent = "Prerequisites met — this can run with no desktop app open at all.";
-  } else {
-    const missing = [];
-    if (!gmailConnected) missing.push("connect Gmail on the Settings page");
-    if (!saHasVehicles) missing.push("set at least one allowed vehicle");
-    saHint.textContent = `Needs: ${missing.join(", ")}.`;
-  }
-}
-
-function renderSaState() {
-  saStatus.textContent = saEnabled ? (saDesktopActive ? "🟡 PAUSED — desktop app is running" : "🟢 RUNNING") : "⚪ OFF";
-  saStatus.style.color = saEnabled ? (saDesktopActive ? "var(--warn)" : "var(--good)") : "var(--text-dim)";
-  saToggle.textContent = saEnabled ? "Turn off" : "Turn on";
-  saToggle.className = saEnabled ? "btn btn-danger" : "btn btn-primary";
-  renderStandaloneGate();
-}
-
-async function loadGmailConnectedFlag() {
-  try {
-    const res = await MB.apiGet("/api/web/gmail/status");
-    gmailConnected = !!res.connected;
-  } catch (err) {
-    // Non-fatal here — the Settings page is the source of truth for
-    // Gmail connection errors; this only feeds the standalone gate.
-  }
-}
-
-async function loadStandaloneSettings() {
-  try {
-    await loadGmailConnectedFlag();
-    const res = await MB.apiGet("/api/web/standalone/settings");
-    saVehicles.value = res.allowed_vehicles || "";
-    saRadius.value = res.max_radius_miles ?? "";
-    saChatIds.value = res.chat_ids || "";
-    saHasVehicles = !!(res.allowed_vehicles || "").trim();
-    saEnabled = !!res.standalone_mode_enabled;
-    saDesktopActive = !!res.desktop_active;
-    renderSaState();
-    MB.setConn(true);
-  } catch (err) {
-    saStatus.textContent = "Error loading status";
-    MB.setConn(false);
-    MB.bounceIfAuthError(err);
-  }
-}
-
-saSaveBtn.addEventListener("click", async () => {
-  saSaveBtn.disabled = true;
-  try {
-    await MB.apiPost("/api/web/standalone/settings", {
-      allowed_vehicles: saVehicles.value.trim(),
-      max_radius_miles: saRadius.value ? Number(saRadius.value) : null,
-      chat_ids: saChatIds.value.trim(),
-    });
-    showToast("Standalone settings saved");
-    await loadStandaloneSettings();
-  } catch (err) {
-    showToast(err.message || "Failed to save", true);
-  } finally {
-    saSaveBtn.disabled = false;
-  }
-});
-
-saToggle.addEventListener("click", async () => {
-  saToggle.disabled = true;
-  const endpoint = saEnabled ? "/api/web/standalone/disable" : "/api/web/standalone/enable";
-  try {
-    const res = await MB.apiPost(endpoint, {});
-    saEnabled = !!res.enabled;
-    renderSaState();
-    showToast(saEnabled ? "Standalone mode enabled" : "Standalone mode disabled");
-  } catch (err) {
-    showToast(err.message || "Failed to update", true);
-    renderStandaloneGate();
-  }
-});
-
-loadStandaloneSettings();
-
-// ── Poller liveness ──────────────────────────────────────────────
-const saPollerStatus = document.getElementById("sa-poller-status");
-const POLLER_STALE_AFTER_MS = 3 * 20 * 1000; // 3x the poller's own poll interval
-
-async function loadPollerStatus() {
-  try {
-    const res = await MB.apiGet("/api/web/standalone/poller_status");
-    const hb = res.heartbeat;
-    if (!hb || !hb.last_run_at) {
-      saPollerStatus.textContent = "⚪ Poller has never reported in — the background service may not be running yet.";
-      saPollerStatus.style.color = "var(--text-dim)";
-      return;
-    }
-    const ageMs = Date.now() - new Date(hb.last_run_at).getTime();
-    const ageSec = Math.round(ageMs / 1000);
-    const stale = ageMs > POLLER_STALE_AFTER_MS;
-    saPollerStatus.textContent = stale
-      ? `⚠️ Poller hasn't reported in ${ageSec}s — check the service.`
-      : `🟢 Poller last ran ${ageSec}s ago (${hb.licenses_processed} license(s) checked).`;
-    saPollerStatus.style.color = stale ? "var(--warn)" : "var(--good)";
-    if (hb.last_error) {
-      saPollerStatus.textContent += ` Last error: ${hb.last_error.split("\n").pop()}`;
-    }
-  } catch (err) {
-    saPollerStatus.textContent = "";
-  }
-}
-
-loadPollerStatus();
-setInterval(loadPollerStatus, 15000);
 </script>
 </body>
 </html>

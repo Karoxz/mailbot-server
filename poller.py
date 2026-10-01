@@ -562,10 +562,28 @@ def _notify_labeled_thread(ctx: dict, label_names: list, subject: str, thread_id
     return bool(sent)
 
 
-def _classify_in_background(license_key: str, thread_id: str, subject: str, body: str):
+_STATUS_LABEL = {"won": "✅ Won", "lost": "❌ Lost", "countered": "💰 Countered"}
+
+
+def _classify_in_background(ctx: dict, thread_id: str, subject: str, body: str):
     """Desktop's _run_classify_and_notify: classify the broker's reply and
     record the outcome server-side, on its own thread so it never delays
-    the poll loop; 5-min per-thread cooldown. Silent on Telegram."""
+    the poll loop; 5-min per-thread cooldown.
+
+    2026-10-01 (client: "bid reply didnt came in, there should also be
+    bid replys in the web version") — the desktop's own equivalent is
+    deliberately silent on Telegram (2026-09-17 client decision: the
+    only reply notification desktop sends is the labeled-thread ping,
+    which needs the dispatcher to have manually applied a Gmail label
+    to the thread). That's the same reason this was silent here too —
+    but a manually-labeled thread turns out to be the uncommon case in
+    practice, which left most real broker replies invisible on the web
+    side with no ping of any kind. This sends a notification on every
+    CONFIDENT classification (won/lost/countered) regardless of any
+    Gmail label, independent of (and in addition to) the labeled-thread
+    ping — the two can both fire for the same reply if it happens to be
+    in a labeled thread, which is fine, not a regression of that path."""
+    license_key = ctx["license_key"]
     if not _cooldown_ok(_last_classify, (license_key, thread_id)):
         return None
 
@@ -573,10 +591,23 @@ def _classify_in_background(license_key: str, thread_id: str, subject: str, body
         try:
             res = reply_handler.classify_and_record(license_key, thread_id, subject, body)
             if res.get("matched") and res.get("updated"):
-                order = (res.get("order") or {}).get("order_id", "")
-                status = (res.get("classification") or {}).get("status", "")
+                order_ctx = res.get("order") or {}
+                order = order_ctx.get("order_id", "")
+                cls = res.get("classification") or {}
+                status = cls.get("status", "")
                 activity_log.log_event(license_key, "bid_outcome",
                                        f"Broker reply on order #{order}: {status}")
+                if _can_send(ctx):
+                    label = _STATUS_LABEL.get(status, status.capitalize() or "Reply")
+                    route = f"{order_ctx.get('pickup_loc', '')} → {order_ctx.get('delivery_loc', '')}".strip(" →")
+                    lines = [f"💬 Broker reply — Order #{order}" if order else "💬 Broker reply",
+                             label]
+                    if route and route != "→":
+                        lines.append(route)
+                    if order_ctx.get("broker_name"):
+                        lines.append(order_ctx["broker_name"])
+                    _tg_broadcast(ctx["bot_token"], ctx["chat_ids"], "\n".join(lines),
+                                 [[{"text": "✉️ Open thread", "url": _gmail_url(order, None, thread_id)}]])
         except Exception:
             logger.error(f"[{license_key}] classify failed:\n{traceback.format_exc()}")
 
@@ -685,7 +716,7 @@ def _process_message(ctx: dict, service, label_map: dict, msg_id: str) -> str:
     # 6. body, 7. classify (background), 8. strip quoted reply
     body = extract_text_from_full_message(full)
     if thread_id:
-        _classify_in_background(lk, thread_id, subject, body)
+        _classify_in_background(ctx, thread_id, subject, body)
     parse_body = desktop_parity.strip_quoted_reply(body)
 
     # 9. parse

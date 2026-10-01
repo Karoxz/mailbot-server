@@ -312,6 +312,32 @@ def _():
     assert calls[0][3] == "new\nOn Mon, X wrote:\n> old"   # classify sees the full body, parse sees it stripped
 
 
+@test("a confident broker-reply classification (won/lost/countered) sends a Telegram notification regardless of any Gmail label")
+def _():
+    stub_parse()
+    import reply_handler
+    _orig_classify = reply_handler.classify_and_record  # restore below — a permanent
+    # monkeypatch here would leak a bogus "Broker reply" send into every
+    # later test that triggers classify-in-background.
+    reply_handler.classify_and_record = lambda lk, th, subj, body: {
+        "matched": True, "updated": True,
+        "classification": {"status": "won", "confidence": 0.9, "reason": "accepted"},
+        "order": {"order_id": "42", "pickup_loc": "Chicago, IL", "delivery_loc": "Dallas, TX",
+                  "broker_name": "Acme Logistics"},
+    }
+    try:
+        g = setup([make_msg("m1", "Re: Bid on Order #42 LARGE STRAIGHT", "Sounds good, let's book it", thread="tw")])
+        poller._process_message(fresh_ctx(), g, {}, "m1")
+        for t in __import__("threading").enumerate():
+            if t.name == "classify":
+                t.join(2)
+        texts = [s["text"] for s in tg.sends()]
+        assert any("💬 Broker reply — Order #42" in t and "✅ Won" in t and "Acme Logistics" in t
+                   for t in texts), texts
+    finally:
+        reply_handler.classify_and_record = _orig_classify
+
+
 @test("Telegram OFF: load still parsed/stored and marked read, nothing sent")
 def _():
     stub_parse()

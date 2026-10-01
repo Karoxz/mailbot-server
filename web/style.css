@@ -89,7 +89,9 @@ main.content { animation: fadeIn .25s ease both; }
   box-shadow: var(--shadow);
 }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-.login-logo { width: 60px; height: 60px; border-radius: 12px; object-fit: cover; }
+/* Circle, not rounded-square — client, 2026-10-01: "make the logo
+   circle shape". */
+.login-logo { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; }
 .login-card h1 { font-size: 1.6rem; text-transform: uppercase; letter-spacing: .5px; }
 .login-card .subtitle { color: var(--text-dim); font-size: .9rem; margin-bottom: 20px; }
 .login-card input {
@@ -155,7 +157,9 @@ main.content { animation: fadeIn .25s ease both; }
 /* Bigger logo — client, 2026-09-29: "make the title Plutus Bot all upper
    case, and make the logo itself bigger" (title uppercased above via
    text-transform, so the markup text itself doesn't need touching). */
-.brand-logo { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
+/* Bigger (was 40px) and circular — client, 2026-10-01: "make the logo
+   bigger" / "make the logo circle shape". */
+.brand-logo { width: 54px; height: 54px; border-radius: 50%; object-fit: cover; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
 .topnav { display: flex; align-items: center; gap: 4px; flex: 1; overflow-x: auto; }
@@ -367,14 +371,16 @@ main.content { animation: fadeIn .25s ease both; }
 .feed-card .notes { font-size: .95rem; font-weight: 700; color: var(--bad); grid-column: 1 / -1; }
 
 /* Desktop: multiple load cards per row so more are visible at once —
-   client, 2026-10-01: "on the desktop resolution, make incoming loads
-   in a row instead of columns, but dont change the phone resolution
-   version keep it as it is". auto-fill naturally collapses back to one
-   column on anything too narrow for a second, so this needs no extra
-   breakpoint tuning beyond complementing the existing 640px mobile
-   query below. */
+   client, 2026-09-29: "make incoming loads in a row instead of
+   columns"; 2026-10-01: "make loads in the 3 or 4 rows, see which one
+   fits better" — 380px (down from the original 460px) plus index.html's
+   own wider .content (1700px there, min-width:900px) gets 3 columns on
+   a typical laptop width and 4 on a wide monitor; auto-fill picks
+   whichever actually fits rather than a hardcoded count, and collapses
+   back to one column below the mobile breakpoint with no extra tuning
+   needed. */
 @media (min-width: 641px) {
-  .feed-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 14px; }
+  .feed-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; }
   .feed-card { border: 1px solid var(--border); border-radius: 10px; }
   .feed-card:last-child { border: 1px solid var(--border); }
 }
