@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Plutus Bot — Dashboard</title>
+<title>PLUTUS BOT</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/plutus_logo.jpg">
 </head>
@@ -65,6 +65,7 @@
       <h2>Live feed</h2>
       <div style="display:flex;align-items:center;gap:10px;">
         <span class="panel-hint">Incoming loads · act on one directly — Bid PC / Phone / Draft</span>
+        <button id="notify-toggle-btn" class="btn btn-sm" type="button" title="Get a popup + sound when a new load comes in">🔔 Enable alerts</button>
         <button id="refresh-btn" class="btn btn-sm" type="button" title="Refresh now">⟳ Refresh</button>
       </div>
     </div>
@@ -194,19 +195,39 @@ function renderLoads(items) {
       const orderId = MB.esc(it.order || "");
       const brokerEmail = it.broker_email || "";
       const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, it.thread_id);
-      const ago = MB.fmtAgo(it.received_at);
+      // Absolute wall-clock time in the corner, not "X ago" — client,
+      // 2026-10-01: "put time like this 07:36:24 EDT". Falls back to the
+      // old relative format on the rare load with no received_at.
+      const clock = MB.fmtClock(it.received_at) || MB.fmtAgo(it.received_at);
+      // Driver's name now rides on the header line itself (client:
+      // "put the drivers name right next to this text") instead of only
+      // appearing further down — real client-reported bug, 2026-10-01:
+      // "load didnt include drivers name" was traced to a real server
+      // bug (an empty truck list used to still save a truck-less load);
+      // fixed server-side, but a load genuinely matched to no truck
+      // (shouldn't happen now) still shows nothing here rather than a
+      // misleading blank.
+      const driverTag = it.driver_name ? ` · <span class="driver">${MB.esc(it.driver_name)}</span>` : "";
 
       const pickupLine = MB.esc(fmtDate("Pick-up", it.pickup_dt, it.pickup_asap, it.pickup_direct));
       const deliverLine = MB.esc(fmtDate("Deliver", it.delivery_dt, it.delivery_asap, it.deliver_direct));
 
+      // "mi" -> "miles", and the whole "N miles out" phrase bolded as one
+      // unit rather than splitting bold/plain right at the word boundary
+      // (client, 2026-10-01: "instead of mi it should be miles" — also
+      // sidesteps a copy/paste artifact where text split across a tag
+      // boundary like that came out run-together, "18miout").
       const milesBits = [
-        it.google_deadhead != null ? `<strong>${MB.esc(it.google_deadhead)}mi</strong> out` : "",
-        it.loaded_miles != null ? `<strong>${MB.esc(it.loaded_miles)}mi</strong> loaded` : "",
-        it.total_miles != null ? `<strong>${MB.esc(it.total_miles)}mi</strong> total` : "",
+        it.google_deadhead != null ? `<strong>${MB.esc(it.google_deadhead)} miles out</strong>` : "",
+        it.loaded_miles != null ? `<strong>${MB.esc(it.loaded_miles)} miles loaded</strong>` : "",
+        it.total_miles != null ? `<strong>${MB.esc(it.total_miles)} miles total</strong>` : "",
       ].filter(Boolean);
+      // Hours+minutes (rounded to 5min), not just whole hours — client,
+      // 2026-10-01: "when the ETA is less then 1 hour, it just says ETA
+      // 0h, add minutes aswell, but minutes should be rounded to 5".
       const etaBits = [
-        it.transit_minutes ? `TT ${Math.round(it.transit_minutes / 60)}h` : "",
-        it.deadhead_eta_minutes != null ? `ETA ${Math.round(it.deadhead_eta_minutes / 60)}h` : "",
+        it.transit_minutes ? `TT ${MB.fmtDuration5(it.transit_minutes)}` : "",
+        it.deadhead_eta_minutes != null ? `ETA ${MB.fmtDuration5(it.deadhead_eta_minutes)}` : "",
       ].filter(Boolean);
       const freightBits = [
         it.stops ? `${MB.esc(it.stops)} stops` : "",
@@ -215,8 +236,7 @@ function renderLoads(items) {
         it.freight_dims ? `${MB.esc(it.freight_dims)}` : "",
         it.stackable ? `stackable: ${MB.esc(it.stackable)}` : "",
       ].filter(Boolean);
-      const driverBits = [
-        it.driver_name ? `<strong>${MB.esc(it.driver_name)}</strong>` : "",
+      const truckBits = [
         it.truck_dimensions ? MB.esc(it.truck_dimensions) : "",
       ].filter(Boolean);
       // Each piece is escaped BEFORE being wrapped in <strong> — mapping
@@ -231,22 +251,19 @@ function renderLoads(items) {
       ].filter(Boolean);
 
       const metaRow = (bits) => bits.length ? `<div class="meta">${bits.join(" · ")}</div>` : "";
-      const reasons = (it.load_decision?.reasons || []).slice(0, 3)
-        .map((r) => `<div class="meta">• ${MB.esc(r)}</div>`).join("");
 
       return `
         <div class="feed-card">
-          <div class="order">#${orderId} <span style="font-weight:600;">${MB.esc(it.vehicle_required || "")}</span></div>
-          <div class="ago">${MB.esc(ago)}</div>
+          <div class="order">#${orderId} <span style="font-weight:600;">${MB.esc(it.vehicle_required || "")}</span>${driverTag}</div>
+          <div class="ago">${MB.esc(clock)}</div>
           <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
           <div class="meta">${pickupLine} &nbsp;·&nbsp; ${deliverLine}</div>
           ${metaRow(milesBits)}
-          ${metaRow(driverBits)}
+          ${metaRow(truckBits)}
           ${metaRow(etaBits)}
           ${metaRow(freightBits)}
           ${brokerBits.length ? `<div class="meta">${brokerBits.join(" · ")}</div>` : ""}
           ${it.notes ? `<div class="notes">🔔 ${MB.esc(it.notes)}</div>` : ""}
-          ${reasons}
           <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
             <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc" data-broker="${MB.esc(brokerEmail)}">Bid PC</button>
             <button class="btn btn-sm" data-order="${orderId}" data-method="phone" data-broker="${MB.esc(brokerEmail)}">Bid Phone</button>
@@ -298,10 +315,102 @@ function applyLoadsControls() {
   renderLoads(result.items);
 }
 
+// ── New-load alert — client, 2026-10-01: "when a new load comes in it
+// should give notification just like when in facebook new message
+// comes in". A real OS/browser notification popup + a short beep +
+// (while the tab isn't focused) a flashing tab title, fired only for
+// orders not already seen this session — the FIRST fetch just silently
+// records every order already in the feed so opening the page doesn't
+// "notify" about 50 loads that already existed.
+const NOTIFY_KEY = "mailbot_notify_enabled";
+let notifyEnabled = false;
+try { notifyEnabled = localStorage.getItem(NOTIFY_KEY) === "1"; } catch (e) {}
+let seenOrderIds = null; // null = first fetch hasn't happened yet
+let titleFlashTimer = null;
+const ORIGINAL_TITLE = document.title;
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = "sine"; osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.36);
+    osc.onended = () => ctx.close();
+  } catch (e) { /* audio not available — notification/flash still happen */ }
+}
+
+function flashTitle() {
+  if (!document.hidden) return;
+  let on = false;
+  clearInterval(titleFlashTimer);
+  titleFlashTimer = setInterval(() => {
+    document.title = on ? ORIGINAL_TITLE : "🔴 New load! — PLUTUS BOT";
+    on = !on;
+  }, 1000);
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    clearInterval(titleFlashTimer);
+    document.title = ORIGINAL_TITLE;
+  }
+});
+
+function notifyNewLoad(it) {
+  if (!notifyEnabled) return;
+  beep();
+  flashTitle();
+  if (window.Notification && Notification.permission === "granted") {
+    try {
+      const n = new Notification(`New load — #${it.order || "?"}`, {
+        body: `${it.pickup_loc || "?"} → ${it.delivery_loc || "?"}${it.driver_name ? " · " + it.driver_name : ""}`,
+        tag: `mailbot-load-${it.order}`,
+      });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) { /* ignore — beep/flash already fired */ }
+  }
+}
+
+const notifyBtn = document.getElementById("notify-toggle-btn");
+function renderNotifyBtn() {
+  notifyBtn.textContent = notifyEnabled ? "🔔 Alerts on" : "🔕 Enable alerts";
+  notifyBtn.classList.toggle("btn-primary", notifyEnabled);
+}
+renderNotifyBtn();
+notifyBtn.addEventListener("click", async () => {
+  if (notifyEnabled) {
+    notifyEnabled = false;
+  } else {
+    if (window.Notification && Notification.permission !== "granted" && Notification.permission !== "denied") {
+      try { await Notification.requestPermission(); } catch (e) {}
+    }
+    notifyEnabled = true;
+    beep(); // immediate feedback that alerts are now on
+  }
+  try { localStorage.setItem(NOTIFY_KEY, notifyEnabled ? "1" : "0"); } catch (e) {}
+  renderNotifyBtn();
+});
+
 async function refresh() {
   try {
     const feed = await MB.apiGet("/api/web/feed", { limit: 50 });
     allLoads = feed.items;
+    const currentIds = new Set(allLoads.map((it) => it.order));
+    if (seenOrderIds === null) {
+      seenOrderIds = currentIds; // first load — just establish the baseline
+    } else {
+      allLoads.forEach((it) => {
+        if (!seenOrderIds.has(it.order)) {
+          seenOrderIds.add(it.order);
+          notifyNewLoad(it);
+        }
+      });
+    }
     applyLoadsControls();
     MB.setConn(true);
   } catch (err) {

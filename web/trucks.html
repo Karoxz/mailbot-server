@@ -71,10 +71,18 @@
 
   <section class="panel">
     <div id="trucks-controls"></div>
+    <!-- Multi-select bulk delete — client, 2026-10-01: "client should be
+         able to remove multiple trucks at the same time, by selecting
+         more than 1 truck". Hidden until at least one row is checked. -->
+    <div id="trucks-bulk-bar" class="form-actions" style="padding:0 18px 14px;" hidden>
+      <span id="trucks-bulk-count" class="hint" style="padding:0;"></span>
+      <button id="trucks-bulk-delete" class="btn btn-danger btn-sm" type="button">Remove selected</button>
+      <button id="trucks-bulk-clear" class="btn btn-sm" type="button">Clear selection</button>
+    </div>
     <div class="table-scroll">
       <table class="fit-table">
         <thead>
-          <tr><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Specs</th><th>Limits</th><th>Driver chat</th><th></th></tr>
+          <tr><th style="width:28px;"><input type="checkbox" id="trucks-select-all" title="Select all"></th><th>Driver</th><th>Vehicle</th><th>Zip</th><th>Specs</th><th>Limits</th><th>Driver chat</th><th></th></tr>
         </thead>
         <tbody id="trucks-body"></tbody>
       </table>
@@ -201,6 +209,56 @@ async function deleteTruck(id, driverName) {
   }
 }
 
+// ── Multi-select bulk delete ────────────────────────────────────────
+// No bulk endpoint on the server — this just fires the existing
+// single-truck DELETE for each checked id in parallel, same as
+// clicking "Remove" that many times individually.
+const selectedTruckIds = new Set();
+const bulkBar   = document.getElementById("trucks-bulk-bar");
+const bulkCount = document.getElementById("trucks-bulk-count");
+const selectAllCb = document.getElementById("trucks-select-all");
+
+function renderBulkBar() {
+  const n = selectedTruckIds.size;
+  bulkBar.hidden = n === 0;
+  bulkCount.textContent = `${n} truck${n === 1 ? "" : "s"} selected`;
+  selectAllCb.checked = n > 0 && document.querySelectorAll('tbody#trucks-body input[type="checkbox"]').length === n;
+}
+
+document.getElementById("trucks-bulk-clear").addEventListener("click", () => {
+  selectedTruckIds.clear();
+  document.querySelectorAll('tbody#trucks-body input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+  renderBulkBar();
+});
+
+document.getElementById("trucks-bulk-delete").addEventListener("click", async () => {
+  const ids = Array.from(selectedTruckIds);
+  if (!ids.length) return;
+  const names = ids.map((id) => trucksById[id]?.driver_name).filter(Boolean);
+  if (!confirm(`Remove ${ids.length} truck${ids.length === 1 ? "" : "s"}${names.length ? ` (${names.join(", ")})` : ""}? This can be re-added later if needed.`)) return;
+  const btn = document.getElementById("trucks-bulk-delete");
+  btn.disabled = true;
+  try {
+    const results = await Promise.allSettled(ids.map((id) => MB.apiDelete(`/api/web/trucks/${id}`)));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    selectedTruckIds.clear();
+    showToast(failed ? `Removed ${ids.length - failed}, ${failed} failed` : `Removed ${ids.length} truck${ids.length === 1 ? "" : "s"}`, !!failed);
+    loadTrucks();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+selectAllCb.addEventListener("change", () => {
+  const boxes = document.querySelectorAll('tbody#trucks-body input[type="checkbox"]');
+  boxes.forEach((cb) => {
+    cb.checked = selectAllCb.checked;
+    if (selectAllCb.checked) selectedTruckIds.add(cb.dataset.id);
+    else selectedTruckIds.delete(cb.dataset.id);
+  });
+  renderBulkBar();
+});
+
 // Dimensions / payload / equipment folded into one compact cell so the
 // whole table fits the page width with no horizontal scrollbar.
 function specs(t) {
@@ -282,6 +340,7 @@ function renderTrucks(items) {
   items.forEach((t) => { trucksById[t.id] = t; });
   body.innerHTML = items.map((t) => `
     <tr class="enter-anim">
+      <td><input type="checkbox" data-id="${t.id}" ${selectedTruckIds.has(String(t.id)) ? "checked" : ""}></td>
       <td><strong>${MB.esc(t.driver_name)}</strong></td>
       <td>${MB.esc(t.vehicle)}</td>
       <td>${MB.esc(t.zip_location)}</td>
@@ -304,6 +363,14 @@ function renderTrucks(items) {
   body.querySelectorAll("button[data-id]").forEach((btn) => {
     btn.addEventListener("click", () => deleteTruck(btn.dataset.id, btn.dataset.name));
   });
+  body.querySelectorAll('input[type="checkbox"][data-id]').forEach((cb) => {
+    cb.addEventListener("change", () => {
+      if (cb.checked) selectedTruckIds.add(cb.dataset.id);
+      else selectedTruckIds.delete(cb.dataset.id);
+      renderBulkBar();
+    });
+  });
+  renderBulkBar();
 }
 
 const trucksControls = MB.mountListControls(document.getElementById("trucks-controls"), {

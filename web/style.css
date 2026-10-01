@@ -351,15 +351,33 @@ main.content { animation: fadeIn .25s ease both; }
 }
 .feed-card:hover { background: var(--bg-card); }
 .feed-card:last-child { border-bottom: none; }
-.feed-card .order { font-weight: 800; font-size: 1.2rem; }
+/* Slightly smaller than before (client, 2026-10-01) now that the
+   driver's name rides on the same line. */
+.feed-card .order { font-weight: 800; font-size: 1.08rem; }
+.feed-card .order .driver { font-weight: 700; color: var(--accent); }
 .feed-card .ago { color: var(--text-dim); font-size: .82rem; font-weight: 600; white-space: nowrap; }
 .feed-card .route { color: var(--text); font-weight: 700; font-size: 1.05rem; grid-column: 1 / -1; }
 /* White, not dim grey — client, 2026-09-29: "make every text white not
    grey so its visible" (the dim grey read poorly against the dark
-   theme's near-black background). */
-.feed-card .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: .92rem; font-weight: 600; color: var(--text); grid-column: 1 / -1; }
+   theme's near-black background). Bumped again 2026-10-01: "make
+   everything large [font]". */
+.feed-card .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 1rem; font-weight: 600; color: var(--text); grid-column: 1 / -1; }
 .feed-card .meta strong { font-weight: 800; }
-.feed-card .notes { font-size: .88rem; font-weight: 600; color: var(--warn); grid-column: 1 / -1; }
+/* Red, not amber — client, 2026-10-01: "make the notes color red". */
+.feed-card .notes { font-size: .95rem; font-weight: 700; color: var(--bad); grid-column: 1 / -1; }
+
+/* Desktop: multiple load cards per row so more are visible at once —
+   client, 2026-10-01: "on the desktop resolution, make incoming loads
+   in a row instead of columns, but dont change the phone resolution
+   version keep it as it is". auto-fill naturally collapses back to one
+   column on anything too narrow for a second, so this needs no extra
+   breakpoint tuning beyond complementing the existing 640px mobile
+   query below. */
+@media (min-width: 641px) {
+  .feed-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 14px; }
+  .feed-card { border: 1px solid var(--border); border-radius: 10px; }
+  .feed-card:last-child { border: 1px solid var(--border); }
+}
 .badge {
   display: inline-block;
   padding: 2px 8px;

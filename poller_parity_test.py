@@ -154,6 +154,7 @@ def reset_state():
     poller._yielding.clear()
     poller._svc_cache.clear()
     poller._label_cache.clear()
+    poller._recent_bid_actions.clear()
 
 
 OK_RESULT = {"success": True, "message": "ok", "formatted": "LOAD TEXT", "order_id": "555",

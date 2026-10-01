@@ -2093,6 +2093,24 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     dims_raw        = _find(r"Dimensions:\s*([^\n]+)", t)
     load_height_in  = parse_load_height_from_dims(dims_raw) if dims_raw else None
 
+    # Dimension override from Notes (2026-10-01, client: "in the notes
+    # can be a different dims than in the message, so the bot should
+    # check the dims... and then check if this load is still eligible")
+    # — same idea as the weight-from-notes fallback below: the structured
+    # "Dimensions:" field is the broker's own labeled field, but the
+    # free-text Notes line sometimes restates/corrects it. No LLM call
+    # here (broker_notes/the Groq extractor stays off below, on
+    # latency grounds) — just a plain LxWxH-shaped regex, only used when
+    # it's an actual match AND differs from the structured field (a
+    # Notes line that just repeats the same dims changes nothing).
+    notes_dims_raw = None
+    _notes_line_for_dims = _find(r"Notes:\s*([^\n]+)", t)
+    if _notes_line_for_dims:
+        _ndm = re.search(r"\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?",
+                          _notes_line_for_dims)
+        if _ndm and _ndm.group(0).replace(" ", "").lower() != (dims_raw or "").replace(" ", "").lower():
+            notes_dims_raw = _ndm.group(0)
+
     stackable_flag    = _find(r"Stackable:\s*(Yes|No)", t)
     pieces_for_height = _find(r"Pieces:\s*([0-9]+)", t)
     if load_height_in is not None:
@@ -2237,7 +2255,19 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                         f"{best_match['google_deadhead']}mi)",
                         order, None)
     else:
-        _PE2 = time.perf_counter()
+        # Real bug, found 2026-10-01 from live production data (client:
+        # "load didnt include drivers name") — order #336191 was saved
+        # with driver_name/truck_dimensions/all_trucks all blank and
+        # deadhead/total miles both None. Root cause: this `else`
+        # (local_trucks empty — nothing at all to match against) used to
+        # just record a timing stat and fall through — best_truck stayed
+        # None, but execution still reached the `if order:` save near
+        # the bottom of this function, silently storing (and surfacing
+        # on the dashboard/Telegram) a truck-less load instead of being
+        # rejected the same way "no truck in range" already is above.
+        return (None,
+                "NO TRUCKS CONFIGURED\n  (nothing to match this load against)",
+                order, None)
 
     # ── Broker note extraction — REMOVED from the live hot path ─────────
     # (2026-09-11). Root-caused a real client-reported latency complaint
@@ -2250,21 +2280,24 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     # normal ~1s throttle) even though the retry itself then ALSO got
     # 429'd and gave up. With only 4 uvicorn workers, a handful of these
     # landing close together during a burst is enough to back up
-    # everything behind them in the queue by minutes.
-    # The other half of the picture: this output has had ZERO consumers
-    # since yesterday's "no AI comments" request removed every place
-    # that rendered broker_notes/freight_fit into the Telegram/draft
-    # text, and the web dashboard never displayed either field to begin
-    # with (confirmed via grep — no hits in web/*.html) — so this was
-    # pure latency cost for a result nothing ever showed anyone.
-    # freight_fit_checker.check_freight_fit() below already documents
-    # None as a valid "extraction wasn't available" input and handles it
-    # — its own (fast, non-LLM) dimension/payload checks still run.
-    broker_notes = None
+    # everything behind them in the queue by minutes. The full Groq
+    # extraction (pallet count/dims, special handling, detention terms,
+    # etc.) stays OFF here on that latency ground — freight_fit_checker
+    # documents None as a valid "extraction wasn't available" input and
+    # handles it, its own (fast, non-LLM) dimension/payload checks still
+    # run. notes_dims_raw (just above) is the cheap, regex-only
+    # substitute for the one piece of that extraction actually needed:
+    # a corrected/overriding dimension the broker wrote into Notes
+    # instead of the structured Dimensions field.
+    broker_notes = {"pallet_dimensions": notes_dims_raw} if notes_dims_raw else None
 
-    # ── NEW: deterministic freight-fit check against the winning truck ──
+    # Freight-fit check against the winning truck (2026-10-01: now
+    # actually wired into load_decision below — see get_load_decision's
+    # freight_fit= kwarg. Before this it was computed and stored but
+    # never consulted, so a load that plainly wouldn't fit the matched
+    # truck could still score "Accept" — client: "it should check if
+    # this load is still elegible after the info notes gave").
     freight_fit = None
-    
     if best_truck:
         _truck_payload_lbs = next(
             (tk.get("max_payload_lbs") for tk in local_trucks
@@ -2458,7 +2491,8 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     # ── NEW: decision engine — Accept/Bid/Negotiate/Reject ──────────
     # Pure deterministic scoring over signals already computed above
     # (broker track record, deadhead-vs-radius margin, Maps-verification
-    # confidence, rate-guidance availability) — no extra network call.
+    # confidence, rate-guidance availability, freight fit) — no extra
+    # network call.
     load_decision = None
     if deadhead_miles is not None:
         load_decision = decision_engine.get_load_decision(
@@ -2468,6 +2502,7 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
             max_radius_miles=max_radius_miles,
             maps_verification=maps_verification,
             bid_recommendation=bid_recommendation,
+            freight_fit=freight_fit,
         )
         # "Decision:" section removed from the message text on request
         # (2026-09-08, "for now" — implies revisit later). load_decision

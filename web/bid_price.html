@@ -64,7 +64,6 @@
 <main class="content">
   <div class="page-toolbar">
     <h1>Bid PC</h1>
-    <a id="back-link" href="index.html" class="hint">← Dashboard</a>
   </div>
 
   <div class="bid-layout">
@@ -87,7 +86,13 @@
             <input id="price-input" type="number" inputmode="decimal" min="1" step="1" placeholder="Enter your price" autofocus>
           </div>
           <div class="hint" style="margin-top:8px;">Rate per mile: <span id="rate-per-mile">—</span></div>
+          <!-- "← Dashboard" moved down here next to the action button
+               (client, 2026-10-01: "remove the <-Dashboard button,
+               instead make BACK button next to make a bid button") —
+               hidden entirely on the token/Telegram path, same as the
+               old top-of-page link was (see back-link JS below). -->
           <div class="form-actions" style="padding-top:16px;">
+            <a id="back-link" href="index.html" class="btn btn-sm">← Back</a>
             <button id="submit-btn" class="btn btn-primary" type="button" disabled>💵 Make a Bid</button>
           </div>
           <p id="error-box" class="hint" style="color:var(--bad);display:none;"></p>

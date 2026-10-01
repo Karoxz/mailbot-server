@@ -326,6 +326,37 @@ def _bid_text(bot_token, chats, license_key, order_id, load, truck):
     _tg_broadcast(bot_token, chats, f"{head}\n\n{body}")
 
 
+_recent_bid_actions = {}  # (license_key, order_id, action, idx) -> last-handled time.monotonic()
+_RECENT_ACTION_COOLDOWN_S = 8
+
+
+def _is_duplicate_bid_action(license_key: str, order_id: str, action: str, idx) -> bool:
+    """True if this exact (license, order, action, driver) was just
+    handled — client, 2026-10-01: "on telegram when client pressed bid
+    phone once it created draft 3 times". _bid_phone/_bid_pc/_bid_text
+    each only ever call their one-shot side effect (create one draft,
+    record one bid) once per invocation — there's no retry loop in any
+    of them — so 3 drafts from 1 tap means _handle_callback_query itself
+    ran 3 times for what was really one action: Telegram inline buttons
+    never disable themselves while a slow call (a real Gmail API round
+    trip here) is in flight, so an impatient second/third tap — or any
+    other source of the same callback being redelivered — reaches this
+    function as what looks like 3 separate, individually-legitimate
+    events. This collapses repeats within a short window into one real
+    action regardless of why the repeat happened, without needing to
+    pin down which of those causes actually fired."""
+    key = (license_key, order_id, action, idx)
+    now = time.monotonic()
+    last = _recent_bid_actions.get(key)
+    _recent_bid_actions[key] = now
+    if len(_recent_bid_actions) > 2000:  # cheap unbounded-growth guard
+        cutoff = now - 120
+        for k, v in list(_recent_bid_actions.items()):
+            if v < cutoff:
+                del _recent_bid_actions[k]
+    return last is not None and (now - last) < _RECENT_ACTION_COOLDOWN_S
+
+
 def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
     callback_id = cq.get("id")
     pressed_chat = (cq.get("message") or {}).get("chat", {}).get("id")
@@ -336,6 +367,10 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
         return
     order_id = parts[1]
     idx = parts[2] if len(parts) > 2 else None
+
+    if _is_duplicate_bid_action(license_key, order_id, action, idx):
+        _answer_callback_query(bot_token, callback_id, text="Already on it — one moment.")
+        return
 
     load = load_store.get_load(license_key, order_id)
     if not load:

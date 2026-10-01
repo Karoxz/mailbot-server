@@ -177,6 +177,29 @@
       });
     } catch (e) { return iso; }
   }
+  // Absolute wall-clock time — client, 2026-10-01: "put time like this
+  // 07:36:24 EDT" (on the load feed, replacing the relative "X ago").
+  function fmtClock(iso) {
+    if (!iso) return "";
+    try {
+      return new Date(iso).toLocaleTimeString(undefined, {
+        hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+        timeZoneName: "short",
+      });
+    } catch (e) { return ""; }
+  }
+  // Hours+minutes, minutes rounded to the nearest 5 — client, 2026-10-01:
+  // "when the ETA is less then 1 hour, it just says ETA 0h, add minutes
+  // aswell, but minutes should be rounded to 5, like 5,10,15,20,25,30".
+  function fmtDuration5(totalMinutes) {
+    if (totalMinutes == null) return "";
+    let h = Math.floor(totalMinutes / 60);
+    let m = Math.round((totalMinutes % 60) / 5) * 5;
+    if (m === 60) { h += 1; m = 0; }
+    if (h === 0) return `${m}m`;
+    if (m === 0) return `${h}h`;
+    return `${h}h ${m}m`;
+  }
   // "How long ago" — client, 2026-09-29: "on every incoming load there
   // should be a time info of how long ago the load came". Recomputed on
   // every poll (the feed card's content signature changes each time, so
@@ -586,7 +609,7 @@
     getLicenseKey, setLicenseKey, clearLicenseKey, requireAuth,
     initTheme, toggleTheme,
     apiGet, apiPost, apiPatch, apiDelete, bounceIfAuthError,
-    esc, fmtMoney, fmtRate, fmtPct, fmtWhen, fmtAgo,
+    esc, fmtMoney, fmtRate, fmtPct, fmtWhen, fmtAgo, fmtClock, fmtDuration5,
     renderTopbar, setConn, showFatalError, gmailSearchUrl,
     diffRender, skeletonCards, skeletonRows, popIn,
     filterSortPaginate, mountListControls, exportCsv, toast,
