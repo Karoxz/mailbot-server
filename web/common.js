@@ -49,11 +49,13 @@
   }
 
   // ── Theme ──────────────────────────────────────────────────────────
-  // Two logo variants exist because the mark itself is gold-on-black vs
-  // gold-on-white, not just a filter/invert — plutus_logo.jpg (dark bg)
-  // and plutus_logo_light.jpg (light bg), both real assets, not derived.
+  // Single transparent-background icon (2026-10-02 redesign) — the old
+  // gold-on-black/gold-on-white JPG pair is gone; this cutout drops
+  // cleanly onto either theme with no mismatched box around it, so
+  // there's no longer a theme-dependent file to pick between. `theme`
+  // kept as a no-op param so existing callers don't need to change.
   function logoSrc(theme) {
-    return theme === "light" ? "assets/plutus_logo_light.jpg" : "assets/plutus_logo.jpg";
+    return "assets/plutus_logo_icon.png";
   }
   function applyTheme(theme) {
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
@@ -475,12 +477,16 @@
       return `<a href="${item.href}"${active}>${item.label}</a>`;
     }).join("");
     const currentTheme = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    // Redesigned 2026-10-02 (client: logo big and centered, title below
+    // it in gold, nav on the left, status/theme/logout on the right) —
+    // three-zone CSS grid (see .topbar in style.css) instead of the old
+    // single flex row with the brand pinned to the left edge.
     mount.innerHTML = `
+      <nav class="topnav">${links}</nav>
       <a href="index.html" class="brand">
         <img src="${logoSrc(currentTheme)}" alt="" class="brand-logo">
-        Plutus Bot
+        <span class="brand-title">Plutus Bot</span>
       </a>
-      <nav class="topnav">${links}</nav>
       <div class="topbar-actions">
         <button id="bot-chip" class="bot-chip" type="button" title="Web bot (the server-side version of the desktop's START/STOP)">
           <span class="bot-dot"></span><span class="bot-label">Web bot…</span>

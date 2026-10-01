@@ -91,7 +91,11 @@ main.content { animation: fadeIn .25s ease both; }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 /* Circle, not rounded-square — client, 2026-10-01: "make the logo
    circle shape". */
-.login-logo { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; }
+/* object-fit:contain, no border-radius crop (2026-10-02) — the new icon
+   is a non-square transparent cutout with its own circular ring built
+   into the artwork, not a square photo to crop into a circle; cover+
+   radius would clip it asymmetrically. */
+.login-logo { width: 72px; height: 72px; object-fit: contain; }
 .login-card h1 { font-size: 1.6rem; text-transform: uppercase; letter-spacing: .5px; }
 .login-card .subtitle { color: var(--text-dim); font-size: .9rem; margin-bottom: 20px; }
 .login-card input {
@@ -131,11 +135,19 @@ main.content { animation: fadeIn .25s ease both; }
 .error[hidden] { display: none; }
 
 /* ── Topbar ─────────────────────────────────────────────── */
+/* Redesigned 2026-10-02 (client: logo big and centered with the title
+   below it, nav moved to the left, status/theme/logout stay on the
+   right) — a 3-column grid (nav | centered brand | actions) replaces
+   the old single flex row with the brand pinned to the left edge. The
+   two outer columns share 1fr each so the middle one — sized to its
+   own content — lands dead center regardless of how wide the nav or
+   the actions cluster is. */
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px;
+  gap: 16px;
+  padding: 10px 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   position: sticky;
@@ -144,25 +156,42 @@ main.content { animation: fadeIn .25s ease both; }
 }
 .brand {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  font-weight: 800;
-  font-size: 1.2rem;
-  letter-spacing: .6px;
-  text-transform: uppercase;
-  margin-right: 28px;
+  justify-self: center;
+  gap: 2px;
+  padding: 6px 0;
   color: var(--text);
   text-decoration: none;
 }
-/* Bigger logo — client, 2026-09-29: "make the title Plutus Bot all upper
-   case, and make the logo itself bigger" (title uppercased above via
-   text-transform, so the markup text itself doesn't need touching). */
-/* Bigger (was 40px) and circular — client, 2026-10-01: "make the logo
-   bigger" / "make the logo circle shape". */
-.brand-logo { width: 54px; height: 54px; border-radius: 50%; object-fit: cover; }
-.topbar-actions { display: flex; align-items: center; gap: 10px; }
+/* Big, transparent-background icon — client, 2026-10-02: "the logo...
+   be big and in the middle". object-fit:contain (not cover) since the
+   source is a non-square cutout on a transparent background, not a
+   photo to crop into a circle. */
+.brand-logo { width: 112px; height: 112px; object-fit: contain; }
+/* Gold-foil title — client: "the text should have golden texture",
+   given an actual photo of brushed gold foil to use (not a flat color
+   or a CSS-gradient approximation): the image is applied as the text's
+   own fill via background-clip, so the letters show real photographed
+   gold rather than a simulated one. */
+.brand-title {
+  font-weight: 800;
+  font-size: 1.7rem;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-top: 2px;
+  background-image: url("assets/plutus_gold_texture.jpg");
+  background-size: 340px 320px;
+  background-position: -30px -90px;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .35));
+}
+:root:not([data-theme="dark"]) .brand-title { filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .15)); }
+.topbar-actions { display: flex; align-items: center; gap: 10px; justify-self: end; }
 
-.topnav { display: flex; align-items: center; gap: 4px; flex: 1; overflow-x: auto; }
+.topnav { display: flex; align-items: center; gap: 4px; justify-self: start; overflow-x: auto; }
 .topnav a {
   color: var(--text-dim);
   text-decoration: none;
@@ -656,7 +685,12 @@ tr.skeleton-row td { padding: 12px 18px; }
   .login-card { padding: 26px 20px; }
   .topnav { display: none; }
   .nav-hamburger { display: flex; }
-  .topbar { flex-wrap: wrap; }
+  /* The desktop-sized 112px logo/gold title don't fit a phone-width bar
+     — scaled down but keeps the same centered layout (the grid's two
+     1fr side columns still center it even with .topnav hidden/empty). */
+  .topbar { padding: 8px 14px; gap: 8px; }
+  .brand-logo { width: 44px; height: 44px; }
+  .brand-title { font-size: 1rem; letter-spacing: 1px; background-size: 160px 150px; background-position: -14px -40px; }
   /* Phone width: the chip collapses to just its colored dot (state is
      still in its tooltip and the Settings page) so the bar stays on one row. */
   .bot-chip { padding: 8px; }
