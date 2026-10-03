@@ -150,8 +150,14 @@ def _tg_send(bot_token: str, chat_id, text: str, keyboard=None) -> bool:
 
 
 def _tg_broadcast(bot_token: str, chat_ids: list, text: str, keyboard=None) -> int:
-    """Send to every chat in parallel with a 6s join — same as the
-    desktop's send_to_telegram. Returns how many sends succeeded."""
+    """Send to every chat in parallel. The desktop's send_to_telegram
+    joins with timeout=6 too, but its request timeout is 5s, so a join
+    there can never fire before the request itself is done. _tg_send's
+    request timeout is 15s, so the join here must be >= that — found
+    live 2026-10-03: with a 6s join, a Telegram response landing between
+    6-15s got misreported as a failed send (and the load was then never
+    retried — _process_with_retry marks it seen regardless of outcome),
+    even though the message had actually gone through or was about to."""
     results = []
 
     def _one(cid):
@@ -162,7 +168,7 @@ def _tg_broadcast(bot_token: str, chat_ids: list, text: str, keyboard=None) -> i
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=6)
+        t.join(timeout=20)
     return sum(1 for ok in results if ok)
 
 
