@@ -475,7 +475,7 @@ _last_labeled_notify = {}   # (license, thread) -> ts   (5-min cooldown)
 _last_classify = {}         # (license, thread) -> ts   (5-min cooldown)
 _cooldown_lock = threading.Lock()
 _yielding = {}           # license -> bool (currently paused for the desktop?)
-_last_auth_fail = {}        # license -> ts of last GmailAuthError (see AUTH_FAIL_COOLDOWN_SECONDS)
+_last_auth_fail = {}        # license -> (ts, gmail_credentials.updated_at at failure time)
 
 
 def _get_service(license_key: str):
@@ -909,20 +909,27 @@ def run_one_license_cycle(license_key: str):
 
     # Known-dead token backoff — see AUTH_FAIL_COOLDOWN_SECONDS above.
     # Skipped entirely (no Gmail/network call at all) until the cooldown
-    # elapses; a successful reconnect clears this the next time
-    # gmail_store.save_token() runs (checked fresh each cycle via
-    # _get_service() once the cooldown lets a cycle through again).
+    # elapses — UNLESS gmail_credentials.updated_at has moved since the
+    # failure was recorded, which means an out-of-band reconnect (the
+    # web dashboard's OAuth flow, a separate process) already happened;
+    # in that case retry immediately instead of waiting out the timer.
+    # Found live 2026-10-03: a user reconnected via the web mid-cooldown
+    # and the poller sat idle for minutes despite the fix being in place.
     with _cooldown_lock:
-        last_fail = _last_auth_fail.get(license_key, 0)
-    if time.time() - last_fail < AUTH_FAIL_COOLDOWN_SECONDS:
-        return
+        last_fail = _last_auth_fail.get(license_key)
+    if last_fail is not None:
+        fail_ts, updated_at_at_failure = last_fail
+        current_updated_at = gmail_store.get_status(license_key).get("updated_at")
+        if current_updated_at == updated_at_at_failure and time.time() - fail_ts < AUTH_FAIL_COOLDOWN_SECONDS:
+            return
 
     try:
         service = _get_service(license_key)
     except GmailAuthError as e:
         logger.warning(f"[{license_key}] skipped: {e}")
+        updated_at_now = gmail_store.get_status(license_key).get("updated_at")
         with _cooldown_lock:
-            _last_auth_fail[license_key] = time.time()
+            _last_auth_fail[license_key] = (time.time(), updated_at_now)
         return
 
     # A cycle reached this point without a GmailAuthError — clear any
