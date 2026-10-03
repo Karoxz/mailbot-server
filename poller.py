@@ -104,6 +104,18 @@ INITIAL_SCAN_LIMIT = 500
 MAX_RESULTS_PER_CYCLE = 50
 DEFAULT_RADIUS_MILES = 300    # used only if a license never set one
 
+# A dead/revoked Gmail token (GmailAuthError) isn't something retrying
+# 3s later ever fixes — it needs real human action (reconnect via the
+# web dashboard's OAuth flow). Found live 2026-10-03: a license's
+# token was revoked and the poller hammered Google's token endpoint
+# with the same doomed refresh attempt every single cycle for over two
+# days straight (tens of thousands of identical log lines), which also
+# buried the one signal worth seeing under enough noise that it went
+# unnoticed. Back off hard once a license is known broken this way —
+# AUTH_FAIL_COOLDOWN_SECONDS between attempts — while every other
+# license keeps polling at the normal cadence untouched.
+AUTH_FAIL_COOLDOWN_SECONDS = 900  # 15 min
+
 _SERVICE_TTL = 1800           # desktop rebuilds its Gmail service every 30 min
 _LABEL_TTL = 600
 _SEEN_CAP = 2000              # desktop's processed_ids cap
@@ -463,6 +475,7 @@ _last_labeled_notify = {}   # (license, thread) -> ts   (5-min cooldown)
 _last_classify = {}         # (license, thread) -> ts   (5-min cooldown)
 _cooldown_lock = threading.Lock()
 _yielding = {}           # license -> bool (currently paused for the desktop?)
+_last_auth_fail = {}        # license -> ts of last GmailAuthError (see AUTH_FAIL_COOLDOWN_SECONDS)
 
 
 def _get_service(license_key: str):
@@ -894,11 +907,28 @@ def run_one_license_cycle(license_key: str):
         return
     _note_yield(license_key, False)
 
+    # Known-dead token backoff — see AUTH_FAIL_COOLDOWN_SECONDS above.
+    # Skipped entirely (no Gmail/network call at all) until the cooldown
+    # elapses; a successful reconnect clears this the next time
+    # gmail_store.save_token() runs (checked fresh each cycle via
+    # _get_service() once the cooldown lets a cycle through again).
+    with _cooldown_lock:
+        last_fail = _last_auth_fail.get(license_key, 0)
+    if time.time() - last_fail < AUTH_FAIL_COOLDOWN_SECONDS:
+        return
+
     try:
         service = _get_service(license_key)
     except GmailAuthError as e:
         logger.warning(f"[{license_key}] skipped: {e}")
+        with _cooldown_lock:
+            _last_auth_fail[license_key] = time.time()
         return
+
+    # A cycle reached this point without a GmailAuthError — clear any
+    # earlier failure record so a stale cooldown can never linger.
+    with _cooldown_lock:
+        _last_auth_fail.pop(license_key, None)
 
     _maybe_run_thread_learning(license_key)
 
