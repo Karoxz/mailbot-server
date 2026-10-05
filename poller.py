@@ -796,9 +796,20 @@ def _process_with_retry(ctx: dict, service, label_map: dict, msg_id: str) -> str
 # CYCLE
 # =============================================================
 
-def _build_query(allowed_vehicles: list, window: str = None) -> str:
-    veh_terms = " OR ".join(f'"{v}"' for v in allowed_vehicles)
-    return f'is:unread newer_than:{window or FRESH_WINDOW} ({veh_terms})'
+def _build_query(window: str = None) -> str:
+    """Used to also OR in a Gmail-side vehicle-keyword clause as a
+    pre-filter. Dropped 2026-10-05: Gmail's phrase search doesn't
+    substring/stem-match the way allowed_vehicles matching does
+    downstream (process_bid_email's `v in vehicle_required.upper()`
+    check) — a one-letter typo in a license's allowed-vehicle list
+    ("SMALL STRAIGH") silently excluded every real SMALL STRAIGHT load
+    from ever being fetched at all, with no log trace of it happening.
+    Every unread message is now fetched and goes through the existing,
+    already-detailed parse/match/log path instead (non-freight mail is
+    still screened out there via is_freight_subject(), independent of
+    vehicle keywords), so a load being excluded is always visible in
+    the activity log as a real skip reason."""
+    return f'is:unread newer_than:{window or FRESH_WINDOW}'
 
 
 def _list_message_ids(service, query: str, limit: int) -> list:
@@ -883,7 +894,7 @@ def _initial_scan(ctx: dict, service, label_map: dict):
     per ENABLE (the flag is reset by /api/web/standalone/enable), never
     on a mere poller restart."""
     lk = ctx["license_key"]
-    ids = _list_message_ids(service, _build_query(ctx["allowed_vehicles"], INITIAL_SCAN_WINDOW),
+    ids = _list_message_ids(service, _build_query(INITIAL_SCAN_WINDOW),
                             INITIAL_SCAN_LIMIT)
     license_db.set_standalone_initial_scan_done(lk, True)
     if _can_send(ctx):
@@ -958,7 +969,7 @@ def run_one_license_cycle(license_key: str):
         label_map = _get_label_map(license_key, service)
         if not license_db.get_standalone_initial_scan_done(license_key):
             _initial_scan(ctx, service, label_map)
-        for mid in _list_message_ids(service, _build_query(allowed_vehicles), MAX_RESULTS_PER_CYCLE):
+        for mid in _list_message_ids(service, _build_query(), MAX_RESULTS_PER_CYCLE):
             if not _is_seen(license_key, mid):
                 _process_with_retry(ctx, service, label_map, mid)
     except Exception:
