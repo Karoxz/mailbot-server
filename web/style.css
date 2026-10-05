@@ -459,7 +459,7 @@ tbody tr:hover { background: var(--bg-card); }
   color: var(--text);
   border-radius: 8px;
   padding: 8px 14px;
-  font-size: .85rem;
+  font-size: .92rem;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -472,7 +472,7 @@ tbody tr:hover { background: var(--bg-card); }
 .btn-primary:hover { filter: brightness(1.08); }
 .btn-danger { color: var(--bad); border-color: var(--bad); }
 .btn-danger:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
-.btn-sm { padding: 5px 10px; font-size: .78rem; }
+.btn-sm { padding: 5px 10px; font-size: .85rem; }
 
 /* ── Page toolbar (title + primary action) ─────────────────── */
 .page-toolbar {

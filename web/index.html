@@ -33,6 +33,7 @@
         <span class="panel-hint">Incoming loads · act on one directly — Bid PC / Phone / Draft</span>
         <button id="notify-toggle-btn" class="btn btn-sm" type="button" title="Get a popup + sound when a new load comes in">🔔 Enable alerts</button>
         <button id="refresh-btn" class="btn btn-sm" type="button" title="Refresh now">⟳ Refresh</button>
+        <button id="clear-feed-btn" class="btn btn-sm" type="button" title="Clear the feed — hides current loads; a genuinely new load still shows up">🗑 Clear</button>
       </div>
     </div>
     <div id="loads-controls"></div>
@@ -252,6 +253,20 @@ document.getElementById("loads-list").addEventListener("click", (e) => {
 });
 
 let allLoads = [];
+
+// "Clear" just hides what's currently in the feed — nothing is deleted
+// server-side (bid_history/load_store are untouched). Persisted per
+// license in localStorage (a per-viewer convenience, same pattern as
+// NOTIFY_KEY above) so it survives a refresh/reload; a load that's
+// genuinely new (different order+received_at) still shows up normally.
+const CLEARED_KEY = `mailbot_feed_cleared_${MB.getLicenseKey() || ""}`;
+let clearedKeys = new Set();
+try { clearedKeys = new Set(JSON.parse(localStorage.getItem(CLEARED_KEY) || "[]")); } catch (e) {}
+const feedKey = (it) => `${it.order}|${it.received_at || ""}`;
+function visibleLoads() {
+  return allLoads.filter((it) => !clearedKeys.has(feedKey(it)));
+}
+
 const loadsControls = MB.mountListControls(document.getElementById("loads-controls"), {
   searchPlaceholder: "Search loads (order, route, broker)…",
   sortOptions: [
@@ -268,7 +283,7 @@ loadsControls.sortDir = "desc";
 document.getElementById("loads-controls").querySelector(".list-sort-dir").textContent = "↓";
 
 function applyLoadsControls() {
-  const result = MB.filterSortPaginate(allLoads, {
+  const result = MB.filterSortPaginate(visibleLoads(), {
     searchTerm: loadsControls.searchTerm,
     searchFields: ["order", "pickup_loc", "delivery_loc", "broker_name", "broker_email"],
     sortKey: loadsControls.sortKey,
@@ -393,6 +408,13 @@ refreshBtn.addEventListener("click", async () => {
   await refresh();
   refreshBtn.textContent = original;
   refreshBtn.disabled = false;
+});
+
+document.getElementById("clear-feed-btn").addEventListener("click", () => {
+  allLoads.forEach((it) => clearedKeys.add(feedKey(it)));
+  try { localStorage.setItem(CLEARED_KEY, JSON.stringify([...clearedKeys])); } catch (e) {}
+  applyLoadsControls();
+  showToast("Feed cleared");
 });
 
 document.getElementById("loads-list").innerHTML = MB.skeletonCards(4);
