@@ -507,7 +507,8 @@ TRUCKS2 = [{"driver_name": "T1", "google_deadhead": 12, "truck_type": "LARGE STR
 
 def cleanup_loads():
     for path, sql in ((load_store.DB_PATH, "DELETE FROM loads WHERE license_key=?"),
-                      (bid_history.DB_PATH, "DELETE FROM bids WHERE license_key=?")):
+                      (bid_history.DB_PATH, "DELETE FROM bids WHERE license_key=?"),
+                      (activity_log.DB_PATH, "DELETE FROM events WHERE license_key=?")):
         c = sqlite3.connect(path)
         c.execute(sql, (LK,))
         c.commit()
@@ -733,32 +734,57 @@ def _():
         cleanup_license()
 
 
-@test("/api/web/feed: duplicate order_id from a different message stays as 2 cards; broker-reply outcomes are merged in, newest first")
+@test("/api/web/feed: duplicate order_id from a different message stays as 2 cards")
 def _():
     from fastapi.testclient import TestClient
     import main
     enable_license()
     seed_load("777", mid="mid-A", broker_email="brokerA@x.com")
     seed_load("777", mid="mid-B", broker_email="brokerB@x.com")  # same order_id, different broker/message
-    bid_history.record_bid(license_key=LK, order_id="777", thread_id="th9", bid_method="pc",
-                           vehicle_type="LARGE STRAIGHT", driver_name="GRISHA",
-                           pickup_loc="Cleveland, OH", delivery_loc="Columbus, OH",
-                           broker_name="B", broker_email="b@x.com")
-    bid = bid_history.get_bids_for_order(LK, "777")[0]
-    bid_history.update_bid_outcome(LK, bid["id"], "won", outcome_source="broker_reply",
-                                   outcome_note="Confirmed by broker")
     try:
         with TestClient(main.app) as c:
             items = c.get(f"/api/web/feed?license_key={LK}").json()["items"]
             loads = [i for i in items if i["type"] == "load" and i["order"] == "777"]
-            replies = [i for i in items if i["type"] == "reply" and i["order"] == "777"]
             assert len(loads) == 2, f"expected 2 distinct load cards, got {len(loads)}"
             assert {l["broker_email"] for l in loads} == {"brokerA@x.com", "brokerB@x.com"}
-            assert len(replies) == 1 and replies[0]["status"] == "won"
-            assert replies[0]["outcome_note"] == "Confirmed by broker"
-            # newest-first across both kinds, by their own timestamp
+            # newest-first by received_at
             assert all(items[i]["received_at"] >= items[i + 1]["received_at"]
                       for i in range(len(items) - 1))
+    finally:
+        cleanup_loads()
+        cleanup_license()
+
+
+@test("/api/web/feed: broker replies come from the labeled-thread ping (no LLM), carrying states + the broker's own message")
+def _():
+    from fastapi.testclient import TestClient
+    import main
+    enable_license()
+    # Same mechanism poller.py's _notify_labeled_thread actually uses —
+    # client, 2026-10-07: "no need to use grok ... needs to just have
+    # the states and the brokers message inside, no 'won', 'countered',
+    # or 'lost' ... no needless processing, just states and brokers
+    # message". Exercises the real function, not a hand-built row.
+    poller._last_labeled_notify.clear()
+    try:
+        ctx = fresh_ctx()
+        # Already quote-stripped, same as what _process_message's real
+        # call site passes (desktop_parity.strip_quoted_reply, itself
+        # covered elsewhere in this suite) — this test is about
+        # _notify_labeled_thread's own storage/retrieval, not stripping.
+        poller._notify_labeled_thread(
+            ctx, ["bid"], "RE: Order #777 CO to IL", "th-reply-1",
+            body="Yes we can do $1200 for this one, let me know if that works")
+        with TestClient(main.app) as c:
+            items = c.get(f"/api/web/feed?license_key={LK}").json()["items"]
+            replies = [i for i in items if i["type"] == "reply"]
+            assert len(replies) == 1, f"expected exactly 1 reply card, got {len(replies)}"
+            r = replies[0]
+            assert r["labels"] == ["bid"]
+            assert r["states"] == ["CO", "IL"]  # extracted from the subject, same as the Telegram ping
+            assert r["thread_id"] == "th-reply-1"
+            assert r["message"] == "Yes we can do $1200 for this one, let me know if that works"
+            assert "won" not in r and "status" not in r and "outcome_note" not in r
     finally:
         cleanup_loads()
         cleanup_license()

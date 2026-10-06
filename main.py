@@ -627,23 +627,30 @@ def web_feed(license_key: str, limit: int = 50):
         entry["type"] = "load"
         cleaned.append(entry)
 
-    # Broker replies (won/lost/countered) — client-reported real gap,
-    # 2026-10-06: these only ever reached Telegram + the Bid History
-    # page, never the Live Feed. Merged in here, time-sorted alongside
-    # new loads, as a distinct item the frontend renders as a compact
-    # reply card rather than a full load card.
-    for r in bid_history.get_recent_reply_outcomes(license_key, limit=limit):
+    # Broker replies — client-reported real gap, 2026-10-06, redesigned
+    # 2026-10-07: "no need to use grok, bid reply on the web needs to
+    # just have the states and the brokers message inside, no 'won',
+    # 'countered', or 'lost' ... no needless processing, just states and
+    # brokers message". The LLM-based won/lost/countered classification
+    # (bid_history/reply_classifier) stays for whatever else it serves
+    # (Bid History page, etc.) but is no longer what feeds the Live
+    # Feed's reply cards — those now come straight from the SAME
+    # labeled-thread ping poller.py already sends to Telegram
+    # (_notify_labeled_thread, zero LLM calls), persisted via
+    # activity_log's "labeled_ping" events. No order_id exists for
+    # these (a Gmail label/thread, not a parsed load), so thread_id is
+    # the identifying field instead.
+    for evt in activity_log.get_recent_events_by_type(license_key, "labeled_ping", limit=limit):
+        d = evt["detail"]
         cleaned.append({
-            "type":          "reply",
-            "order":         r["order_id"],
-            "pickup_loc":    r["pickup_loc"],
-            "delivery_loc":  r["delivery_loc"],
-            "broker_name":   r["broker_name"],
-            "broker_email":  r["broker_email"],
-            "thread_id":     r["thread_id"],
-            "status":        r["status"],
-            "outcome_note":  r["outcome_note"],
-            "received_at":   r["outcome_at"],
+            "type":        "reply",
+            "id":          evt["id"],
+            "labels":      d.get("labels", []),
+            "states":      d.get("states", []),
+            "message":     d.get("message", ""),
+            "subject":     d.get("subject", ""),
+            "thread_id":   d.get("thread_id", ""),
+            "received_at": evt["created_at"],
         })
 
     cleaned.sort(key=lambda it: it.get("received_at") or "", reverse=True)

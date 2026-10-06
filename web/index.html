@@ -158,24 +158,25 @@ function fmtDate(label, dt, asap, direct) {
   return `${label}: ${dt || "UNKNOWN"}`;
 }
 
-// Broker reply cards (won/lost/countered) — client, 2026-10-06: these
-// used to only ever reach Telegram + the Bid History page, never the
-// Live Feed. Reuses the same .status-* pill classes bid_history.html
-// already has, for a consistent look across both pages.
-const _REPLY_LABEL = { won: "✅ Won", lost: "❌ Lost", countered: "🔁 Countered" };
+// Broker reply cards — client, 2026-10-06: these used to only ever
+// reach Telegram + the Bid History page, never the Live Feed.
+// Redesigned 2026-10-07: "no need to use grok ... needs to just have
+// the states and the brokers message inside, no 'won', 'countered', or
+// 'lost' ... no needless processing, just states and brokers message"
+// — same label+state signal poller.py's Telegram ping already sends
+// (_notify_labeled_thread), zero LLM classification involved. No
+// order_id exists for these (a Gmail thread/label, not a parsed load).
 function renderReplyCard(it) {
-  const orderId = MB.esc(it.order || "");
-  const gmailUrl = MB.gmailSearchUrl(it.order, it.broker_email || "", it.thread_id);
+  const gmailUrl = MB.gmailSearchUrl(null, "", it.thread_id);
   const clock = MB.fmtClock(it.received_at) || MB.fmtAgo(it.received_at);
-  const label = _REPLY_LABEL[it.status] || (it.status || "Reply");
-  const route = [it.pickup_loc, it.delivery_loc].filter(Boolean).join(" → ");
+  const states = (it.states || []).join(" · ") || "—";
   return `
     <div class="feed-card">
-      <div class="order">💬 #${orderId} <span class="status-pill status-${MB.esc(it.status || "")}">${MB.esc(label)}</span></div>
+      <div class="order">💬 ${MB.esc((it.labels || []).join(", ") || "Reply")}</div>
       <div class="ago">${MB.esc(clock)}</div>
-      ${route ? `<div class="route">${MB.esc(route)}</div>` : ""}
-      ${it.broker_name ? `<div class="meta"><strong>${MB.esc(it.broker_name)}</strong></div>` : ""}
-      ${it.outcome_note ? `<div class="meta">${MB.esc(it.outcome_note)}</div>` : ""}
+      <div class="meta">📍 States: ${MB.esc(states)}</div>
+      ${it.subject ? `<div class="meta">${MB.esc(it.subject)}</div>` : ""}
+      ${it.message ? `<div class="notes">${MB.esc(it.message)}</div>` : ""}
       <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
         <a class="btn btn-sm" href="${gmailUrl}" target="_blank" rel="noopener">✉️ Find in Gmail</a>
       </div>
@@ -387,10 +388,14 @@ function notifyNewLoad(it) {
   flashTitle();
   if (window.Notification && Notification.permission === "granted") {
     try {
-      const title = it.type === "reply" ? `💬 Broker reply — #${it.order || "?"}` : `New load — #${it.order || "?"}`;
+      const isReply = it.type === "reply";
+      const title = isReply ? `💬 Broker reply — ${(it.labels || []).join(", ") || "reply"}` : `New load — #${it.order || "?"}`;
+      const body = isReply
+        ? (it.message || it.subject || "Open to view")
+        : `${it.pickup_loc || "?"} → ${it.delivery_loc || "?"}${it.driver_name ? " · " + it.driver_name : ""}`;
       const n = new Notification(title, {
-        body: `${it.pickup_loc || "?"} → ${it.delivery_loc || "?"}${it.driver_name ? " · " + it.driver_name : ""}`,
-        tag: `mailbot-load-${it.order}`,
+        body,
+        tag: isReply ? `mailbot-reply-${it.id}` : `mailbot-load-${it.order}`,
       });
       n.onclick = () => { window.focus(); n.close(); };
     } catch (e) { /* ignore — beep/flash already fired */ }
@@ -421,10 +426,14 @@ async function refresh() {
   try {
     const feed = await MB.apiGet("/api/web/feed", { limit: 50 });
     allLoads = feed.items;
-    // type-prefixed — a reply outcome and a load sharing the same order
-    // number are different events and must not suppress each other's
-    // notification (found while adding reply cards to this same feed).
-    const seenKey = (it) => `${it.type || "load"}:${it.order}`;
+    // type-prefixed — a reply and a load sharing the same order number
+    // are different events and must not suppress each other's
+    // notification. Replies have no order_id at all (2026-10-07
+    // redesign — a Gmail thread/label, not a parsed load) so they key
+    // on their own activity_log row id instead, which every reply
+    // in a single fetch would otherwise collide on (same undefined
+    // "order"), only ever notifying for the first one ever seen.
+    const seenKey = (it) => it.type === "reply" ? `reply:${it.id}` : `load:${it.order}`;
     const currentIds = new Set(allLoads.map(seenKey));
     if (seenOrderIds === null) {
       seenOrderIds = currentIds; // first load — just establish the baseline
@@ -450,7 +459,7 @@ function renderReplies() {
   const el = document.getElementById("replies-list");
   const replies = allLoads.filter((it) => it.type === "reply").slice(0, REPLIES_SHOWN);
   MB.diffRender(el, replies, {
-    key: (it) => `reply|${it.order}|${it.received_at || ""}`,
+    key: (it) => `reply|${it.id}`,
     isRow: false,
     emptyHtml: "",   // nothing to show when there are no recent replies — no need to clutter the panel
     html: renderReplyCard,

@@ -606,10 +606,24 @@ def _can_send(ctx: dict) -> bool:
     return bool(ctx["telegram_enabled"] and ctx["bot_token"] and ctx["chat_ids"])
 
 
-def _notify_labeled_thread(ctx: dict, label_names: list, subject: str, thread_id: str) -> bool:
+def _notify_labeled_thread(ctx: dict, label_names: list, subject: str, thread_id: str,
+                           body: str = "") -> bool:
     """Desktop's _notify_labeled_thread: a Label / States ping with a
     "REPLY BID" button that opens the thread — the ONLY notification a
-    broker reply produces. 5-minute per-thread cooldown."""
+    broker reply produces. 5-minute per-thread cooldown.
+
+    The Telegram text itself is unchanged (client, 2026-10-07:
+    "telegram notification stays the same its good") — body (new,
+    optional — only the real broker-reply call site in _process_message
+    has one; the _safe_mark_read call site is a newly-matched freight
+    message that happens to sit in a labeled thread, not an actual
+    reply, so it has nothing meaningful to show here) is only used to
+    persist a lightweight, non-LLM record for the web Live Feed: client,
+    same day: "no need to use grok, bid reply on the web needs to just
+    have the states and the brokers message inside, no 'won',
+    'countered', or 'lost' ... no needless processing, just states and
+    brokers message" — this reuses the exact same label+state signal
+    the Telegram ping already derives, no classification involved."""
     lk = ctx["license_key"]
     if not _cooldown_ok(_last_labeled_notify, (lk, thread_id)):
         return False
@@ -621,7 +635,11 @@ def _notify_labeled_thread(ctx: dict, label_names: list, subject: str, thread_id
                          [[{"text": "💵 REPLY BID", "url": _gmail_url(None, None, thread_id)}]])
     if sent:
         activity_log.log_event(lk, "labeled_ping",
-                               f"Reply ping: {', '.join(label_names)} — {subject[:60]}")
+                               f"Reply ping: {', '.join(label_names)} — {subject[:60]}",
+                               detail={"labels": label_names, "subject": subject,
+                                       "states": desktop_parity.extract_state_codes_from_text(subject),
+                                       "message": body[:1000] if body else "",
+                                       "thread_id": thread_id})
     return bool(sent)
 
 
@@ -775,7 +793,10 @@ def _process_message(ctx: dict, service, label_map: dict, msg_id: str) -> str:
     if not is_freight and thread_id:
         names, tsubject = gmail_client.get_thread_info(service, thread_id, label_map)
         if names:
-            _notify_labeled_thread(ctx, names, tsubject or subject, thread_id)
+            # Quote-stripped so the Live Feed shows just the broker's
+            # new reply text, not the whole quoted thread history.
+            reply_body = desktop_parity.strip_quoted_reply(extract_text_from_full_message(full))
+            _notify_labeled_thread(ctx, names, tsubject or subject, thread_id, body=reply_body)
             return "labeled_thread"
 
     # 6. body, 7. classify (background), 8. strip quoted reply
