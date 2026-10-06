@@ -624,6 +624,8 @@ def _():
     drafts = []
     g.drafts = lambda: type("D", (), {"create": lambda self, userId, body: _Exec(
         lambda: drafts.append(body) or {"id": "draft123"})})()
+    notes = []
+    main.tg_notify.send_to_license = lambda lk, text, keyboard=None: notes.append((lk, text)) or 1
     try:
         with TestClient(main.app) as c:
             r = c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "777", "truck": "1",
@@ -631,6 +633,13 @@ def _():
             assert r.status_code == 200
             body = r.json()
             assert body["draft_id"] == "draft123" and body["bid_text"] == "Truck T2 is 33 miles out"
+            # Client, 2026-10-07: "no need to redirect to gmail anymore
+            # nor the bid text copied notification, since it creates
+            # the draft ready" — unlike method=pc (tested separately,
+            # "price page" test above), phone must NOT send the "copied
+            # ... paste (Ctrl+V)" Telegram confirmation — there's
+            # nothing to paste anymore, the draft already has the text.
+            assert notes == [], f"expected no Telegram confirmation for phone, got {notes}"
             raw = base64.urlsafe_b64decode(drafts[0]["message"]["raw"]).decode()
             assert "To: bob@broker.com" in raw and "Subject: Re: Bid on Order #777 LARGE STRAIGHT" in raw
             assert "In-Reply-To: <orig123@broker.com>" in raw and "<older@broker.com> <orig123@broker.com>" in raw

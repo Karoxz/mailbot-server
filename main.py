@@ -984,13 +984,22 @@ def web_bid_price_submit(req: dict):
     # Desktop parity: after a confirmed BID PC price the desktop sends
     # "📋 Bid text copied — $X ($Y/mi). Press Reply and paste (Ctrl+V)."
     # (or "Bid for <driver> copied — ..." for a chosen truck) to Telegram.
-    try:
-        who = f"Bid for {sel['driver_name']} copied" if sel else "Bid text copied"
-        per_mile = f" (${rate_per_mile:.2f}/mi)" if rate_per_mile else ""
-        tg_notify.send_to_license(
-            license_key, f"📋 {who} — ${price:,.0f}{per_mile}. Press Reply and paste (Ctrl+V).")
-    except Exception as e:
-        logger.warning(f"bid_price Telegram confirmation failed (non-fatal): {e}")
+    # method=phone skips this entirely (client, 2026-10-07: "no need to
+    # redirect to gmail anymore nor the bid text copied notification,
+    # since it creates the draft ready" / "no need to copy the text as
+    # well") — there's nothing to copy or paste for phone anymore (the
+    # draft already has the price-filled text), and bid_price.html's
+    # own in-popup confirmation already tells the dispatcher it's done;
+    # a separate Telegram ping repeating that would be redundant, and
+    # the old "paste (Ctrl+V)" wording would be actively wrong now.
+    if method == "pc":
+        try:
+            who = f"Bid for {sel['driver_name']} copied" if sel else "Bid text copied"
+            per_mile = f" (${rate_per_mile:.2f}/mi)" if rate_per_mile else ""
+            tg_notify.send_to_license(
+                license_key, f"📋 {who} — ${price:,.0f}{per_mile}. Press Reply and paste (Ctrl+V).")
+        except Exception as e:
+            logger.warning(f"bid_price Telegram confirmation failed (non-fatal): {e}")
     return {"success": True, "bid_text": result["bid_text"], "thread_id": result["thread_id"],
             "broker_email": result["broker_email"], "draft_id": draft_id}
 

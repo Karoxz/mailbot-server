@@ -277,16 +277,33 @@ async function submitBid() {
     const res = await bidFetch("POST", "/api/web/bid_price/submit", {
       order_id: ORDER.order_id, price, rate_per_mile: rate, method: METHOD,
     });
+    const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
+    const draftUrl = res.draft_id ? `https://mail.google.com/mail/u/0/#drafts/${res.draft_id}` : null;
+    const resultGmail = document.getElementById("result-gmail");
+    document.getElementById("result-text").value = res.bid_text || "";
+
+    if (METHOD === "phone" && draftUrl) {
+      // Client, 2026-10-07: "no need to redirect to gmail anymore nor
+      // the bid text copied notification, since it creates the draft
+      // ready" / "no need to copy the text as well" — the draft
+      // already has the price-filled text in it (see
+      // /api/web/bid_price/submit), so there's nothing left to copy
+      // or paste and nowhere this page needs to send the dispatcher.
+      // Stays right here with a plain confirmation; "Open Draft & Send"
+      // is still offered as a manual option, just never auto-opened.
+      resultGmail.textContent = "📨 Open Draft & Send";
+      resultGmail.href = draftUrl;
+      document.getElementById("result-hint").textContent =
+        "A Gmail reply draft was created with this price already in it — open it whenever you're ready and send, no typing or pasting needed.";
+      document.getElementById("result-panel").style.display = "";
+      showToast("Draft created — ready to send");
+      btn.textContent = "✅ Draft created";
+      return;
+    }
+
     let copied = true;
     try { await navigator.clipboard.writeText(res.bid_text || ""); } catch (e) { copied = false; }
-    const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
-    // Phone gets a real Gmail reply draft (client, 2026-10-06) — send
-    // the dispatcher there instead of just the thread, same as poller.py's
-    // Telegram phone flow already does. Falls back to the thread link if
-    // the draft couldn't be created (non-fatal server-side).
-    const draftUrl = res.draft_id ? `https://mail.google.com/mail/u/0/#drafts/${res.draft_id}` : null;
     const openUrl = draftUrl || gmailUrl;
-    const resultGmail = document.getElementById("result-gmail");
     if (draftUrl) {
       resultGmail.textContent = "📨 Open Draft & Send";
       document.getElementById("result-hint").textContent =
@@ -296,7 +313,6 @@ async function submitBid() {
       document.getElementById("result-hint").textContent =
         "Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.";
     }
-    document.getElementById("result-text").value = res.bid_text || "";
     resultGmail.href = openUrl;
     document.getElementById("result-panel").style.display = "";
     showToast(copied ? "Bid recorded — text copied, opening…" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
