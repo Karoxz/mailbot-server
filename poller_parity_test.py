@@ -872,6 +872,39 @@ def _():
     assert by_chat[GROUP][0][1] == {"text": "💵 BID PHONE", "callback_data": "phone:555"}  # groups can't use web_app
 
 
+@test("driver bot active for the matched truck -> dispatcher ping held back until the driver bids; no driver bot -> sent immediately as before")
+def _():
+    # Client, 2026-10-07: "when driver bot is active for a truck, there
+    # is no need for notification for dispatcher for that truck loads
+    # until the driver types in the price" — the dispatcher instead
+    # hears about it later (with the real price) via driver_bot_web's
+    # existing forward-the-driver's-rate-to-the-dispatcher flow.
+    tg.calls.clear()
+    fleet_store.add_truck(LK, "LARGE STRAIGHT", "GRISHA", "44101", telegram_chat_id=999)
+    try:
+        res = {"success": True, "formatted": "LOAD TEXT", "order_id": "555",
+               "load_data": {"driver_name": "GRISHA", "all_trucks": [{"driver_name": "GRISHA"}]}}
+        ctx = fresh_ctx(driver_bot_token="888:driver-test-token")
+        outcome = poller._deliver_to_dispatcher(ctx, res, "th")
+        assert outcome == "awaiting_driver_bid"
+        assert not tg.sends(), "expected no Telegram push while the driver bot handles this one"
+        assert any("awaiting their price" in e["message"] for e in events("load_matched"))
+
+        # A truck with no driver bot (no chat ID) still gets the
+        # immediate ping, unchanged — the dispatcher is the only one
+        # who'll ever hear about it otherwise.
+        tg.calls.clear()
+        res2 = {"success": True, "formatted": "LOAD TEXT", "order_id": "556",
+                "load_data": {"driver_name": "NOBODY", "all_trucks": [{"driver_name": "NOBODY"}]}}
+        outcome2 = poller._deliver_to_dispatcher(ctx, res2, "th")
+        assert outcome2 == "sent" and len(tg.sends()) == 1
+    finally:
+        c = sqlite3.connect(fleet_store.DB_PATH)
+        c.execute("DELETE FROM trucks WHERE license_key=? AND driver_name=?", (LK, "GRISHA"))
+        c.commit()
+        c.close()
+
+
 @test("several trucks: load message keeps the BID PC callback; the driver prompt then opens the page per driver (web_app, ?truck=N) — callbacks in groups")
 def _():
     tg.calls.clear()
@@ -975,16 +1008,32 @@ def dreset():
 LOAD = {"order": "555", "vehicle_required": "LARGE STRAIGHT", "pickup_loc": "Cleveland, OH",
         "delivery_loc": "Columbus, OH", "google_deadhead": 10, "route_url": "https://maps.example/r",
         "broker_name": "ACME", "broker_email": "b@x.com", "formatted_message": FORMATTED,
-        "original_msg_full": {"threadId": "th9", "id": "mid9"}}
+        "original_msg_full": {"threadId": "th9", "id": "mid9"},
+        # Only ALEX actually passed real matching (find_all_trucks_for_
+        # pickup already enforces vehicle/radius/date/payload) — BEN
+        # (has a chat ID, SMALL STRAIGHT) and CARL (LARGE STRAIGHT, no
+        # chat ID) are both absent on purpose, see the test below.
+        "all_trucks": [{"driver_name": "ALEX", "truck_type": "LARGE STRAIGHT",
+                        "google_deadhead": 10, "deadhead_eta_minutes": 13,
+                        "truck_dimensions": "48x48x48"}]}
 
 
-@test("driver bot: card only to drivers with a chat ID whose vehicle fits; desktop card text, BID + ROUTE buttons")
+@test("driver bot: card only to drivers who actually matched (in all_trucks) AND have a chat ID; desktop card text, BID + ROUTE buttons")
 def _():
+    # Real bug, caught live 2026-10-07 testing 20 drivers at once: this
+    # used to re-check vehicle type with its own crude substring match
+    # ("VAN" in "CARGO VAN" is True) against the WHOLE fleet instead of
+    # trusting all_trucks (the real, already-fully-filtered match list)
+    # — a driver hundreds of miles outside their own radius cap could
+    # still get a card, personalized with nothing since they had no
+    # real all_trucks entry (fell back to the winning truck's figures
+    # — "still the same for all drivers"). BEN has a chat ID but isn't
+    # in all_trucks (didn't really match) and must NOT get a card now.
     dreset()
     driver_fleet()
     try:
         n = driver_bot_web.notify_drivers(LK, DTOKEN, "555", LOAD, FORMATTED)
-        assert n == 1
+        assert n == 1, f"expected only ALEX (BEN has no real match), got {n}"
         chat, text, kb = dcap.sent()[0]
         assert chat == 111
         assert text.startswith("👤 ALEX\n" + "─" * 30 + "\n")

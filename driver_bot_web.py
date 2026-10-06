@@ -147,39 +147,40 @@ def parse_rate(text: str) -> Optional[str]:
     return raw
 
 
-def drivers_for_license(license_key: str) -> list:
-    """Fleet trucks that have a driver Telegram chat ID — the web
-    equivalent of the desktop's driver_config.json drivers list."""
-    out = []
-    for t in fleet_store.list_trucks(license_key):
-        if t.get("telegram_chat_id"):
-            out.append({"name": t["driver_name"], "telegram_chat_id": t["telegram_chat_id"],
-                        "truck_type": (t.get("vehicle") or "")})
-    return out
-
-
 # ── notify (desktop: notify_drivers) ──────────────────────────────────
 def notify_drivers(license_key: str, token: str, order_id: str, load_data: dict, formatted: str = "") -> int:
     """Send the driver card to every eligible driver. Returns how many
-    cards were sent."""
+    cards were sent.
+
+    Real bug, caught live 2026-10-07 testing 20 drivers at once: this
+    used to loop over EVERY fleet truck with a chat ID and re-check
+    vehicle type with a crude substring match ("VAN" in "CARGO VAN" is
+    True) — looser than the REAL matching find_all_trucks_for_pickup()
+    already did in parser_core.py (radius, date, payload, dimensions,
+    exact vehicle match), so a driver 800mi outside their own radius
+    cap could still get a card. Worse: since that driver was never a
+    real match, they had no entry in load_data["all_trucks"] either, so
+    the per-driver personalization fix above silently fell back to
+    showing them the WINNING truck's deadhead/ETA — reported as "still
+    the same for all drivers", which is exactly how it surfaced.
+    Iterating all_trucks directly instead (the authoritative, already-
+    fully-filtered match list) fixes both at once: only genuinely
+    matched trucks are considered at all, and every one of them always
+    has its own real entry to personalize from — no fallback case left."""
     load_data = dict(load_data or {})
     if formatted:
         load_data["formatted_message"] = formatted
-    vehicle_required = (load_data.get("vehicle_required") or "").upper().strip()
-    # Per-driver deadhead/ETA/dims (2026-10-07 fix — see format_driver_
-    # summary's docstring): each matched truck's own figures, keyed by
-    # driver_name same as fleet_store's trucks these d["name"]s come from.
-    trucks_by_name = {t.get("driver_name"): t for t in (load_data.get("all_trucks") or [])
-                      if t.get("driver_name")}
+    all_trucks = load_data.get("all_trucks") or []
+    if not all_trucks:
+        return 0
+    chat_id_by_name = {t.get("driver_name"): t.get("telegram_chat_id")
+                       for t in fleet_store.list_trucks(license_key) if t.get("telegram_chat_id")}
     sent = 0
-    for d in drivers_for_license(license_key):
-        chat_id, name = d["telegram_chat_id"], d["name"]
-        truck_type = d["truck_type"].upper().strip()
-        if truck_type and vehicle_required and truck_type not in vehicle_required \
-                and vehicle_required not in truck_type:
-            logger.info(f"[{license_key}] skipping {name} ({truck_type} != {vehicle_required})")
-            continue
-        truck_entry = trucks_by_name.get(name)
+    for truck_entry in all_trucks:
+        name = truck_entry.get("driver_name")
+        chat_id = chat_id_by_name.get(name)
+        if not chat_id:
+            continue  # this matched truck's driver isn't on the driver bot
         if load_data.get("formatted_message"):
             card = format_driver_summary(name, load_data, truck_entry)
         else:
