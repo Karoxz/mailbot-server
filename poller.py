@@ -313,16 +313,29 @@ def _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx):
 
 def _bid_phone(bot_token, chats, license_key, order_id, load, truck, idx=None):
     """Client, 2026-10-06: "bid phone should show the map with the bid
-    amount, just like the pc version" — now sends the same price+map
-    page link BID PC does (method=phone), instead of immediately
-    building price-less bid text. bid_price.html's submit still ends in
-    a real Gmail reply draft for phone (see /api/web/bid_price/submit),
-    just with a confirmed price in it now, same as PC gets."""
+    amount, just like the pc version" — sends the same price+map page
+    BID PC does (method=phone); bid_price.html's submit still ends in a
+    real Gmail reply draft for phone (see /api/web/bid_price/submit),
+    just with a confirmed price in it now, same as PC gets.
+
+    Second round, same day: "it should not redirect anywhere, should
+    stay in telegram app... pop up directly in the telegram app without
+    redirecting" — a plain link in the message text opens an external
+    browser, which IS a redirect. In a private chat this now sends a
+    web_app button instead (Telegram opens it as an in-app Mini App,
+    never leaving Telegram — same mechanism _load_keyboard's BID PC
+    shortcut and _driver_keyboard's per-driver buttons already use).
+    Groups can't use web_app buttons at all (Telegram platform
+    limit) — the link stays in the text there, same as before."""
     if WEB_BASE_URL:
         url = _bid_pc_url(license_key, order_id, idx, method="phone")
         who = f" — {truck.get('driver_name')}" if truck else ""
-        _tg_broadcast(bot_token, chats,
-                      f"📱 BID PHONE — Order #{order_id}{who}\nEnter your price:\n{url}")
+        head = f"📱 BID PHONE — Order #{order_id}{who}"
+        for cid in chats:
+            if _web_app_ok(cid):
+                _tg_send(bot_token, cid, head, [[{"text": "💵 Enter price", "web_app": {"url": url}}]])
+            else:
+                _tg_send(bot_token, cid, f"{head}\nEnter your price:\n{url}")
         return
     # No public web origin configured: fall back to the old price-less
     # behavior — bid text + a real Gmail reply draft, no price entry.

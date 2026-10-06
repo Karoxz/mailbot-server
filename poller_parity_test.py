@@ -577,24 +577,38 @@ def _():
         cleanup_loads()
 
 
-@test("BID PHONE after choosing a driver: price link carries the truck index, driver name, and method=phone")
+@test("BID PHONE after choosing a driver: web_app popup (no redirect) carries the truck index, driver name, and method=phone")
 def _():
     seed_load("777", TRUCKS2)
     try:
-        t = press("phone:777:1")[0]["text"]
-        assert t.startswith("📱 BID PHONE — Order #777")
-        assert "— T2" in t and "&truck=1" in t and "&method=phone" in t and "bid_price.html?t=" in t
+        s = press("phone:777:1")[0]
+        assert s["text"] == "📱 BID PHONE — Order #777 — T2"  # no URL in the text — see below
+        url = json.loads(s["reply_markup"])["inline_keyboard"][0][0]["web_app"]["url"]
+        assert "&truck=1" in url and "&method=phone" in url and "bid_price.html?t=" in url
     finally:
         cleanup_loads()
 
 
-@test("BID PHONE single truck: price link with method=phone and no truck index")
+@test("BID PHONE single truck: web_app popup (no redirect) with method=phone and no truck index")
 def _():
     seed_load("778")
     try:
-        t = press("phone:778")[0]["text"]
-        assert t.startswith("📱 BID PHONE — Order #778")
-        assert "bid_price.html?t=" in t and "&method=phone" in t and "&truck=" not in t
+        s = press("phone:778")[0]
+        assert s["text"] == "📱 BID PHONE — Order #778"
+        url = json.loads(s["reply_markup"])["inline_keyboard"][0][0]["web_app"]["url"]
+        assert "bid_price.html?t=" in url and "&method=phone" in url and "&truck=" not in url
+    finally:
+        cleanup_loads()
+
+
+@test("BID PHONE in a group chat (no web_app support) falls back to a plain link in the text")
+def _():
+    seed_load("780")
+    try:
+        s = press("phone:780", chat=-100999888)[0]  # GROUP, defined later in this file
+        assert s["text"].startswith("📱 BID PHONE — Order #780\nEnter your price:\n")
+        assert "bid_price.html?t=" in s["text"] and "&method=phone" in s["text"]
+        assert "reply_markup" not in s
     finally:
         cleanup_loads()
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Plutus Bot — Bid PC</title>
+<title>Plutus Bot — Bid</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/plutus_logo_icon.png">
 <style>
@@ -71,7 +71,7 @@
 
 <main class="content">
   <div class="page-toolbar">
-    <h1 id="page-title">Bid PC</h1>
+    <h1 id="page-title">Bid</h1>
   </div>
 
   <div class="bid-layout">
@@ -156,8 +156,8 @@ const TRUCK = params.get("truck");
 // changes the title and what submit does with the confirmed price
 // (creates a real Gmail reply draft instead of only showing the text).
 const METHOD = params.get("method") === "phone" ? "phone" : "pc";
-document.title = METHOD === "phone" ? "Plutus Bot — Bid Phone" : "Plutus Bot — Bid PC";
-document.getElementById("page-title").textContent = METHOD === "phone" ? "Bid Phone" : "Bid PC";
+document.title = METHOD === "phone" ? "Plutus Bot — Bid Phone" : "Plutus Bot — Bid";
+document.getElementById("page-title").textContent = METHOD === "phone" ? "Bid Phone" : "Bid";
 
 if (!TOKEN) {
   // No token — this is the dashboard path. Same as every other page.
