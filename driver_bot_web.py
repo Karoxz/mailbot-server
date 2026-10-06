@@ -39,6 +39,7 @@ import fleet_store
 import license_db
 import load_store
 import tg_notify
+from parser_core import fmt_hours_minutes
 
 logger = logging.getLogger("driver_bot_web")
 
@@ -72,15 +73,51 @@ def _answer_callback(token: str, callback_query_id: str, text: str = ""):
 
 
 # ── Card formatting (ported verbatim) ─────────────────────────────────
-def format_driver_summary(driver_name: str, load_data: dict) -> str:
+def format_driver_summary(driver_name: str, load_data: dict, truck: dict = None) -> str:
+    """truck (added 2026-10-07 — real client-reported bug, caught live
+    testing 20 drivers at once: every driver's card showed the SAME
+    Out/Total Miles and ETA) — load_data["formatted_message"] is built
+    ONCE in parser_core.py against a single "best" truck for the
+    dispatcher's own message; reusing it verbatim for every driver
+    meant every card showed THAT one truck's deadhead regardless of
+    which driver it was actually sent to, even though load_data["all_
+    trucks"] already carries each matched truck's own figures. Only
+    Out Miles / Total Miles / Truck Dims / ETA actually depend on the
+    truck (confirmed against parser_core.py's own message-building
+    code: TT depends only on loaded miles, Loaded Miles is a load
+    property — neither varies by truck, left alone). truck=None (no
+    matching all_trucks entry for this driver) falls back to the
+    shared text unchanged, same as before this fix."""
     base = load_data.get("formatted_message", "")
     exclude = ("⏱️ Email time", "🤝 Broker", "Name:", "Company:", "Phone:", "Email:", "draft :", "Driver:")
     lines = [ln for ln in base.splitlines() if not any(ln.strip().startswith(x) for x in exclude)]
+    if truck:
+        loaded_miles = load_data.get("loaded_miles")
+        deadhead = truck.get("google_deadhead")
+        total_miles = (loaded_miles + deadhead) if (loaded_miles is not None and deadhead is not None) else None
+        eta_minutes = truck.get("deadhead_eta_minutes")
+        dims = truck.get("truck_dimensions", "")
+        patched = []
+        for ln in lines:
+            s = ln.strip()
+            if s.startswith("Out Miles:") and deadhead is not None:
+                patched.append(f"Out Miles: {deadhead}")
+            elif s.startswith("Total Miles:") and total_miles is not None:
+                patched.append(f"Total Miles: {total_miles}")
+            elif s.startswith("Truck Dims:"):
+                patched.append(f"Truck Dims: {dims}")
+            elif s.startswith("🕒 ETA:") and eta_minutes is not None:
+                patched.append(f"🕒 ETA: {fmt_hours_minutes(eta_minutes)}")
+            else:
+                patched.append(ln)
+        lines = patched
     cleaned = "\n".join(lines).strip()
     return f"👤 {driver_name}\n{'─' * 30}\n{cleaned}"
 
 
-def format_load_card(order_id: str, load_data: dict) -> str:
+def format_load_card(order_id: str, load_data: dict, truck: dict = None) -> str:
+    deadhead = (truck or {}).get("google_deadhead", load_data.get("google_deadhead"))
+    driver_name = (truck or {}).get("driver_name") or load_data.get("driver_name")
     lines = [
         f"🚛  LOAD #{order_id}",
         f"Vehicle:    {load_data.get('vehicle_required', '')}",
@@ -91,10 +128,10 @@ def format_load_card(order_id: str, load_data: dict) -> str:
         lines.append(f"📅 PU Date:  {load_data['pickup_dt']}")
     if load_data.get("delivery_dt"):
         lines.append(f"📅 DEL Date: {load_data['delivery_dt']}")
-    if load_data.get("google_deadhead") is not None:
-        lines.append(f"📏 Deadhead: {load_data['google_deadhead']} mi")
-    if load_data.get("driver_name"):
-        lines.append(f"👤 Matched:  {load_data['driver_name']}")
+    if deadhead is not None:
+        lines.append(f"📏 Deadhead: {deadhead} mi")
+    if driver_name:
+        lines.append(f"👤 Matched:  {driver_name}")
     return "\n".join(lines)
 
 
@@ -129,6 +166,11 @@ def notify_drivers(license_key: str, token: str, order_id: str, load_data: dict,
     if formatted:
         load_data["formatted_message"] = formatted
     vehicle_required = (load_data.get("vehicle_required") or "").upper().strip()
+    # Per-driver deadhead/ETA/dims (2026-10-07 fix — see format_driver_
+    # summary's docstring): each matched truck's own figures, keyed by
+    # driver_name same as fleet_store's trucks these d["name"]s come from.
+    trucks_by_name = {t.get("driver_name"): t for t in (load_data.get("all_trucks") or [])
+                      if t.get("driver_name")}
     sent = 0
     for d in drivers_for_license(license_key):
         chat_id, name = d["telegram_chat_id"], d["name"]
@@ -137,10 +179,11 @@ def notify_drivers(license_key: str, token: str, order_id: str, load_data: dict,
                 and vehicle_required not in truck_type:
             logger.info(f"[{license_key}] skipping {name} ({truck_type} != {vehicle_required})")
             continue
+        truck_entry = trucks_by_name.get(name)
         if load_data.get("formatted_message"):
-            card = format_driver_summary(name, load_data)
+            card = format_driver_summary(name, load_data, truck_entry)
         else:
-            card = f"👤 {name}\n{'─' * 30}\n" + format_load_card(order_id, load_data)
+            card = f"👤 {name}\n{'─' * 30}\n" + format_load_card(order_id, load_data, truck_entry)
         keyboard = {"inline_keyboard": [[
             {"text": "💰 BID", "callback_data": f"driverbid:{order_id}:{name}"},
             *([{"text": "🚩 ROUTE", "url": load_data["route_url"]}] if load_data.get("route_url") else []),

@@ -998,6 +998,48 @@ def _():
         cleanup_trucks()
 
 
+@test("driver bot: each driver's card shows THEIR OWN Out/Total Miles and ETA, not whichever truck the dispatcher's message was built against")
+def _():
+    # Client-reported real bug, caught live testing 20 drivers at once,
+    # 2026-10-07: every driver's card showed the SAME Out Miles/Total
+    # Miles/ETA — traced to format_driver_summary reusing load_data[
+    # "formatted_message"] (built against ONE "best" truck for the
+    # dispatcher) verbatim for every driver, ignoring that load_data[
+    # "all_trucks"] already carries each matched truck's own figures.
+    dreset()
+    driver_fleet()
+    formatted_with_truck_lines = (
+        "📦 New Load\nPickup: Cleveland, OH\nDelivery: Columbus, OH\n"
+        "Out Miles: 10\nLoaded Miles: 100\nTotal Miles: 110\n"
+        "Driver: ALEX\nTruck Dims: 48x48x48\n\n🕒 TT: 2hrs\n🕒 ETA: 30min"
+    )
+    load = dict(LOAD)
+    load["formatted_message"] = formatted_with_truck_lines
+    load["loaded_miles"] = 100
+    load["vehicle_required"] = ""  # ALEX is LARGE STRAIGHT, BEN is SMALL STRAIGHT — don't filter either out
+    load["all_trucks"] = [
+        {"driver_name": "ALEX", "google_deadhead": 10,  "deadhead_eta_minutes": 30,
+         "truck_dimensions": "48x48x48"},
+        {"driver_name": "BEN",  "google_deadhead": 250, "deadhead_eta_minutes": 300,
+         "truck_dimensions": "96x96x96"},
+    ]
+    try:
+        n = driver_bot_web.notify_drivers(LK, DTOKEN, "555", load, formatted_with_truck_lines)
+        assert n == 2
+        by_chat = {chat: text for chat, text, kb in dcap.sent()}
+        assert "Out Miles: 10" in by_chat[111] and "Total Miles: 110" in by_chat[111]
+        assert "Truck Dims: 48x48x48" in by_chat[111] and "🕒 ETA: 30min" in by_chat[111]
+        # BEN's own figures, NOT a copy of ALEX's (the bug) or the
+        # original shared text's values
+        assert "Out Miles: 250" in by_chat[222] and "Total Miles: 350" in by_chat[222]
+        assert "Truck Dims: 96x96x96" in by_chat[222] and "🕒 ETA: 5hrs" in by_chat[222]
+        # TT doesn't depend on the truck (parser_core: calculate_tt_minutes
+        # only ever takes loaded miles) - correctly identical for both
+        assert "🕒 TT: 2hrs" in by_chat[111] and "🕒 TT: 2hrs" in by_chat[222]
+    finally:
+        cleanup_trucks()
+
+
 @test("driver taps BID: answered + ForceReply rate prompt; rate reply is parsed, forwarded to the dispatcher with BID PC/PHONE/DRAFT, bid recorded WITH the amount, driver confirmed")
 def _():
     dreset()
