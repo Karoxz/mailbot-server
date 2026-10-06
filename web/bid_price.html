@@ -293,6 +293,7 @@ async function submitBid() {
       // is still offered as a manual option, just never auto-opened.
       resultGmail.textContent = "📨 Open Draft & Send";
       resultGmail.href = draftUrl;
+      document.getElementById("result-copy").style.display = "none";  // nothing left to copy
       document.getElementById("result-hint").textContent =
         "A Gmail reply draft was created with this price already in it — open it whenever you're ready and send, no typing or pasting needed.";
       document.getElementById("result-panel").style.display = "";
@@ -300,6 +301,7 @@ async function submitBid() {
       btn.textContent = "✅ Draft created";
       return;
     }
+    document.getElementById("result-copy").style.display = "";
 
     let copied = true;
     try { await navigator.clipboard.writeText(res.bid_text || ""); } catch (e) { copied = false; }

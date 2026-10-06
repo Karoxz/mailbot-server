@@ -42,6 +42,7 @@
 # =============================================================
 
 import os
+import re
 import time
 import threading
 import requests
@@ -50,52 +51,101 @@ _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _MODEL = "openai/gpt-oss-20b"
 _session = requests.Session()
 
-# Real bug, found live 2026-10-06/07: throttle_seconds used to be a
-# plain time.sleep() BEFORE each call — a per-call-SITE delay, not a
-# per-PROJECT one. thread_learner's backfill runs in its own background
-# thread per license (see poller.py's _maybe_run_thread_learning), so
-# two licenses' passes overlapping (or a backfill running alongside a
-# live reply classification) meant two threads each independently
-# sleeping 1s between THEIR OWN calls but firing concurrently — the
-# actual aggregate rate against Groq's single shared quota was never
-# bounded by this at all. Confirmed live: ~2 hours of near-continuous
-# 429s, severe enough that reply_classifier's classification (which
-# bid_history/the web Live Feed both depend on) was failing right
-# alongside thread_learner's, silently losing real broker-reply
-# outcomes (reply_classifier fails soft by design). Fixed with a
-# process-wide lock enforcing a minimum gap between ANY two Groq calls
-# from ANY caller/thread, not just consecutive calls from the same one.
+# Real bug, found live 2026-10-06/07, two layers deep:
+#
+# Layer 1 (fixed first, turned out insufficient on its own): throttle_
+# seconds used to be a plain time.sleep() BEFORE each call — a
+# per-call-SITE delay, not a per-PROJECT one. thread_learner's backfill
+# runs in its own background thread per license (see poller.py's
+# _maybe_run_thread_learning), so two licenses' passes overlapping (or
+# a backfill running alongside a live reply classification) meant two
+# threads each independently pacing THEIR OWN calls but firing
+# concurrently — the aggregate rate against Groq's one shared quota was
+# never actually bounded.
+#
+# Layer 2 (the real ceiling, found via a direct diagnostic curl to
+# Groq's API — see x-ratelimit-* response headers): Groq's free tier
+# for this model is NOT a request-count limit (997/1000 requests still
+# available when this was checked) — it's 8000 TOKENS/minute. A
+# backfill pass burns through a large batch of messages, each one a
+# full prompt (up to ~4000 chars of email body) + completion + hidden
+# reasoning tokens — a handful of those calls alone can exhaust an
+# 8000-token/min budget, regardless of how well-spaced the *requests*
+# are. Pacing on request count (even correctly, globally) was solving
+# the wrong dimension — confirmed live: 429s kept recurring in tight
+# bursts even after the Layer 1 fix shipped.
+#
+# Fixed by reading Groq's own x-ratelimit-remaining-tokens /
+# x-ratelimit-reset-tokens response headers after every call (success
+# or 429) and using THAT to pace the next one, instead of guessing.
+# _next_allowed_at is the single shared "no Groq call before this
+# monotonic time" gate, pushed forward by both the fixed per-call floor
+# (throttle_seconds, a safety net for when headers are absent — a
+# network error before any response, for instance) and the real
+# token-budget signal, whichever is further out. A wait longer than
+# _MAX_SLEEP_SECONDS fails the caller fast instead of blocking the
+# thread for it — this is what actually ended the 2+ hour outage: a
+# backfill with a large backlog now blows through every remaining item
+# in milliseconds (each one failing fast) instead of synchronously
+# sleeping out a real multi-minute token-budget reset once per message.
 _rate_lock = threading.Lock()
-_last_call_at = 0.0
+_next_allowed_at = 0.0
+_MAX_SLEEP_SECONDS = 5.0
+_TOKEN_SAFETY_MARGIN = 1500  # don't fire the next call if fewer tokens than this remain in the current window
+
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 
 
-def _wait_for_turn(min_interval: float):
-    global _last_call_at
+def _parse_duration(s) -> float:
+    """Groq sends reset windows as Go-style duration strings, e.g.
+    "4m19.2s" or "577ms" — not seconds. Unrecognized/missing -> 0."""
+    if not s:
+        return 0.0
+    total = 0.0
+    for value, unit in _DURATION_RE.findall(s):
+        total += float(value) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+    return total
+
+
+def _note_token_budget(headers):
+    """Called after every real Groq response (success or 429). If the
+    token window is critically low, pushes the shared gate out to
+    Groq's own reported reset time — proactive, so the NEXT call never
+    has to find out the hard way."""
+    remaining, reset = headers.get("x-ratelimit-remaining-tokens"), headers.get("x-ratelimit-reset-tokens")
+    if remaining is None or reset is None:
+        return
+    try:
+        remaining = int(remaining)
+    except ValueError:
+        return
+    if remaining >= _TOKEN_SAFETY_MARGIN:
+        return
+    wait_s = _parse_duration(reset)
+    if wait_s <= 0:
+        return
+    global _next_allowed_at
+    with _rate_lock:
+        candidate = time.monotonic() + wait_s
+        if candidate > _next_allowed_at:
+            _next_allowed_at = candidate
+
+
+def _wait_for_turn(min_interval: float) -> bool:
+    """True if the caller may proceed (a short wait, if any, already
+    happened). False if the wait would be long enough that the caller
+    should fail fast instead of blocking its thread for it."""
+    global _next_allowed_at
     with _rate_lock:
         now = time.monotonic()
-        wait = _last_call_at + min_interval - now
+        target = max(_next_allowed_at, now)
+        wait = target - now
+        if wait > _MAX_SLEEP_SECONDS:
+            return False
         if wait > 0:
             time.sleep(wait)
-        _last_call_at = time.monotonic()
-
-
-# Circuit breaker, same bug/fix as above — thread_backfill.run_backfill
-# has no idea a 429 even happened (thread_learner._extract_rate_from_text
-# fails soft to None, by design, same contract every caller here uses),
-# so a single backfill pass across a large bid-labeled thread history
-# would grind through every remaining thread/message ONE AT A TIME once
-# Groq's quota was exhausted — each one still paying the full throttle +
-# request + 10s-retry-wait + request cycle for a call virtually
-# guaranteed to fail, which is exactly what stretched this into a
-# 2+ hour outage (and kept the quota pinned at its limit the whole
-# time, since the retries themselves were most of the traffic). Once
-# a 429 survives the in-call retry, every call for the next
-# _COOLDOWN_SECONDS fails IMMEDIATELY (no HTTP call, no sleep) instead
-# of repeating the same losing bet — lets Groq's window actually
-# recover, and turns a large backlog's failure mode from "~15s per
-# item for hours" into "near-instant for the rest of this cooldown".
-_COOLDOWN_SECONDS = 45
-_circuit_open_until = 0.0
+        _next_allowed_at = time.monotonic() + min_interval
+        return True
 
 
 def _get_api_key() -> str:
@@ -114,23 +164,18 @@ def chat(system_prompt: str, user_content: str, *, json_mode: bool = False,
     requests exceptions on any failure — callers handle fail-soft
     themselves.
 
-    Retries once on 429 (rate limited), waiting whatever Groq's own
-    Retry-After header says (falls back to 10s if it doesn't send one).
-    throttle_seconds enforces a minimum gap before EVERY call, GLOBALLY
-    across every thread/caller in the process (see _wait_for_turn) —
-    bumped from 1.0 to 2.5s live 2026-10-07 after ~2 hours of
-    near-continuous 429s showed 1s wasn't actually safe at this
-    project's real concurrent volume (see the module-level comment on
-    _rate_lock for the full story).
+    Paced against Groq's real token-per-minute budget (read from its
+    own response headers — see _note_token_budget), not a guessed
+    request-count interval; throttle_seconds is just the floor used
+    when no header data is available yet. A 429 retries once using
+    Groq's own reported reset time when available (else its
+    Retry-After header, else a flat 10s); a wait longer than
+    _MAX_SLEEP_SECONDS skips the retry and fails fast instead of
+    blocking this thread for it — see the module-level comment for why.
     """
     api_key = _get_api_key()
     if not api_key:
         raise RuntimeError("GROQ_API_KEY not set")
-
-    global _circuit_open_until
-    remaining = _circuit_open_until - time.monotonic()
-    if remaining > 0:
-        raise RuntimeError(f"Groq rate limit cooldown — retrying in {remaining:.0f}s")
 
     payload = {
         "model": _MODEL,
@@ -152,25 +197,31 @@ def chat(system_prompt: str, user_content: str, *, json_mode: bool = False,
 
     last_status = None
     for attempt in range(2):
-        if throttle_seconds:
-            _wait_for_turn(throttle_seconds)
+        if throttle_seconds and not _wait_for_turn(throttle_seconds):
+            wait_remaining = _next_allowed_at - time.monotonic()
+            raise RuntimeError(f"Groq rate limit cooldown — retrying in {wait_remaining:.0f}s")
         r = _session.post(_GROQ_URL, headers=headers, json=payload, timeout=timeout)
         last_status = r.status_code
+        _note_token_budget(r.headers)
         if r.status_code == 429:
             if attempt == 0:
+                reset_tokens = _parse_duration(r.headers.get("x-ratelimit-reset-tokens"))
                 retry_after = r.headers.get("Retry-After")
                 try:
-                    wait = max(float(retry_after), 1.0) if retry_after else 10.0
+                    retry_after = max(float(retry_after), 1.0) if retry_after else 0.0
                 except ValueError:
-                    wait = 10.0
+                    retry_after = 0.0
+                wait = max(reset_tokens, retry_after) or 10.0
+                if wait > _MAX_SLEEP_SECONDS:
+                    # Not a quick retry anymore — _note_token_budget
+                    # already pushed the shared gate out; fail fast
+                    # rather than block this thread for it.
+                    print(f"[LLM] rate limited, {wait:.0f}s to recover — failing fast instead of blocking", flush=True)
+                    raise RuntimeError(f"Groq rate limited — retrying in {wait:.0f}s")
                 print(f"[LLM] rate limited, waiting {wait:.0f}s and retrying once...", flush=True)
                 time.sleep(wait)
                 continue
-            # Still 429 after the retry — open the circuit (see the
-            # module-level comment) instead of letting raise_for_status()
-            # below bubble a generic HTTPError that skips this entirely.
-            _circuit_open_until = time.monotonic() + _COOLDOWN_SECONDS
-            print(f"[LLM] still rate limited after retry — opening circuit for {_COOLDOWN_SECONDS}s", flush=True)
+            print("[LLM] still rate limited after retry", flush=True)
         r.raise_for_status()
         data = r.json()
         return data["choices"][0]["message"]["content"] or ""

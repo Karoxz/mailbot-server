@@ -510,6 +510,7 @@ tbody tr:hover { background: var(--bg-card); }
 }
 .form-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 0 18px 16px;
 }
