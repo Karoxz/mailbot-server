@@ -250,8 +250,9 @@ def _():
     assert rec[0]["thread_id"] == "t1" and rec[0]["message_id"] == "m1"
     sent = tg.sends()
     assert len(sent) == 1 and sent[0]["text"] == "LOAD TEXT" and sent[0]["chat_id"] == CHAT
-    assert "reply_markup" in sent[0] and "phone:555" in sent[0]["reply_markup"]
+    assert "reply_markup" in sent[0]
     assert ("bid:555" in sent[0]["reply_markup"]) or ("bid_price.html" in sent[0]["reply_markup"])   # callback, or web_app when a web origin is configured
+    assert ("phone:555" in sent[0]["reply_markup"]) or ("method=phone" in sent[0]["reply_markup"])   # same, for BID PHONE
     assert g.modified == ["m1"]
 
 
@@ -813,6 +814,17 @@ def _():
     assert [b["text"] for b in by_chat[CHAT][0]] == ["💵 BID PC", "💵 BID PHONE", "📋 DRAFT"]
     assert by_chat[GROUP][0][0] == {"text": "💵 BID PC", "callback_data": "bid:555"}     # groups can't use web_app
     assert by_chat[CHAT][1] == [{"text": "🚩ROUTE🚩", "url": "https://r"}]
+    # Client, 2026-10-06 (round 2): "with no additional prompts the map
+    # with bid input appears" for BID PHONE too, same one-tap shortcut
+    # PC already had — a plain callback here would mean an extra
+    # round trip (press PHONE -> bot sends a 2nd message with its own
+    # "Enter price" button -> THEN the popup) instead of opening
+    # immediately on the very first tap.
+    phone_private = by_chat[CHAT][0][1]
+    assert phone_private["text"] == "💵 BID PHONE" and "callback_data" not in phone_private
+    assert phone_private["web_app"]["url"].startswith("https://plutus.example/app/bid_price.html?t=")
+    assert "&method=phone" in phone_private["web_app"]["url"]
+    assert by_chat[GROUP][0][1] == {"text": "💵 BID PHONE", "callback_data": "phone:555"}  # groups can't use web_app
 
 
 @test("several trucks: load message keeps the BID PC callback; the driver prompt then opens the page per driver (web_app, ?truck=N) — callbacks in groups")

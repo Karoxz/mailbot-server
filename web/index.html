@@ -30,18 +30,24 @@
     <div class="panel-header">
       <h2>Live feed</h2>
       <div style="display:flex;align-items:center;gap:10px;">
-        <span class="panel-hint">Incoming loads · act on one directly — Bid PC / Phone / Draft</span>
+        <span class="panel-hint">Incoming loads · act on one directly — Bid / Draft</span>
         <button id="notify-toggle-btn" class="btn btn-sm" type="button" title="Get a popup + sound when a new load comes in">🔔 Enable alerts</button>
         <button id="refresh-btn" class="btn btn-sm" type="button" title="Refresh now">⟳ Refresh</button>
         <button id="clear-feed-btn" class="btn btn-sm" type="button" title="Clear the feed — hides current loads; a genuinely new load still shows up">🗑 Clear</button>
       </div>
     </div>
+    <!-- Pinned, never paginated-away — client-reported real bug,
+         2026-10-06: a broker reply (won/lost/countered) landed on page
+         2+ once ~20 newer loads had matched since, making it look like
+         it "never came in" even though the data was there all along.
+         Always shows the last few replies regardless of load volume. -->
+    <div id="replies-list"></div>
     <div id="loads-controls"></div>
     <div id="loads-list" class="feed-list"></div>
   </section>
 </main>
 
-<!-- Bid text modal — shown after a Bid Phone/Draft click. Nothing is
+<!-- Bid text modal — shown after a Draft click. Nothing is
      ever auto-sent (same principle as the rest of this project): this
      gives the dispatcher the actual text to copy/paste and send
      themselves, same as the desktop's clipboard-copy behavior. Bid PC
@@ -294,7 +300,10 @@ let clearedKeys = new Set();
 try { clearedKeys = new Set(JSON.parse(localStorage.getItem(CLEARED_KEY) || "[]")); } catch (e) {}
 const feedKey = (it) => `${it.order}|${it.received_at || ""}`;
 function visibleLoads() {
-  return allLoads.filter((it) => !clearedKeys.has(feedKey(it)));
+  // Replies get their own always-visible section (#replies-list,
+  // rendered in refresh() below) instead of competing with load
+  // volume for a spot on page 1 of this paginated grid.
+  return allLoads.filter((it) => it.type !== "reply" && !clearedKeys.has(feedKey(it)));
 }
 
 const loadsControls = MB.mountListControls(document.getElementById("loads-controls"), {
@@ -428,11 +437,24 @@ async function refresh() {
       });
     }
     applyLoadsControls();
+    renderReplies();
     MB.setConn(true);
   } catch (err) {
     MB.setConn(false);
     MB.bounceIfAuthError(err);
   }
+}
+
+const REPLIES_SHOWN = 5;
+function renderReplies() {
+  const el = document.getElementById("replies-list");
+  const replies = allLoads.filter((it) => it.type === "reply").slice(0, REPLIES_SHOWN);
+  MB.diffRender(el, replies, {
+    key: (it) => `reply|${it.order}|${it.received_at || ""}`,
+    isRow: false,
+    emptyHtml: "",   // nothing to show when there are no recent replies — no need to clutter the panel
+    html: renderReplyCard,
+  });
 }
 
 const refreshBtn = document.getElementById("refresh-btn");

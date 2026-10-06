@@ -195,19 +195,29 @@ def _bid_pc_url(license_key: str, order_id: str, truck_idx=None, method: str = "
     return url
 
 
-def _load_keyboard(order_id, route_url, bid_pc_url=None) -> list:
+def _load_keyboard(order_id, route_url, bid_pc_url=None, bid_phone_url=None) -> list:
     """Identical layout to the desktop's load message buttons: row 1 is
-    BID PC | BID PHONE | DRAFT, row 2 is the ROUTE url. bid_pc_url (set
-    for single-truck loads in private chats) makes BID PC a web_app
-    button: one tap opens the price page straight away inside Telegram,
-    no "Open this link?" prompt and no separate link message."""
+    BID PC | BID PHONE | DRAFT, row 2 is the ROUTE url. bid_pc_url/
+    bid_phone_url (set for single-truck loads in private chats) make
+    their button a web_app: one tap opens the price+map page straight
+    away inside Telegram, no "Open this link?" prompt and no separate
+    link message. Client, 2026-10-06 (second round, same day): "with
+    no additional prompts the map with bid input appears" — BID PHONE
+    used to only ever get a callback_data button here, meaning even the
+    single-truck case needed an extra round trip (press PHONE -> bot
+    sends a second message with an "Enter price" button -> THEN the
+    popup) before the fix below to _bid_phone's own fallback path
+    helped; this removes that trip entirely for the common case, same
+    as BID PC already got on 2026-09-24."""
     rows = []
     if order_id:
         bid_pc = ({"text": "💵 BID PC", "web_app": {"url": bid_pc_url}} if bid_pc_url
                   else {"text": "💵 BID PC", "callback_data": f"bid:{order_id}"})
+        bid_phone = ({"text": "💵 BID PHONE", "web_app": {"url": bid_phone_url}} if bid_phone_url
+                     else {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"})
         rows.append([
             bid_pc,
-            {"text": "💵 BID PHONE", "callback_data": f"phone:{order_id}"},
+            bid_phone,
             {"text": "📋 DRAFT",     "callback_data": f"text:{order_id}"},
         ])
     if route_url:
@@ -723,11 +733,13 @@ def _deliver_to_dispatcher(ctx: dict, result: dict, thread_id: str) -> str:
         activity_log.log_event(lk, "load_matched", f"Load #{order_id} matched (no bot token/chat ID set — not sent)")
         return "no_recipient"
     route_url = load_data.get("route_url")
-    pc_url = (_bid_pc_url(lk, order_id)
-              if order_id and len(load_data.get("all_trucks") or []) <= 1 else None)
+    single_truck = order_id and len(load_data.get("all_trucks") or []) <= 1
+    pc_url = _bid_pc_url(lk, order_id) if single_truck else None
+    phone_url = _bid_pc_url(lk, order_id, method="phone") if single_truck else None
     sent = _tg_broadcast(ctx["bot_token"], ctx["chat_ids"], result["formatted"],
                          lambda cid: _load_keyboard(order_id, route_url,
-                                                    pc_url if _web_app_ok(cid) else None))
+                                                    pc_url if _web_app_ok(cid) else None,
+                                                    phone_url if _web_app_ok(cid) else None))
     if not sent:
         logger.warning(f"[{lk}] #{order_id} Telegram send FAILED")
         activity_log.log_event(lk, "send_failed", f"Load #{order_id} matched but the Telegram send failed")
