@@ -624,7 +624,30 @@ def web_feed(license_key: str, limit: int = 50):
         thread_id = (item.get("original_msg_full") or {}).get("threadId", "")
         entry = {k: v for k, v in item.items() if k != "original_msg_full"}
         entry["thread_id"] = thread_id
+        entry["type"] = "load"
         cleaned.append(entry)
+
+    # Broker replies (won/lost/countered) — client-reported real gap,
+    # 2026-10-06: these only ever reached Telegram + the Bid History
+    # page, never the Live Feed. Merged in here, time-sorted alongside
+    # new loads, as a distinct item the frontend renders as a compact
+    # reply card rather than a full load card.
+    for r in bid_history.get_recent_reply_outcomes(license_key, limit=limit):
+        cleaned.append({
+            "type":          "reply",
+            "order":         r["order_id"],
+            "pickup_loc":    r["pickup_loc"],
+            "delivery_loc":  r["delivery_loc"],
+            "broker_name":   r["broker_name"],
+            "broker_email":  r["broker_email"],
+            "thread_id":     r["thread_id"],
+            "status":        r["status"],
+            "outcome_note":  r["outcome_note"],
+            "received_at":   r["outcome_at"],
+        })
+
+    cleaned.sort(key=lambda it: it.get("received_at") or "", reverse=True)
+    cleaned = cleaned[:limit]
     return {"success": True, "count": len(cleaned), "items": cleaned}
 
 
@@ -922,16 +945,42 @@ def web_bid_price_submit(req: dict):
     except (TypeError, ValueError):
         rate_per_mile = None
 
+    method = req.get("method") or "pc"
+    if method not in ("pc", "phone"):
+        raise HTTPException(status_code=400, detail="method must be pc or phone")
+
     load = load_store.get_load(license_key, order_id)
     sel = bid_actions.get_truck(load, req.get("truck")) if load else None
-    result = bid_actions.record_bid_and_build_text(license_key, order_id, "pc", price,
+    result = bid_actions.record_bid_and_build_text(license_key, order_id, method, price,
                                                     rate_per_mile, sel)
     if not result:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
 
-    logger.info(f"[WEB] bid_price submit: order={order_id} price={price} bid_id={result['bid_id']}")
+    logger.info(f"[WEB] bid_price submit: order={order_id} method={method} price={price} bid_id={result['bid_id']}")
     activity_log.log_event(license_key, "bid_recorded",
-                            f"Recorded PC bid on order #{order_id} at ${price:g}")
+                            f"Recorded {method.upper()} bid on order #{order_id} at ${price:g}")
+
+    # method=phone (client, 2026-10-06: "bid phone should show the map
+    # with the bid amount, just like the pc version") — PC just shows
+    # the text to copy + a thread link; phone ALSO gets a real Gmail
+    # reply draft created, same as poller.py's old price-less phone flow
+    # did, just with the confirmed price baked into the draft text now.
+    # Best-effort: a draft failure (e.g. no original message on a
+    # desktop-sourced load) still returns the recorded bid/text, same
+    # as PC, just without the draft field.
+    draft_id = None
+    if method == "phone":
+        try:
+            msg_id = (load.get("original_msg_full") or {}).get("id") or ""
+            if not msg_id:
+                raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
+            service = gmail_client.build_service(license_key)
+            headers = gmail_client.get_message_headers(service, msg_id)
+            draft = gmail_client.create_reply_draft(service, headers)
+            draft_id = draft.get("id") or None
+        except Exception as e:
+            logger.warning(f"[WEB] bid_price phone draft failed (non-fatal): order={order_id}: {e}")
+
     # Desktop parity: after a confirmed BID PC price the desktop sends
     # "📋 Bid text copied — $X ($Y/mi). Press Reply and paste (Ctrl+V)."
     # (or "Bid for <driver> copied — ..." for a chosen truck) to Telegram.
@@ -942,8 +991,8 @@ def web_bid_price_submit(req: dict):
             license_key, f"📋 {who} — ${price:,.0f}{per_mile}. Press Reply and paste (Ctrl+V).")
     except Exception as e:
         logger.warning(f"bid_price Telegram confirmation failed (non-fatal): {e}")
-    return {"success": True, "bid_text": result["bid_text"],
-            "thread_id": result["thread_id"], "broker_email": result["broker_email"]}
+    return {"success": True, "bid_text": result["bid_text"], "thread_id": result["thread_id"],
+            "broker_email": result["broker_email"], "draft_id": draft_id}
 
 
 @app.get("/api/web/thread_learning/status")

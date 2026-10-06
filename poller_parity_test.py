@@ -552,8 +552,15 @@ def _():
         s = press("phone:777")[0]
         assert s["text"] == "👤 Select driver for Order #777 (Phone):"
         kb = json.loads(s["reply_markup"])["inline_keyboard"]
-        assert kb == [[{"text": "📱 T1  —  12 mi out", "callback_data": "phone:777:0"}],
-                      [{"text": "📱 T2  —  33 mi out", "callback_data": "phone:777:1"}]]
+        # Phone now opens the same price+map page BID PC does (client,
+        # 2026-10-06: "bid phone should show the map ... just like the
+        # pc version") — web_app buttons in a private chat, not plain
+        # callbacks; groups (no web_app support) still get callbacks.
+        assert kb[0][0]["text"] == "📱 T1  —  12 mi out" and kb[1][0]["text"] == "📱 T2  —  33 mi out"
+        assert kb[0][0]["web_app"]["url"].endswith("&truck=0&method=phone")
+        assert kb[1][0]["web_app"]["url"].endswith("&truck=1&method=phone")
+        gk = poller._driver_keyboard("phone", "777", TRUCKS2, LK)(-100999888)  # GROUP, defined later in this file
+        assert gk[1][0] == {"text": "📱 T2  —  33 mi out", "callback_data": "phone:777:1"}
         assert press("bid:777")[0]["text"] == "👤 Select driver for Order #777:"
         assert press("text:777")[0]["text"] == "👤 Select driver for Order #777 (Draft):"
     finally:
@@ -570,43 +577,75 @@ def _():
         cleanup_loads()
 
 
-@test("BID PHONE: sends bid text, creates a REAL threaded Gmail draft, records the phone bid for THAT truck, Open Draft button")
+@test("BID PHONE after choosing a driver: price link carries the truck index, driver name, and method=phone")
 def _():
+    seed_load("777", TRUCKS2)
+    try:
+        t = press("phone:777:1")[0]["text"]
+        assert t.startswith("📱 BID PHONE — Order #777")
+        assert "— T2" in t and "&truck=1" in t and "&method=phone" in t and "bid_price.html?t=" in t
+    finally:
+        cleanup_loads()
+
+
+@test("BID PHONE single truck: price link with method=phone and no truck index")
+def _():
+    seed_load("778")
+    try:
+        t = press("phone:778")[0]["text"]
+        assert t.startswith("📱 BID PHONE — Order #778")
+        assert "bid_price.html?t=" in t and "&method=phone" in t and "&truck=" not in t
+    finally:
+        cleanup_loads()
+
+
+@test("bid_price submit, method=phone: creates a REAL threaded Gmail draft with the confirmed price, records the phone bid")
+def _():
+    from fastapi.testclient import TestClient
+    import main
+    enable_license()
     seed_load("777", TRUCKS2)
     g = gmail_with_original()
     drafts = []
     g.drafts = lambda: type("D", (), {"create": lambda self, userId, body: _Exec(
         lambda: drafts.append(body) or {"id": "draft123"})})()
     try:
-        sent = press("phone:777:1")
-        assert sent[0]["text"] == "Truck T2 is 33 miles out"           # body built from the chosen truck
-        raw = base64.urlsafe_b64decode(drafts[0]["message"]["raw"]).decode()
-        assert "To: bob@broker.com" in raw and "Subject: Re: Bid on Order #777 LARGE STRAIGHT" in raw
-        assert "In-Reply-To: <orig123@broker.com>" in raw and "<older@broker.com> <orig123@broker.com>" in raw
-        assert drafts[0]["message"]["threadId"] == "th9"
-        assert sent[1]["text"] == "✅ Draft created for T2 — Order #777\nTap below → opens Gmail draft ready to send:"
-        assert "#drafts/draft123" in sent[1]["reply_markup"] and "Open Draft & Send" in sent[1]["reply_markup"]
-        bids = bid_history.get_bids_for_order(LK, "777")
-        assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["driver_name"] == "T2"
-        assert bids[0]["deadhead_miles"] == 33 and bids[0]["vehicle_type"] == "SMALL STRAIGHT"
+        with TestClient(main.app) as c:
+            r = c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "777", "truck": "1",
+                                                           "price": 692, "rate_per_mile": 4.0, "method": "phone"})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["draft_id"] == "draft123" and body["bid_text"] == "Truck T2 is 33 miles out"
+            raw = base64.urlsafe_b64decode(drafts[0]["message"]["raw"]).decode()
+            assert "To: bob@broker.com" in raw and "Subject: Re: Bid on Order #777 LARGE STRAIGHT" in raw
+            assert "In-Reply-To: <orig123@broker.com>" in raw and "<older@broker.com> <orig123@broker.com>" in raw
+            assert drafts[0]["message"]["threadId"] == "th9"
+            bids = bid_history.get_bids_for_order(LK, "777")
+            assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["driver_name"] == "T2"
+            assert bids[0]["bid_amount"] == 692 and bids[0]["deadhead_miles"] == 33
     finally:
         cleanup_loads()
+        cleanup_license()
 
 
-@test("BID PHONE single truck uses the single-driver wording; failure sends '❌ Failed to create draft'")
+@test("bid_price submit, method=phone: a draft failure is non-fatal — bid is still recorded, draft_id is None")
 def _():
-    seed_load("778")
-    g = gmail_with_original()
-    g.drafts = lambda: type("D", (), {"create": lambda self, userId, body: _Exec(lambda: {"id": "d1"})})()
+    from fastapi.testclient import TestClient
+    import main
+    enable_license()
+    seed_load("779", mid="")            # no original message -> cannot draft
     try:
-        sent = press("phone:778")
-        assert sent[1]["text"] == "✅ Draft created for Order #778\nTap below → opens Gmail draft ready to send:"
-        seed_load("779", mid="")            # no original message -> cannot draft
-        sent = press("phone:779")
-        assert sent[-1]["text"].startswith("❌ Failed to create draft:"), sent[-1]["text"]
-        assert not bid_history.get_bids_for_order(LK, "779"), "no bid is recorded when the draft fails"
+        with TestClient(main.app) as c:
+            r = c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "779",
+                                                           "price": 500, "method": "phone"})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["draft_id"] is None and body["bid_text"]
+            bids = bid_history.get_bids_for_order(LK, "779")
+            assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["bid_amount"] == 500
     finally:
         cleanup_loads()
+        cleanup_license()
 
 
 @test("DRAFT: '📋 ORDER #X:' (single) / '📋 ORDER #X — driver:' (chosen truck) + bid recorded as 'draft'")
@@ -655,6 +694,37 @@ def _():
             assert notes[-1] == (LK, "📋 Bid for T2 copied — $692 ($4.00/mi). Press Reply and paste (Ctrl+V).")
             c.post("/api/web/bid_price/submit", json={"license_key": LK, "order_id": "777", "price": 500})
             assert notes[-1][1] == "📋 Bid text copied — $500. Press Reply and paste (Ctrl+V)."
+    finally:
+        cleanup_loads()
+        cleanup_license()
+
+
+@test("/api/web/feed: duplicate order_id from a different message stays as 2 cards; broker-reply outcomes are merged in, newest first")
+def _():
+    from fastapi.testclient import TestClient
+    import main
+    enable_license()
+    seed_load("777", mid="mid-A", broker_email="brokerA@x.com")
+    seed_load("777", mid="mid-B", broker_email="brokerB@x.com")  # same order_id, different broker/message
+    bid_history.record_bid(license_key=LK, order_id="777", thread_id="th9", bid_method="pc",
+                           vehicle_type="LARGE STRAIGHT", driver_name="GRISHA",
+                           pickup_loc="Cleveland, OH", delivery_loc="Columbus, OH",
+                           broker_name="B", broker_email="b@x.com")
+    bid = bid_history.get_bids_for_order(LK, "777")[0]
+    bid_history.update_bid_outcome(LK, bid["id"], "won", outcome_source="broker_reply",
+                                   outcome_note="Confirmed by broker")
+    try:
+        with TestClient(main.app) as c:
+            items = c.get(f"/api/web/feed?license_key={LK}").json()["items"]
+            loads = [i for i in items if i["type"] == "load" and i["order"] == "777"]
+            replies = [i for i in items if i["type"] == "reply" and i["order"] == "777"]
+            assert len(loads) == 2, f"expected 2 distinct load cards, got {len(loads)}"
+            assert {l["broker_email"] for l in loads} == {"brokerA@x.com", "brokerB@x.com"}
+            assert len(replies) == 1 and replies[0]["status"] == "won"
+            assert replies[0]["outcome_note"] == "Confirmed by broker"
+            # newest-first across both kinds, by their own timestamp
+            assert all(items[i]["received_at"] >= items[i + 1]["received_at"]
+                      for i in range(len(items) - 1))
     finally:
         cleanup_loads()
         cleanup_license()

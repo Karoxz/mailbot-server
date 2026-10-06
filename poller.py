@@ -178,14 +178,20 @@ def _web_app_ok(chat_id) -> bool:
     return isinstance(chat_id, int) and chat_id > 0
 
 
-def _bid_pc_url(license_key: str, order_id: str, truck_idx=None):
+def _bid_pc_url(license_key: str, order_id: str, truck_idx=None, method: str = "pc"):
     """Signed link to the price+map page (None when no public web origin
-    is configured). 48h token, same as the price-page links always were."""
+    is configured). 48h token, same as the price-page links always were.
+    method="phone" (client, 2026-10-06: "bid phone should show the map
+    with the bid amount, just like the pc version") reuses the exact
+    same page — bid_price.html branches its post-submit behavior on it
+    (create a Gmail draft instead of just showing the thread link)."""
     if not WEB_BASE_URL:
         return None
     url = f"{WEB_BASE_URL}/app/bid_price.html?t={map_token.make_bid_token(license_key, order_id)}"
     if truck_idx is not None:
         url += f"&truck={truck_idx}"
+    if method != "pc":
+        url += f"&method={method}"
     return url
 
 
@@ -279,8 +285,9 @@ def _driver_keyboard(action: str, order_id: str, trucks: list, license_key: str)
         for i, t in enumerate(trucks):
             name = t.get("driver_name", f"Driver {i + 1}")
             text = f"{_DRIVER_EMOJI[action]} {name}  —  {t.get('google_deadhead', '?')} mi out"
-            if action == "bid" and _web_app_ok(chat_id) and WEB_BASE_URL:
-                rows.append([{"text": text, "web_app": {"url": _bid_pc_url(license_key, order_id, i)}}])
+            if action in ("bid", "phone") and _web_app_ok(chat_id) and WEB_BASE_URL:
+                method = "phone" if action == "phone" else "pc"
+                rows.append([{"text": text, "web_app": {"url": _bid_pc_url(license_key, order_id, i, method)}}])
             else:
                 rows.append([{"text": text, "callback_data": f"{action}:{order_id}:{i}"}])
         return rows
@@ -304,7 +311,21 @@ def _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx):
                       [[{"text": "✉️ Find in Gmail", "url": result["gmail_url"]}]])
 
 
-def _bid_phone(bot_token, chats, license_key, order_id, load, truck):
+def _bid_phone(bot_token, chats, license_key, order_id, load, truck, idx=None):
+    """Client, 2026-10-06: "bid phone should show the map with the bid
+    amount, just like the pc version" — now sends the same price+map
+    page link BID PC does (method=phone), instead of immediately
+    building price-less bid text. bid_price.html's submit still ends in
+    a real Gmail reply draft for phone (see /api/web/bid_price/submit),
+    just with a confirmed price in it now, same as PC gets."""
+    if WEB_BASE_URL:
+        url = _bid_pc_url(license_key, order_id, idx, method="phone")
+        who = f" — {truck.get('driver_name')}" if truck else ""
+        _tg_broadcast(bot_token, chats,
+                      f"📱 BID PHONE — Order #{order_id}{who}\nEnter your price:\n{url}")
+        return
+    # No public web origin configured: fall back to the old price-less
+    # behavior — bid text + a real Gmail reply draft, no price entry.
     body = bid_actions.build_bid_text(load, order_id, license_key, truck)
     try:
         _tg_broadcast(bot_token, chats, body)
@@ -414,7 +435,7 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
     if action == "bid":
         _bid_pc(bot_token, chats, license_key, order_id, load, truck, idx)
     elif action == "phone":
-        _bid_phone(bot_token, chats, license_key, order_id, load, truck)
+        _bid_phone(bot_token, chats, license_key, order_id, load, truck, idx)
     else:
         _bid_text(bot_token, chats, license_key, order_id, load, truck)
 

@@ -369,6 +369,29 @@ def get_pending_bids_for_thread(license_key: str, thread_id: str) -> list:
         conn.close()
 
 
+def get_recent_reply_outcomes(license_key: str, limit: int = 20) -> list:
+    """Broker replies that actually resolved a bid (won/lost/countered via
+    reply_handler.classify_and_record) — client-reported real gap,
+    2026-10-06: these only ever reached Telegram + the Bid History page,
+    never the web dashboard's Live Feed, so a reply could come in with
+    nothing on the dispatcher's main screen to show it happened. Newest
+    first, by outcome_at (when the reply was classified), not created_at
+    (when the original bid was placed, possibly days earlier)."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            '''SELECT order_id, pickup_loc, delivery_loc, broker_name, broker_email,
+                      thread_id, status, outcome_note, outcome_at
+               FROM bids WHERE license_key=? AND outcome_source='broker_reply'
+               ORDER BY outcome_at DESC LIMIT ?''',
+            (license_key, limit)
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_recent_bids(license_key: str, limit: int = 50) -> list:
     """Most recent bids across all orders for this account — for the
     web dashboard's bid-history table. Newest first."""

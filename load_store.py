@@ -96,6 +96,39 @@ def init_db():
             )
             conn.execute('DROP TABLE loads')
             conn.execute('ALTER TABLE loads_new RENAME TO loads')
+            loads_cols = {row[1] for row in conn.execute('PRAGMA table_info(loads)')}
+
+        # message_id added to the primary key, 2026-10-06 — client-reported
+        # real bug: order_id is a BROKER-assigned reference, not globally
+        # unique; two different brokers posting under the same order_id (a
+        # genuine real-world collision, not a re-poll of the same email)
+        # silently overwrote each other via the old (license_key, order_id)
+        # upsert, so only the second one ever showed up on the Live Feed.
+        # message_id (the Gmail message id — always real for poller-sourced
+        # loads; '' for desktop-sourced ones, which have no such concept and
+        # keep today's overwrite-on-repost behavior, matching the desktop's
+        # own existing dedup) disambiguates distinct postings so every one
+        # of them keeps its own row. get_load(license_key, order_id) below
+        # still resolves to a single row (newest by created_at) — every
+        # "act on this load" call site (bid_actions, driver notify, the
+        # Telegram button callbacks) keeps working unchanged against
+        # whichever posting of that order_id is most recent.
+        if "message_id" not in loads_cols:
+            conn.execute('''CREATE TABLE loads_v2 (
+                license_key TEXT NOT NULL,
+                order_id    TEXT NOT NULL,
+                message_id  TEXT NOT NULL DEFAULT '',
+                data_json   TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (license_key, order_id, message_id)
+            )''')
+            conn.execute(
+                '''INSERT OR REPLACE INTO loads_v2
+                   (license_key, order_id, message_id, data_json, created_at)
+                   SELECT license_key, order_id, '', data_json, created_at FROM loads'''
+            )
+            conn.execute('DROP TABLE loads')
+            conn.execute('ALTER TABLE loads_v2 RENAME TO loads')
 
         conn.execute('''CREATE TABLE IF NOT EXISTS bid_template (
             id         INTEGER PRIMARY KEY CHECK (id = 1),
@@ -155,10 +188,16 @@ def init_db():
 
 
 def get_load(license_key: str, order_id: str) -> Optional[dict]:
+    """The single load to ACT on for this order_id — every bid-action call
+    site (Telegram button callbacks, the web dashboard's Bid PC/Phone/
+    Draft, driver notify) wants exactly one row, so this resolves to
+    whichever posting of that order_id is newest when more than one
+    exists (see put_load's message_id note)."""
     conn = _connect()
     try:
         cur = conn.execute(
-            "SELECT data_json FROM loads WHERE license_key=? AND order_id=?",
+            "SELECT data_json FROM loads WHERE license_key=? AND order_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
             (license_key, order_id)
         )
         row = cur.fetchone()
@@ -206,18 +245,25 @@ def put_load(license_key: str, order_id: str, data: dict):
         # non-serializable value crash the whole write.
         payload = json.dumps({k: v for k, v in data.items()
                                if k != "original_msg_full"})
+    # message_id disambiguates distinct postings of the same order_id (see
+    # the migration note on the loads table) — '' for desktop-sourced
+    # loads, which keeps today's overwrite-on-repost behavior for them.
+    message_id = (data.get("original_msg_full") or {}).get("id") or ""
     conn = _connect()
     try:
         now = _now()
         conn.execute(
-            '''INSERT INTO loads (license_key, order_id, data_json, created_at) VALUES (?, ?, ?, ?)
-               ON CONFLICT(license_key, order_id) DO UPDATE SET data_json=excluded.data_json,
-                                                    created_at=excluded.created_at''',
-            (license_key, order_id, payload, now),
+            '''INSERT INTO loads (license_key, order_id, message_id, data_json, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(license_key, order_id, message_id) DO UPDATE SET
+                   data_json=excluded.data_json, created_at=excluded.created_at''',
+            (license_key, order_id, message_id, payload, now),
         )
+        # Row-count cap, not a distinct-order_id cap — a given order_id can
+        # now legitimately hold more than one row (one per message_id).
         conn.execute('''
-            DELETE FROM loads WHERE license_key=? AND order_id NOT IN (
-                SELECT order_id FROM loads WHERE license_key=? ORDER BY created_at DESC LIMIT ?
+            DELETE FROM loads WHERE license_key=? AND rowid NOT IN (
+                SELECT rowid FROM loads WHERE license_key=? ORDER BY created_at DESC, rowid DESC LIMIT ?
             )''', (license_key, license_key, MAX_LOADS))
         conn.commit()
     finally:

@@ -19,6 +19,13 @@
     flex-direction: column;
     gap: 16px;
   }
+  /* Mobile: price form (the thing you actually act on) above the map —
+     client, 2026-10-06: "first should be bid amount buttons etc on the
+     top then map at the bottom". `order` only, not a DOM move, so the
+     >=900px rule below can reset it back to source order (map left,
+     sidebar right) without needing a second, diverging layout. */
+  .bid-sidebar { order: 1; }
+  .bid-map-frame { order: 2; }
   .bid-map-frame {
     /* position:relative + the fetched <img> absolutely positioned
        inside it (see loadMap()) — defensive: keeps the image's own
@@ -50,12 +57,13 @@
     main.content { max-width: 1400px; }
     .bid-layout { flex-direction: row; align-items: stretch; }
     .bid-map-frame {
+      order: 0;
       flex: 1 1 auto;
       min-width: 0;
       height: auto;
       min-height: calc(100vh - 150px);
     }
-    .bid-sidebar { flex: 0 0 400px; }
+    .bid-sidebar { order: 0; flex: 0 0 400px; }
   }
 </style>
 </head>
@@ -63,7 +71,7 @@
 
 <main class="content">
   <div class="page-toolbar">
-    <h1>Bid PC</h1>
+    <h1 id="page-title">Bid PC</h1>
   </div>
 
   <div class="bid-layout">
@@ -102,7 +110,7 @@
       <section class="panel" id="result-panel" style="display:none;">
         <div class="panel-header"><h2>Bid text</h2></div>
         <div style="padding:16px 18px;">
-          <p class="note-text" style="padding:0 0 10px;">Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.</p>
+          <p class="note-text" id="result-hint" style="padding:0 0 10px;">Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.</p>
           <textarea id="result-text" readonly rows="10" style="width:100%;font-family:monospace;font-size:.85rem;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);"></textarea>
           <div class="form-actions" style="padding-top:14px;">
             <button id="result-copy" class="btn btn-primary" type="button">📋 Copy to clipboard</button>
@@ -143,6 +151,13 @@ const TOKEN = params.get("t");
 const URL_ORDER_ID = params.get("order_id");
 // Driver picked in Telegram when several trucks matched (index into the load's all_trucks).
 const TRUCK = params.get("truck");
+// Client, 2026-10-06: "bid phone should show the map with the bid
+// amount, just like the pc version" — same page, method=phone just
+// changes the title and what submit does with the confirmed price
+// (creates a real Gmail reply draft instead of only showing the text).
+const METHOD = params.get("method") === "phone" ? "phone" : "pc";
+document.title = METHOD === "phone" ? "Plutus Bot — Bid Phone" : "Plutus Bot — Bid PC";
+document.getElementById("page-title").textContent = METHOD === "phone" ? "Bid Phone" : "Bid PC";
 
 if (!TOKEN) {
   // No token — this is the dashboard path. Same as every other page.
@@ -260,15 +275,31 @@ async function submitBid() {
   try {
     const rate = ORDER.total_miles ? price / ORDER.total_miles : null;
     const res = await bidFetch("POST", "/api/web/bid_price/submit", {
-      order_id: ORDER.order_id, price, rate_per_mile: rate,
+      order_id: ORDER.order_id, price, rate_per_mile: rate, method: METHOD,
     });
     let copied = true;
     try { await navigator.clipboard.writeText(res.bid_text || ""); } catch (e) { copied = false; }
     const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
+    // Phone gets a real Gmail reply draft (client, 2026-10-06) — send
+    // the dispatcher there instead of just the thread, same as poller.py's
+    // Telegram phone flow already does. Falls back to the thread link if
+    // the draft couldn't be created (non-fatal server-side).
+    const draftUrl = res.draft_id ? `https://mail.google.com/mail/u/0/#drafts/${res.draft_id}` : null;
+    const openUrl = draftUrl || gmailUrl;
+    const resultGmail = document.getElementById("result-gmail");
+    if (draftUrl) {
+      resultGmail.textContent = "📨 Open Draft & Send";
+      document.getElementById("result-hint").textContent =
+        "Copied to your clipboard. A Gmail reply draft was created with this price — open it, paste (Ctrl+V) if needed, and send.";
+    } else {
+      resultGmail.textContent = "✉️ Find thread in Gmail";
+      document.getElementById("result-hint").textContent =
+        "Copied to your clipboard — paste it into your reply and send it yourself. Nothing is sent automatically.";
+    }
     document.getElementById("result-text").value = res.bid_text || "";
-    document.getElementById("result-gmail").href = gmailUrl;
+    resultGmail.href = openUrl;
     document.getElementById("result-panel").style.display = "";
-    showToast(copied ? "Bid recorded — text copied, opening the thread…" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
+    showToast(copied ? "Bid recorded — text copied, opening…" : "Bid recorded — couldn't auto-copy, select the text manually", !copied);
     if (TOKEN) {
       // Desktop parity, 2026-09-25 (client: "it should redirect to the
       // exact thread im bidding to", matching _open_bid_thread's
@@ -282,7 +313,7 @@ async function submitBid() {
       // panel above is still rendered first as a fallback — if the
       // redirect is somehow interrupted, the copy button and thread
       // link are still right there.
-      window.location.href = gmailUrl;
+      window.location.href = openUrl;
     } else {
       // Dashboard path (client, 2026-09-29: "when i press make a bid,
       // it should open gmail thread on the new tab, not the plutus bot
@@ -290,7 +321,7 @@ async function submitBid() {
       // dispatcher wants to keep, so open the thread in a new one
       // instead of navigating away from it. Popup blocking isn't a
       // concern on this path the way it is on mobile Safari.
-      window.open(gmailUrl, "_blank", "noopener");
+      window.open(openUrl, "_blank", "noopener");
     }
   } catch (err) {
     showError(err.message || "Failed to submit bid");

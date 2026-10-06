@@ -152,13 +152,44 @@ function fmtDate(label, dt, asap, direct) {
   return `${label}: ${dt || "UNKNOWN"}`;
 }
 
+// Broker reply cards (won/lost/countered) — client, 2026-10-06: these
+// used to only ever reach Telegram + the Bid History page, never the
+// Live Feed. Reuses the same .status-* pill classes bid_history.html
+// already has, for a consistent look across both pages.
+const _REPLY_LABEL = { won: "✅ Won", lost: "❌ Lost", countered: "🔁 Countered" };
+function renderReplyCard(it) {
+  const orderId = MB.esc(it.order || "");
+  const gmailUrl = MB.gmailSearchUrl(it.order, it.broker_email || "", it.thread_id);
+  const clock = MB.fmtClock(it.received_at) || MB.fmtAgo(it.received_at);
+  const label = _REPLY_LABEL[it.status] || (it.status || "Reply");
+  const route = [it.pickup_loc, it.delivery_loc].filter(Boolean).join(" → ");
+  return `
+    <div class="feed-card">
+      <div class="order">💬 #${orderId} <span class="status-pill status-${MB.esc(it.status || "")}">${MB.esc(label)}</span></div>
+      <div class="ago">${MB.esc(clock)}</div>
+      ${route ? `<div class="route">${MB.esc(route)}</div>` : ""}
+      ${it.broker_name ? `<div class="meta"><strong>${MB.esc(it.broker_name)}</strong></div>` : ""}
+      ${it.outcome_note ? `<div class="meta">${MB.esc(it.outcome_note)}</div>` : ""}
+      <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
+        <a class="btn btn-sm" href="${gmailUrl}" target="_blank" rel="noopener">✉️ Find in Gmail</a>
+      </div>
+    </div>`;
+}
+
 function renderLoads(items) {
   const el = document.getElementById("loads-list");
   MB.diffRender(el, items, {
-    key: (it) => it.order,
+    // order+received_at, not just order — client-reported real bug,
+    // 2026-10-06: two different brokers posting under the same order_id
+    // is a genuine collision (not a re-poll of the same email), and the
+    // backend now correctly keeps both as separate rows (load_store.py).
+    // Keying only by order here would still visually collapse them back
+    // into one card via diffRender's keyed reconciliation.
+    key: (it) => `${it.type || "load"}|${it.order}|${it.received_at || ""}`,
     isRow: false,
     emptyHtml: '<p class="empty-note">No matched loads yet.</p>',
     html: (it) => {
+      if (it.type === "reply") return renderReplyCard(it);
       const orderId = MB.esc(it.order || "");
       const brokerEmail = it.broker_email || "";
       const gmailUrl = MB.gmailSearchUrl(it.order, brokerEmail, it.thread_id);
@@ -348,7 +379,8 @@ function notifyNewLoad(it) {
   flashTitle();
   if (window.Notification && Notification.permission === "granted") {
     try {
-      const n = new Notification(`New load — #${it.order || "?"}`, {
+      const title = it.type === "reply" ? `💬 Broker reply — #${it.order || "?"}` : `New load — #${it.order || "?"}`;
+      const n = new Notification(title, {
         body: `${it.pickup_loc || "?"} → ${it.delivery_loc || "?"}${it.driver_name ? " · " + it.driver_name : ""}`,
         tag: `mailbot-load-${it.order}`,
       });
@@ -381,13 +413,17 @@ async function refresh() {
   try {
     const feed = await MB.apiGet("/api/web/feed", { limit: 50 });
     allLoads = feed.items;
-    const currentIds = new Set(allLoads.map((it) => it.order));
+    // type-prefixed — a reply outcome and a load sharing the same order
+    // number are different events and must not suppress each other's
+    // notification (found while adding reply cards to this same feed).
+    const seenKey = (it) => `${it.type || "load"}:${it.order}`;
+    const currentIds = new Set(allLoads.map(seenKey));
     if (seenOrderIds === null) {
       seenOrderIds = currentIds; // first load — just establish the baseline
     } else {
       allLoads.forEach((it) => {
-        if (!seenOrderIds.has(it.order)) {
-          seenOrderIds.add(it.order);
+        if (!seenOrderIds.has(seenKey(it))) {
+          seenOrderIds.add(seenKey(it));
           notifyNewLoad(it);
         }
       });
