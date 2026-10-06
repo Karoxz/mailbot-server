@@ -290,7 +290,7 @@ async function submitBid() {
     if (draftUrl) {
       resultGmail.textContent = "📨 Open Draft & Send";
       document.getElementById("result-hint").textContent =
-        "Copied to your clipboard. A Gmail reply draft was created with this price — open it, paste (Ctrl+V) if needed, and send.";
+        "A Gmail reply draft was created with this price already in it — open it and send, no typing or pasting needed.";
     } else {
       resultGmail.textContent = "✉️ Find thread in Gmail";
       document.getElementById("result-hint").textContent =

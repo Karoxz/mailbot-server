@@ -357,7 +357,7 @@ def _bid_phone(bot_token, chats, license_key, order_id, load, truck, idx=None):
             raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
         service = gmail_client.build_service(license_key)
         headers = gmail_client.get_message_headers(service, msg_id)
-        draft = gmail_client.create_reply_draft(service, headers)
+        draft = gmail_client.create_reply_draft(service, headers, body=body)
         draft_id = draft.get("id", "")
         bid_actions.record_bid(load, order_id, license_key, "phone", truck)
         activity_log.log_event(license_key, "bid_recorded", f"Recorded PHONE bid on order #{order_id}")

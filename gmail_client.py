@@ -298,17 +298,26 @@ def get_message_headers(service, message_id: str) -> dict:
     return headers
 
 
-def create_reply_draft(service, original: dict, retries: int = 3) -> dict:
+def create_reply_draft(service, original: dict, retries: int = 3, body: str = "") -> dict:
     """original: {"from", "subject", "message-id", "references", "_thread_id"}
     (from get_message_headers). Returns Gmail's draft resource ({"id":...}).
-    Retries on connection-level errors like the desktop does."""
+    Retries on connection-level errors like the desktop does.
+
+    body (client, 2026-10-07): "client shouldn't need to copy the bid
+    text and then open gmail to paste it, the draft needs to be already
+    created with the text" — BID PHONE now has a confirmed price before
+    this ever runs (the map+price popup), so the draft can carry the
+    real bid text instead of being empty. Still defaults to "" for the
+    plain DRAFT button's own draft, which is deliberately blank (that
+    one is a different feature — a Telegram-only text send, not a
+    pre-filled draft — and doesn't call this function with a body)."""
     to_addr = parseaddr(original.get("from", ""))[1]
     subject = original.get("subject", "")
     message_id = original.get("message-id", "")
     references = (original.get("references") or "").strip()
     if not subject.lower().startswith("re:"):
         subject = "Re: " + subject
-    mime = MIMEText("", "plain", "utf-8")
+    mime = MIMEText(body, "plain", "utf-8")
     mime["To"] = to_addr
     mime["Subject"] = subject
     if message_id:

@@ -976,7 +976,7 @@ def web_bid_price_submit(req: dict):
                 raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
             service = gmail_client.build_service(license_key)
             headers = gmail_client.get_message_headers(service, msg_id)
-            draft = gmail_client.create_reply_draft(service, headers)
+            draft = gmail_client.create_reply_draft(service, headers, body=result["bid_text"])
             draft_id = draft.get("id") or None
         except Exception as e:
             logger.warning(f"[WEB] bid_price phone draft failed (non-fatal): order={order_id}: {e}")

@@ -635,6 +635,16 @@ def _():
             assert "To: bob@broker.com" in raw and "Subject: Re: Bid on Order #777 LARGE STRAIGHT" in raw
             assert "In-Reply-To: <orig123@broker.com>" in raw and "<older@broker.com> <orig123@broker.com>" in raw
             assert drafts[0]["message"]["threadId"] == "th9"
+            # Client, 2026-10-07: "client shouldn't need to copy the bid
+            # text and then open gmail to paste it, the draft needs to
+            # be already created with the text" — the draft body itself
+            # must carry the same confirmed-price bid text, not be empty.
+            # MIMEText base64-encodes a utf-8 body regardless of content,
+            # so this decodes the actual email structure rather than
+            # substring-matching the outer (also-base64) raw message.
+            import email
+            parsed = email.message_from_string(raw)
+            assert parsed.get_payload(decode=True).decode() == "Truck T2 is 33 miles out"
             bids = bid_history.get_bids_for_order(LK, "777")
             assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["driver_name"] == "T2"
             assert bids[0]["bid_amount"] == 692 and bids[0]["deadhead_miles"] == 33
