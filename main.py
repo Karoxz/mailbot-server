@@ -1125,6 +1125,7 @@ def web_bid_price_submit(req: dict):
     # desktop-sourced load) still returns the recorded bid/text, same
     # as PC, just without the draft field.
     draft_id = None
+    relayed = False
     if method == "phone":
         desktop_relay = None
         tok = req.get("t")
@@ -1150,6 +1151,7 @@ def web_bid_price_submit(req: dict):
                          f"{price:g} {rate_per_mile if rate_per_mile else '-'}")
                 for cid in desktop_relay["dispatcher_chat_ids"]:
                     driver_bot_web._send(desktop_relay["dispatcher_bot_token"], cid, marker)
+                relayed = True
             except Exception as e:
                 logger.warning(f"[WEB] bid_price phone relay failed (non-fatal): order={order_id}: {e}")
         else:
@@ -1184,7 +1186,7 @@ def web_bid_price_submit(req: dict):
         except Exception as e:
             logger.warning(f"bid_price Telegram confirmation failed (non-fatal): {e}")
     return {"success": True, "bid_text": result["bid_text"], "thread_id": result["thread_id"],
-            "broker_email": result["broker_email"], "draft_id": draft_id}
+            "broker_email": result["broker_email"], "draft_id": draft_id, "relayed": relayed}
 
 
 @app.get("/api/web/thread_learning/status")

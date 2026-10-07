@@ -311,6 +311,22 @@ async function submitBid() {
       return;
     }
 
+    if (METHOD === "phone" && res.relayed) {
+      // Desktop's own BID PHONE (2026-10-07, client: "gmail
+      // redirection isn't needed at all since the draft is created
+      // automatically... when user presses bid it should close the
+      // window immediately") — no server-side draft to show or link
+      // to here: the server has no Gmail access for a desktop-only
+      // license, so the confirmed price relays to the desktop app
+      // instead (main.py's method=phone + desktop_relay branch),
+      // which creates the real draft locally. Confirm and close, same
+      // as the driver path above.
+      showToast(`Bid of $${price.toLocaleString()} sent`);
+      btn.textContent = "✅ Sent";
+      setTimeout(closeTelegramWebApp, 900);
+      return;
+    }
+
     const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
     const draftUrl = res.draft_id ? `https://mail.google.com/mail/u/0/#drafts/${res.draft_id}` : null;
     const resultGmail = document.getElementById("result-gmail");
