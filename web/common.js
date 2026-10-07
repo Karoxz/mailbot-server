@@ -466,7 +466,6 @@
     { href: "index.html",       label: "Dashboard" },
     { href: "trucks.html",      label: "Trucks" },
     { href: "bid_history.html", label: "Bid History" },
-    { href: "activity.html",    label: "Activity" },
     { href: "settings.html",    label: "Settings" },
   ];
   function renderTopbar(activeHref) {

@@ -245,7 +245,14 @@ function renderLoads(items) {
       // fixed server-side, but a load genuinely matched to no truck
       // (shouldn't happen now) still shows nothing here rather than a
       // misleading blank.
-      const driverTag = it.driver_name ? ` · <span class="driver">${MB.esc(it.driver_name)}</span>` : "";
+      // Once a driver bot driver has actually bid, THEY are the real
+      // driver on this load, not whichever truck parser_core picked as
+      // the dispatcher message's "best" match before that happened —
+      // client, 2026-10-07: "the name on top should be the drivers name
+      // that inputted the bid".
+      const headerDriverName = (it.driver_bid_status === "bid" && it.driver_bid_driver)
+        ? it.driver_bid_driver : it.driver_name;
+      const driverTag = headerDriverName ? ` · <span class="driver">${MB.esc(headerDriverName)}</span>` : "";
       // Driver bot bid (2026-10-07): this load only reached the feed at
       // all because the driver already typed a rate on Telegram — show
       // it right on the card, same as a dispatcher-entered price would be.

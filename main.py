@@ -720,14 +720,6 @@ def web_bid_history(license_key: str, limit: int = 50):
     return {"success": True, "items": bid_history.get_recent_bids(license_key, limit=limit)}
 
 
-@app.get("/api/web/activity")
-def web_activity(license_key: str, limit: int = 100):
-    check = validate_license_key_only(license_key)
-    if not check["valid"]:
-        raise HTTPException(status_code=403, detail=check["reason"])
-    return {"success": True, "items": activity_log.get_recent_events(license_key, limit=limit)}
-
-
 @app.get("/api/web/stats")
 def web_stats(license_key: str):
     check = validate_license_key_only(license_key)
