@@ -248,18 +248,17 @@ DEFAULT_STANDALONE_DRIVER_BOT_TOKEN = ""
 
 def _token_used_by_another_license(token: str, exclude_key: str) -> str:
     """The OTHER license's key already using this exact token as either
-    its dispatcher or driver bot token, or '' if none. Real bug, found
-    live 2026-10-07: a test license was manually configured (direct DB
-    write, bypassing this function) with the SAME dispatcher bot token
-    as a real production license. poller.py's _ensure_callback_listeners
-    starts exactly ONE long-poll thread per distinct token, permanently
-    bound to whichever license claimed it first — every callback on
-    that bot (button taps, including the OTHER license's) got handled
-    under the FIRST license's context, so the second license's own BID
-    PC/PHONE buttons failed with "Order not found" (looked up against
-    the wrong license's load_store). No real data got corrupted here
-    only because the lookup happened to fail cleanly every time, not
-    because anything about the collision was actually safe."""
+    its dispatcher or driver bot token, or '' if none. Only called below
+    for driver_bot_token — unlike the dispatcher bot_token (deliberately
+    shareable, see the comment in set_standalone_settings), driver bots
+    are still meant to be one-per-license: driver_bot_web.run_loop/
+    poller.py's driver listener thread doesn't do the per-chat license
+    resolution the dispatcher callback loop does, so two licenses sharing
+    one driver bot token would still hit the original bug (found live
+    2026-10-07: a test license was manually configured, direct DB write,
+    with the SAME token as a production license, and its button presses
+    landed on whichever license's listener thread claimed that token
+    first)."""
     conn = sqlite3.connect(DB_PATH)
     try:
         row = conn.execute(
@@ -283,14 +282,13 @@ def set_standalone_settings(key: str, **fields) -> bool:
             "needs its own separate bot. Create a new bot via @BotFather "
             "and use that token here instead."
         )
-    if 'bot_token' in fields and fields['bot_token']:
-        collide = _token_used_by_another_license(fields['bot_token'].strip(), key)
-        if collide:
-            raise ValueError(
-                f"This bot token is already in use by another license ({collide}) — "
-                "each license needs its own separate bot. Create a new bot via "
-                "@BotFather and use that token here instead."
-            )
+    # No cross-license collision check on the dispatcher bot_token: sharing
+    # one bot (the DEFAULT_STANDALONE_BOT_TOKEN default, or any other token
+    # a license deliberately pastes in) across multiple licenses is the
+    # intended design (2026-09-29) — poller.py's callback listener resolves
+    # which license owns an incoming button press by the chat_id it was
+    # pressed in (each license's own standalone_chat_ids), not by binding
+    # a token to one fixed license. See _resolve_license_for_callback.
     if 'driver_bot_token' in fields and fields['driver_bot_token']:
         dt = fields['driver_bot_token'].strip()
         if is_known_desktop_driver_token(dt) or is_known_desktop_token(dt):

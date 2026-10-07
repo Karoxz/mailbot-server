@@ -463,10 +463,40 @@ def _handle_callback_query(bot_token: str, cq: dict, license_key: str):
         _bid_text(bot_token, chats, license_key, order_id, load, truck)
 
 
-def _telegram_callback_loop(bot_token: str, license_key: str):
+_token_chat_license = {}  # bot_token -> {chat_id: license_key}, rebuilt every _ensure_callback_listeners() cycle
+
+
+def _resolve_license_for_callback(bot_token: str, cq: dict):
+    """The dispatcher bot token (@plutus_web_bot) is a shared default —
+    license_db.DEFAULT_STANDALONE_BOT_TOKEN, by design (2026-09-29), is
+    handed out to every license that hasn't set its own token, so ONE
+    token can legitimately have MANY licenses' callback buttons arriving
+    on it. Each license still broadcasts loads only to its OWN configured
+    chat_ids, so the chat a button was pressed in uniquely identifies
+    which license that press belongs to — resolve by chat_id instead of
+    assuming the token maps to one fixed license (that assumption caused
+    "Order not found" for every license but whichever happened to start
+    its listener thread first)."""
+    chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
+    by_chat = _token_chat_license.get(bot_token) or {}
+    lic = by_chat.get(chat_id)
+    if lic:
+        return lic
+    # Fallback for a press in a chat we don't have mapped (e.g. a private
+    # chat not listed in chat_ids): if only one license is actually using
+    # this token right now, it's unambiguous.
+    candidates = set(by_chat.values())
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
+def _telegram_callback_loop(bot_token: str):
     """One thread per distinct bot token, long-polling getUpdates — same
-    idea as the desktop's get_telegram_updates(). A bot_token is assumed
-    one-per-license in practice (each account's own private bot)."""
+    idea as the desktop's get_telegram_updates(). Multiple licenses can
+    share one token (the shared default dispatcher bot); which license a
+    given callback belongs to is resolved per-event, not fixed per-thread
+    (see _resolve_license_for_callback)."""
     offset = None
     logger.info(f"Telegram callback listener starting (bot ...{bot_token[-6:]})")
     while True:
@@ -481,6 +511,14 @@ def _telegram_callback_loop(bot_token: str, license_key: str):
                 cq = update.get("callback_query")
                 if cq:
                     try:
+                        license_key = _resolve_license_for_callback(bot_token, cq)
+                        if not license_key:
+                            logger.warning(f"callback on bot ...{bot_token[-6:]}: "
+                                           f"couldn't resolve which license owns chat "
+                                           f"{(cq.get('message') or {}).get('chat', {}).get('id')}")
+                            _answer_callback_query(bot_token, cq.get("id"),
+                                                   text="Order not found in the current live feed.")
+                            continue
                         _handle_callback_query(bot_token, cq, license_key)
                     except Exception:
                         logger.error(f"callback handling error:\n{traceback.format_exc()}")
@@ -493,20 +531,27 @@ _callback_threads = {}  # bot_token -> Thread, so each unique token gets exactly
 
 
 def _ensure_callback_listeners():
+    token_chat_license = {}
     for lic in license_db.list_standalone_enabled_licenses():
         settings = license_db.get_standalone_settings(lic)
         token = settings and settings.get("bot_token")
-        if token and token not in _callback_threads:
-            t = threading.Thread(target=_telegram_callback_loop, args=(token, lic),
-                                 daemon=True, name=f"tg-callback-{token[-6:]}")
-            t.start()
-            _callback_threads[token] = t
+        if token:
+            chat_map = token_chat_license.setdefault(token, {})
+            for cid in _parse_chat_ids(settings.get("chat_ids", "")):
+                chat_map[cid] = lic
+            if token not in _callback_threads:
+                t = threading.Thread(target=_telegram_callback_loop, args=(token,),
+                                     daemon=True, name=f"tg-callback-{token[-6:]}")
+                t.start()
+                _callback_threads[token] = t
         dtoken = settings and settings.get("driver_bot_token")
         if dtoken and dtoken not in _callback_threads:
             t = threading.Thread(target=driver_bot_web.run_loop, args=(dtoken, lic),
                                  daemon=True, name=f"tg-driver-{dtoken[-6:]}")
             t.start()
             _callback_threads[dtoken] = t
+    _token_chat_license.clear()
+    _token_chat_license.update(token_chat_license)
 
 
 def _parse_chat_ids(chat_ids_csv: str) -> list:

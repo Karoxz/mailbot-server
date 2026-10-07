@@ -1268,43 +1268,77 @@ def _():
         cleanup_license()
 
 
-@test("standalone bot tokens can't collide across two different licenses")
+@test("standalone dispatcher bot token CAN be shared across licenses (shared default by design); driver bot token can't")
 def _():
-    # Real bug, found live 2026-10-07: a test license got manually
-    # configured (direct DB write, bypassing set_standalone_settings
-    # entirely) with the SAME dispatcher bot token an already-running
-    # production license used. poller.py's _ensure_callback_listeners
-    # starts exactly one long-poll thread per distinct token, bound to
-    # whichever license claims it first — every callback on that bot
-    # from then on (including the OTHER license's own button taps) got
-    # handled under the FIRST license's context, so the second
-    # license's BID PC/PHONE failed with "Order not found" (looked up
-    # against the wrong license's load_store). This guard makes the
-    # exact mistake impossible to repeat through the normal API path.
+    # 2026-10-07: @plutus_web_bot (DEFAULT_STANDALONE_BOT_TOKEN) is a
+    # pre-made bot handed to every license that hasn't set its own
+    # dispatcher token (2026-09-29) — multiple licenses sharing it is the
+    # INTENDED design, not a bug. The original bug was that poller.py's
+    # callback listener bound one long-poll thread's whole context to
+    # whichever license claimed a token first, so a second license
+    # sharing that token got every callback misrouted to the first
+    # license's data ("Order not found"). That's now fixed by resolving
+    # the correct license per-callback from the pressed chat_id
+    # (_resolve_license_for_callback) instead of a fixed thread binding,
+    # so set_standalone_settings must NOT reject dispatcher token sharing.
+    # Driver bot tokens are a different story — driver_bot_web's listener
+    # still binds one license per token, so those must stay unique.
     enable_license()
     other = "PARITY-OTHER-LICENSE"
     license_db.add_license(other, label="other")
     try:
-        try:
-            license_db.set_standalone_settings(other, bot_token=BOT)   # BOT already belongs to LK
-            assert False, "a dispatcher token already used by another license must be rejected"
-        except ValueError as e:
-            assert LK in str(e)
-        try:
-            license_db.set_standalone_settings(LK, driver_bot_token=BOT)
-            assert False, "collision check should fire before the same-as-dispatcher check, either way rejected"
-        except ValueError:
-            pass
+        license_db.set_standalone_settings(other, bot_token=BOT)   # BOT already belongs to LK -> now allowed
+        assert license_db.get_standalone_settings(other)["bot_token"] == BOT
         license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
         try:
             license_db.set_standalone_settings(other, driver_bot_token=DTOKEN)  # DTOKEN already belongs to LK
             assert False, "a driver token already used by another license must be rejected"
         except ValueError as e:
             assert LK in str(e)
-        # Genuinely distinct tokens for the other license are still fine.
-        license_db.set_standalone_settings(other, bot_token="555:other-dispatch", driver_bot_token="666:other-driver")
-        assert license_db.get_standalone_settings(other)["bot_token"] == "555:other-dispatch"
+        # Genuinely distinct driver token for the other license is still fine.
+        license_db.set_standalone_settings(other, driver_bot_token="666:other-driver")
+        assert license_db.get_standalone_settings(other)["driver_bot_token"] == "666:other-driver"
     finally:
+        conn = sqlite3.connect(license_db.DB_PATH)
+        conn.execute("DELETE FROM licenses WHERE key=?", (other,))
+        conn.commit()
+        conn.close()
+        cleanup_license()
+
+
+@test("poller: two licenses sharing one dispatcher bot token route callbacks by chat_id, not by whichever claimed the token first")
+def _():
+    # Direct regression test for the live bug: before the fix, the
+    # SECOND license to register a shared token got every callback
+    # handled under the FIRST license's context. Now each incoming
+    # callback_query's pressed chat_id is looked up per-token to find
+    # the owning license, independent of registration order.
+    dreset()
+    other = "PARITY-OTHER-LICENSE"
+    license_db.add_license(LK, label="parity-test")
+    license_db.add_license(other, label="other")
+    try:
+        license_db.set_standalone_settings(
+            LK, bot_token=BOT, chat_ids=str(CHAT), allowed_vehicles="VAN", max_radius_miles="300")
+        license_db.set_standalone_settings(
+            other, bot_token=BOT, chat_ids="999999", allowed_vehicles="VAN", max_radius_miles="300")
+        license_db.set_standalone_mode_enabled(LK, True)
+        license_db.set_standalone_mode_enabled(other, True)
+        # Pre-seed the "already running" marker so _ensure_callback_listeners
+        # rebuilds the chat->license map without actually spawning a real
+        # long-poll thread against api.telegram.org for this fake token.
+        already_had_thread = BOT in poller._callback_threads
+        poller._callback_threads.setdefault(BOT, "test-placeholder")
+        poller._ensure_callback_listeners()
+        assert poller._token_chat_license[BOT] == {CHAT: LK, 999999: other}
+        cq_for_lk = {"message": {"chat": {"id": CHAT}}}
+        cq_for_other = {"message": {"chat": {"id": 999999}}}
+        assert poller._resolve_license_for_callback(BOT, cq_for_lk) == LK
+        assert poller._resolve_license_for_callback(BOT, cq_for_other) == other
+    finally:
+        if not already_had_thread:
+            poller._callback_threads.pop(BOT, None)
+        poller._token_chat_license.pop(BOT, None)
         conn = sqlite3.connect(license_db.DB_PATH)
         conn.execute("DELETE FROM licenses WHERE key=?", (other,))
         conn.commit()
