@@ -47,6 +47,7 @@ logger = logging.getLogger("mailbot")
 
 import push_queue
 import route_cache_store
+import phone_relay_store
 
 
 # ── Load .env file manually (works without python-dotenv) ─────────────────
@@ -91,6 +92,7 @@ async def lifespan(app):
     push_queue.init_db()
     route_cache_store.init_db()
     activity_log.init_db()
+    phone_relay_store.init_db()
     logger.info("Database initialized")
     yield
 
@@ -286,11 +288,12 @@ def phone_bid_popup_url(req: dict):
     page normally creates a REAL Gmail draft server-side — but the
     server has no Gmail access for a desktop-only license at all (the
     desktop's OAuth token is local to its own PC, never uploaded), so
-    dispatcher_bot_token/dispatcher_chat_ids ride along as a
-    desktop_relay claim: /api/web/bid_price/submit relays the confirmed
-    price back through Telegram instead of trying to create the draft
-    itself, and the desktop's own long-poll loop (already watching that
-    same bot/chat) picks it up and creates the real draft locally."""
+    license_key/machine_id ride along as a desktop_relay claim:
+    /api/web/bid_price/submit enqueues the confirmed price (phone_relay_
+    store, a tiny SQLite queue — see its own module docstring for why
+    a Telegram message can't be the hand-back channel here) instead of
+    trying to create the draft itself, and the desktop polls for it on
+    its existing callback-polling loop and creates the real draft locally."""
     license_key = req.get("license_key", "")
     machine_id  = req.get("machine_id", "")
     order_id    = req.get("order_id", "")
@@ -304,18 +307,30 @@ def phone_bid_popup_url(req: dict):
     if not base:
         return {"success": False, "reason": "web base url not configured on the server"}
 
-    dispatcher_bot_token = req.get("dispatcher_bot_token") or ""
-    dispatcher_chat_ids  = req.get("dispatcher_chat_ids") or []
-    desktop_relay = None
-    if dispatcher_bot_token and dispatcher_chat_ids:
-        desktop_relay = {"dispatcher_bot_token": dispatcher_bot_token,
-                         "dispatcher_chat_ids":  dispatcher_chat_ids}
+    desktop_relay = {"license_key": license_key, "machine_id": machine_id}
     tok = map_token.make_bid_token(license_key, order_id, desktop_relay=desktop_relay)
     url = f"{base}/app/bid_price.html?t={tok}&method=phone"
     truck_idx = req.get("truck")
     if truck_idx not in (None, ""):
         url += f"&truck={truck_idx}"
     return {"success": True, "url": url}
+
+
+@app.post("/api/phone_bid_relay/poll")
+def phone_bid_relay_poll(req: dict):
+    """The desktop's BID PHONE poll (client, 2026-10-07) — called on its
+    existing callback-polling loop, same cadence as get_telegram_updates.
+    Returns and atomically clears every bid this exact machine has
+    pending (phone_relay_store), so it can finish building the real
+    Gmail draft locally with the confirmed price. See phone_bid_popup_
+    url's docstring and phone_relay_store's module docstring for why
+    this is a poll, not a Telegram message."""
+    license_key = req.get("license_key", "")
+    machine_id  = req.get("machine_id", "")
+    check = validate_license(license_key, machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    return {"success": True, "items": phone_relay_store.poll_and_clear(license_key, machine_id)}
 
 
 @app.post("/api/build_bid")
@@ -1132,28 +1147,34 @@ def web_bid_price_submit(req: dict):
         if tok:
             claims = map_token.verify_bid_token(tok)
             desktop_relay = (claims or {}).get("desktop_relay")
-        if desktop_relay and desktop_relay.get("dispatcher_bot_token") and desktop_relay.get("dispatcher_chat_ids"):
+        if desktop_relay and desktop_relay.get("license_key") and desktop_relay.get("machine_id"):
             # Desktop-only license (client, 2026-10-07: "it should be
             # phone map on telegram just like in the web version") — the
             # server has no Gmail access for this account at all (the
             # desktop's OAuth token lives only on its own PC, never
-            # uploaded), so a real draft can't be created here. Relay
-            # the confirmed price back through Telegram to the SAME
-            # bot/chat the desktop is already long-polling instead —
-            # its own handle_bid_callbacks picks this marker message up
-            # and creates the real draft locally, same as the old
-            # ForceReply-text flow did, just triggered by this popup
-            # instead of a typed reply.
+            # uploaded), so a real draft can't be created here.
+            #
+            # Real bug, found live 2026-10-07: this used to relay the
+            # confirmed price back as a plain Telegram message to the
+            # desktop's own bot/chat, for its own getUpdates loop to
+            # pick up — but a bot's own sendMessage never generates an
+            # incoming update for THAT SAME bot. Telegram updates
+            # represent events directed AT the bot, never its own
+            # outgoing sends, so that message was never going to be
+            # seen no matter how the desktop's polling loop was fixed.
+            # Enqueues into phone_relay_store (SQLite, not an in-memory
+            # dict — mailbot-api runs 4 uvicorn workers) instead; the
+            # desktop polls /api/phone_bid_relay/poll for it on its
+            # existing callback-polling cadence and creates the real
+            # draft locally, same as the old ForceReply-text flow did.
             try:
                 truck_param = req.get("truck")
-                marker = (f"##PHONEBID## {order_id} "
-                         f"{truck_param if truck_param not in (None, '') else '-'} "
-                         f"{price:g} {rate_per_mile if rate_per_mile else '-'}")
-                for cid in desktop_relay["dispatcher_chat_ids"]:
-                    driver_bot_web._send(desktop_relay["dispatcher_bot_token"], cid, marker)
+                truck_idx = int(truck_param) if truck_param not in (None, "") else None
+                phone_relay_store.enqueue(desktop_relay["license_key"], desktop_relay["machine_id"],
+                                          order_id, truck_idx, price, rate_per_mile)
                 relayed = True
             except Exception as e:
-                logger.warning(f"[WEB] bid_price phone relay failed (non-fatal): order={order_id}: {e}")
+                logger.warning(f"[WEB] bid_price phone relay enqueue failed (non-fatal): order={order_id}: {e}")
         else:
             try:
                 msg_id = (load.get("original_msg_full") or {}).get("id") or ""

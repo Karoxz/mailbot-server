@@ -1314,18 +1314,31 @@ def _():
         cleanup_license()
 
 
-@test("DESKTOP's own BID PHONE: /api/phone_bid_popup_url mints a token carrying desktop_relay, and submit relays the confirmed price through Telegram instead of a server-side Gmail draft")
+@test("DESKTOP's own BID PHONE: /api/phone_bid_popup_url mints a token carrying desktop_relay, and submit enqueues the confirmed price for /api/phone_bid_relay/poll to pick up")
 def _():
     # Client, 2026-10-07: "when i pressed bid phone, it opened normal
     # map on pc, it should be phone map on telegram just like in the
-    # web version" — BID PHONE now opens the SAME bid_price.html popup
-    # the web version uses, but the server has no Gmail access for a
+    # web version" — BID PHONE opens the SAME bid_price.html popup the
+    # web version uses, but the server has no Gmail access for a
     # desktop-only license at all (its OAuth token is local to that
-    # PC), so the confirmed price relays back through Telegram (the
-    # "##PHONEBID##" marker, parsed by main copy.py's own poll loop)
-    # instead of main.py trying (and failing) to build a real draft.
+    # PC), so it can't build the draft itself.
+    #
+    # Real bug, found LIVE 2026-10-07 (not caught by the ORIGINAL
+    # version of this test, which only checked that a Telegram message
+    # got sent, never that the desktop could actually SEE it): a bot's
+    # own sendMessage never generates an incoming update for that SAME
+    # bot's getUpdates — Telegram updates represent events directed AT
+    # the bot, never its own outgoing sends. The "##PHONEBID##" relay
+    # message this test used to check for was correctly sent (visible
+    # to the human in Telegram) but could NEVER be read back by the
+    # desktop's own polling loop, no matter how that loop was fixed.
+    # Replaced with a tiny SQLite queue (phone_relay_store — mailbot-
+    # api runs 4 uvicorn workers, so an in-memory dict has the exact
+    # same "invisible across workers" bug push_queue.py already found
+    # and fixed once) the desktop polls directly over HTTP instead.
     from fastapi.testclient import TestClient
     import main
+    import phone_relay_store
     dreset()
     enable_license()
     seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r",
@@ -1337,32 +1350,53 @@ def _():
         with TestClient(main.app) as c:
             r = c.post("/api/phone_bid_popup_url", json={
                 "license_key": LK, "machine_id": "desktop-1", "order_id": "555",
-                "dispatcher_bot_token": "111:desktop-dispatch", "dispatcher_chat_ids": [777],
             })
             assert r.status_code == 200
             data = r.json()
             assert data["success"] and "&method=phone" in data["url"] and "&driver_name" not in data["url"]
             tok = data["url"].split("t=")[1].split("&")[0]
 
+            # Nothing pending yet.
+            poll0 = c.post("/api/phone_bid_relay/poll",
+                           json={"license_key": LK, "machine_id": "desktop-1"})
+            assert poll0.json() == {"success": True, "items": []}
+
             r2 = c.post("/api/web/bid_price/submit", json={"t": tok, "order_id": "555",
                                                             "price": 1400, "method": "phone"})
             assert r2.status_code == 200
             body = r2.json()
-            assert body["success"] and body["draft_id"] is None   # no server-side Gmail draft for desktop_relay
+            assert body["success"] and body["draft_id"] is None and body["relayed"] is True
 
-        relay_sends = [call for call in dcap.calls if call[0] == "111:desktop-dispatch"]
-        assert len(relay_sends) == 1
-        _, method, payload = relay_sends[0]
-        assert method == "sendMessage" and payload["chat_id"] == 777
-        assert payload["text"] == "##PHONEBID## 555 - 1400 -"
+            # The desktop's own poll picks it up — exactly once, then gone.
+            poll1 = c.post("/api/phone_bid_relay/poll",
+                           json={"license_key": LK, "machine_id": "desktop-1"})
+            items = poll1.json()["items"]
+            assert len(items) == 1
+            assert items[0] == {"order_id": "555", "truck_idx": None, "price": 1400.0, "rate": None}
+
+            poll2 = c.post("/api/phone_bid_relay/poll",
+                           json={"license_key": LK, "machine_id": "desktop-1"})
+            assert poll2.json() == {"success": True, "items": []}
+
+            # A DIFFERENT machine_id never sees another desktop's pending bid.
+            r3 = c.post("/api/web/bid_price/submit", json={"t": tok, "order_id": "555",
+                                                            "price": 1500, "method": "phone"})
+            assert r3.json()["relayed"] is True
+            other_poll = c.post("/api/phone_bid_relay/poll",
+                                json={"license_key": LK, "machine_id": "some-other-machine"})
+            assert other_poll.json() == {"success": True, "items": []}
 
         b = bid_history.get_bids_for_order(LK, "555")[0]
-        assert b["bid_method"] == "phone" and b["bid_amount"] == 1400.0
+        assert b["bid_method"] == "phone" and b["bid_amount"] == 1500.0  # most recent recorded bid
     finally:
         if orig is None:
             os.environ.pop("WEB_BASE_URL", None)
         else:
             os.environ["WEB_BASE_URL"] = orig
+        conn = sqlite3.connect(phone_relay_store.DB_PATH)
+        conn.execute("DELETE FROM relays WHERE license_key=?", (LK,))
+        conn.commit()
+        conn.close()
         cleanup_loads()
         cleanup_license()
 
