@@ -1257,6 +1257,51 @@ def _():
         cleanup_license()
 
 
+@test("web Live Feed: driver-bot-active load is hidden until the driver bids, then reappears WITH the rate")
+def _():
+    # Client, 2026-10-07: "in the web it should be same driver bot logic,
+    # meaning if truck has driver bot on the web dispatcher should not
+    # see that particular trucks load on live feed until the driver
+    # inputs the rate on telegram, after driver inputs the rate... the
+    # load should appear with the rate" — extends the existing Telegram
+    # hold-back (poller.py's _deliver_to_dispatcher) to /api/web/feed;
+    # driver_bot_web.forward_bid is what flips it back to visible once
+    # the driver actually bids.
+    from fastapi.testclient import TestClient
+    import main
+    dreset()
+    enable_license()
+    license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
+    driver_fleet()
+    seed_load("555", all_trucks=[{"driver_name": "ALEX"}])
+    try:
+        ctx = fresh_ctx(driver_bot_token=DTOKEN)
+        res = {"success": True, "formatted": "LOAD TEXT", "order_id": "555",
+               "load_data": {"driver_name": "ALEX", "all_trucks": [{"driver_name": "ALEX"}]}}
+        outcome = poller._deliver_to_dispatcher(ctx, res, "th")
+        assert outcome == "awaiting_driver_bid"
+        assert load_store.get_load(LK, "555")["driver_bid_status"] == "awaiting"
+
+        with TestClient(main.app) as c:
+            r = c.get("/api/web/feed", params={"license_key": LK})
+            assert all(it.get("order") != "555" for it in r.json()["items"]), \
+                "load should be hidden from the feed while awaiting the driver's rate"
+
+        load_data = load_store.get_load(LK, "555")
+        driver_bot_web.forward_bid(LK, "ALEX", "555", load_data, "1400")
+        stored = load_store.get_load(LK, "555")
+        assert stored["driver_bid_status"] == "bid" and stored["driver_bid_amount"] == "1400"
+
+        with TestClient(main.app) as c:
+            r = c.get("/api/web/feed", params={"license_key": LK})
+            item = next(it for it in r.json()["items"] if it.get("order") == "555")
+            assert item["driver_bid_amount"] == "1400" and item["driver_bid_driver"] == "ALEX"
+    finally:
+        cleanup_trucks()
+        cleanup_loads()
+        cleanup_license()
+
+
 @test("driver BID after a poller restart (no in-memory state): load + message come back from the persistent store")
 def _():
     dreset()

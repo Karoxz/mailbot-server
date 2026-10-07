@@ -62,6 +62,18 @@
   </div>
 </div>
 
+<!-- Driver picker — shown on Bid when a load matched MULTIPLE trucks
+     (same idea as Telegram's own "Select driver" prompt). -->
+<div id="driver-pick-modal-overlay" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Select driver</h2>
+      <button id="driver-pick-close" class="icon-btn" type="button" title="Close">✕</button>
+    </div>
+    <div id="driver-pick-list" style="display:flex;flex-direction:column;gap:8px;padding-top:10px;"></div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script src="common.js"></script>
@@ -119,6 +131,33 @@ document.getElementById("bid-modal-copy").addEventListener("click", async () => 
   showToast(ok ? "Copied to clipboard" : "Couldn't access clipboard — select the text manually", !ok);
 });
 modalOverlay.addEventListener("click", (e) => { if (e.target === modalOverlay) closeBidModal(); });
+
+// ── Driver picker (Bid, when a load matched MULTIPLE trucks) ───────
+// Client, 2026-10-07: "if there are multiple drivers eligible for that
+// load there should be an option of the drivers when pressing bid" —
+// same idea as Telegram's own "Select driver" prompt (poller.py's
+// _driver_keyboard) when all_trucks has more than one entry; the web
+// Bid button used to just silently go with whichever truck parser_core
+// picked as "best" for the dispatcher's own message.
+const driverPickOverlay = document.getElementById("driver-pick-modal-overlay");
+const driverPickList = document.getElementById("driver-pick-list");
+function closeDriverPick() { driverPickOverlay.classList.remove("open"); }
+document.getElementById("driver-pick-close").addEventListener("click", closeDriverPick);
+driverPickOverlay.addEventListener("click", (e) => { if (e.target === driverPickOverlay) closeDriverPick(); });
+
+function openDriverPick(orderId, trucks) {
+  driverPickList.innerHTML = trucks.map((t, idx) => {
+    const dh = t.google_deadhead != null ? ` · ${MB.esc(t.google_deadhead)} mi out` : "";
+    return `<button class="btn" type="button" data-idx="${idx}" style="width:100%;text-align:left;">👤 ${MB.esc(t.driver_name || ("Driver " + (idx + 1)))}${dh}</button>`;
+  }).join("");
+  driverPickOverlay.classList.add("open");
+  driverPickList.querySelectorAll("button[data-idx]").forEach((b) => {
+    b.addEventListener("click", () => {
+      closeDriverPick();
+      window.location.href = `bid_price.html?order_id=${encodeURIComponent(orderId)}&truck=${b.dataset.idx}`;
+    });
+  });
+}
 
 async function recordBid(orderId, method, btn, brokerEmail) {
   const original = btn.textContent;
@@ -207,6 +246,11 @@ function renderLoads(items) {
       // (shouldn't happen now) still shows nothing here rather than a
       // misleading blank.
       const driverTag = it.driver_name ? ` · <span class="driver">${MB.esc(it.driver_name)}</span>` : "";
+      // Driver bot bid (2026-10-07): this load only reached the feed at
+      // all because the driver already typed a rate on Telegram — show
+      // it right on the card, same as a dispatcher-entered price would be.
+      const driverBidLine = it.driver_bid_status === "bid" && it.driver_bid_amount != null
+        ? `<div class="meta">💰 <strong>${MB.esc(it.driver_bid_driver || "Driver")} bid: $${MB.esc(it.driver_bid_amount)}</strong></div>` : "";
 
       const pickupLine = MB.esc(fmtDate("Pick-up", it.pickup_dt, it.pickup_asap, it.pickup_direct));
       const deliverLine = MB.esc(fmtDate("Deliver", it.delivery_dt, it.delivery_asap, it.deliver_direct));
@@ -257,6 +301,7 @@ function renderLoads(items) {
           <div class="ago">${MB.esc(clock)}</div>
           <div class="route">${MB.esc(it.pickup_loc || "?")} → ${MB.esc(it.delivery_loc || "?")}</div>
           <div class="meta">${pickupLine} &nbsp;·&nbsp; ${deliverLine}</div>
+          ${driverBidLine}
           ${metaRow(milesBits)}
           ${metaRow(truckBits)}
           ${metaRow(etaBits)}
@@ -264,7 +309,7 @@ function renderLoads(items) {
           ${brokerBits.length ? `<div class="meta">${brokerBits.join(" · ")}</div>` : ""}
           ${it.notes ? `<div class="notes">🔔 ${MB.esc(it.notes)}</div>` : ""}
           <div class="action-row" style="grid-column:1/-1;margin-top:8px;">
-            <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc" data-broker="${MB.esc(brokerEmail)}">💵 Bid</button>
+            <button class="btn btn-primary btn-sm" data-order="${orderId}" data-method="pc" data-broker="${MB.esc(brokerEmail)}" data-key="${MB.esc(feedKey(it))}">💵 Bid</button>
             <button class="btn btn-sm" data-order="${orderId}" data-method="draft" data-broker="${MB.esc(brokerEmail)}">Draft</button>
             <a class="btn btn-sm" href="${gmailUrl}" target="_blank" rel="noopener">✉️ Find in Gmail</a>
           </div>
@@ -277,7 +322,14 @@ document.getElementById("loads-list").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-order]");
   if (!btn || btn.disabled) return;
   if (btn.dataset.method === "pc") {
-    window.location.href = `bid_price.html?order_id=${encodeURIComponent(btn.dataset.order)}`;
+    const orderId = btn.dataset.order;
+    const item = allLoads.find((it) => feedKey(it) === btn.dataset.key);
+    const trucks = (item && item.all_trucks) || [];
+    if (trucks.length > 1) {
+      openDriverPick(orderId, trucks);
+      return;
+    }
+    window.location.href = `bid_price.html?order_id=${encodeURIComponent(orderId)}`;
     return;
   }
   recordBid(btn.dataset.order, btn.dataset.method, btn, btn.dataset.broker);

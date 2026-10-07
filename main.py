@@ -622,6 +622,16 @@ def web_feed(license_key: str, limit: int = 50):
     # of only ever falling back to a search.
     cleaned = []
     for item in items:
+        # Client, 2026-10-07: "if truck has driver bot on the web
+        # dispatcher should not see that particular truck's load on live
+        # feed until the driver inputs the rate on telegram" — mirrors
+        # the existing Telegram-side hold-back (poller.py's
+        # _deliver_to_dispatcher). driver_bot_web.forward_bid flips this
+        # to "bid" (with driver_bid_amount set) the moment the driver
+        # actually bids, which is also when put_load refreshes
+        # created_at/received_at — so it then reappears as a fresh item.
+        if item.get("driver_bid_status") == "awaiting":
+            continue
         thread_id = (item.get("original_msg_full") or {}).get("threadId", "")
         entry = {k: v for k, v in item.items() if k != "original_msg_full"}
         entry["thread_id"] = thread_id

@@ -348,6 +348,19 @@ def forward_bid(license_key: str, driver_name: str, order_id: str, load_data: di
     BID PC / BID PHONE / DRAFT buttons, and record the bid with its amount."""
     order_id = load_data.get("order", order_id)
     route_url = load_data.get("route_url", "")
+    # Client, 2026-10-07: the Live Feed should hold this load back (set
+    # "awaiting" by poller.py's _deliver_to_dispatcher when the driver
+    # bot is active for its matched truck) until THIS moment — the
+    # driver actually typing a rate — then show it WITH that rate.
+    try:
+        stored = load_store.get_load(license_key, order_id)
+        if stored is not None:
+            stored["driver_bid_status"] = "bid"
+            stored["driver_bid_amount"] = rate_str
+            stored["driver_bid_driver"] = driver_name
+            load_store.put_load(license_key, order_id, stored)
+    except Exception as e:
+        logger.warning(f"[{license_key}] could not update load #{order_id} with the driver's bid for the live feed: {e}")
     full_msg = f"💰 {driver_name} — Rate: ${rate_str}\n{'─' * 30}\n" + load_data.get("formatted_message", "")
     rows = [[
         {"text": "💵 BID PC",    "callback_data": f"bid:{order_id}"},

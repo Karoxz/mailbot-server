@@ -812,14 +812,28 @@ def _deliver_to_dispatcher(ctx: dict, result: dict, thread_id: str) -> str:
     # about it later (with the actual price) through the existing
     # driver_bot_web.handle_message -> forward-to-dispatcher flow once
     # the driver bids, instead of an immediate ping for every match.
-    # Still lands on the Live Feed (load_store.put_load already ran,
-    # in parser_core.py, before this) and in the activity log either
-    # way — only the Telegram push is held back.
+    # Extended same-day (client: "in the web it should be same driver
+    # bot logic... dispatcher should not see that particular truck's
+    # load on live feed until the driver inputs the rate") to the web
+    # Live Feed too — load_store.put_load already ran (parser_core.py,
+    # before this), so mark it "awaiting" here and /api/web/feed filters
+    # that out; driver_bot_web.forward_bid flips it back to "bid" (with
+    # the amount) once the driver actually bids, at which point it's
+    # meant to surface again. Only the Telegram push + feed visibility
+    # are held back — the activity log still gets an entry either way.
     driver_name = load_data.get("driver_name")
     if driver_name and ctx.get("driver_bot_token") and _driver_has_bot(lk, driver_name):
         logger.info(f"[{lk}] #{order_id} matched to {driver_name} — driver bot active, holding the dispatcher ping until they bid")
         activity_log.log_event(lk, "load_matched",
                                f"Load #{order_id} matched to {driver_name} — awaiting their price (driver bot active)")
+        try:
+            stored = load_store.get_load(lk, order_id)
+            if stored is not None:
+                stored["driver_bid_status"] = "awaiting"
+                stored["driver_bid_driver"] = driver_name
+                load_store.put_load(lk, order_id, stored)
+        except Exception as e:
+            logger.warning(f"[{lk}] could not mark load #{order_id} as awaiting driver bid: {e}")
         return "awaiting_driver_bid"
     route_url = load_data.get("route_url")
     single_truck = order_id and len(load_data.get("all_trucks") or []) <= 1
