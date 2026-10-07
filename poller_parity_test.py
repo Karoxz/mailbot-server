@@ -1003,6 +1003,13 @@ def dreset():
     dcap.calls.clear()
     fwd.clear()
     driver_bot_web._PENDING.clear()
+    # The real local .env (loaded once, the first time anything imports
+    # main.py anywhere in this run) sets a real WEB_BASE_URL for local
+    # dev — clearing it here gives every driver-bot test a clean "not
+    # configured" baseline by default, same as production looked like
+    # before driver_bot_web._web_base_url() existed. The one test that
+    # wants the web_app-popup behavior sets it explicitly, after this.
+    os.environ.pop("WEB_BASE_URL", None)
 
 
 LOAD = {"order": "555", "vehicle_required": "LARGE STRAIGHT", "pickup_loc": "Cleveland, OH",
@@ -1134,8 +1141,8 @@ def _():
     import map_token
     dreset()
     driver_fleet()
-    orig = driver_bot_web.WEB_BASE_URL
-    driver_bot_web.WEB_BASE_URL = "https://plutus.example"
+    orig = os.environ.get("WEB_BASE_URL")
+    os.environ["WEB_BASE_URL"] = "https://plutus.example"
     try:
         n = driver_bot_web.notify_drivers(LK, DTOKEN, "555", LOAD, FORMATTED)
         assert n == 1
@@ -1167,7 +1174,10 @@ def _():
         # prompt_msg_id the way the old ForceReply branch does.
         assert driver_bot_web._PENDING[(DTOKEN, 111, "555")]["prompt_msg_id"] is None
     finally:
-        driver_bot_web.WEB_BASE_URL = orig
+        if orig is None:
+            os.environ.pop("WEB_BASE_URL", None)
+        else:
+            os.environ["WEB_BASE_URL"] = orig
         cleanup_trucks()
 
 
@@ -1255,6 +1265,50 @@ def _():
         license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
         assert license_db.get_standalone_settings(LK)["driver_bot_token"] == DTOKEN
     finally:
+        cleanup_license()
+
+
+@test("standalone bot tokens can't collide across two different licenses")
+def _():
+    # Real bug, found live 2026-10-07: a test license got manually
+    # configured (direct DB write, bypassing set_standalone_settings
+    # entirely) with the SAME dispatcher bot token an already-running
+    # production license used. poller.py's _ensure_callback_listeners
+    # starts exactly one long-poll thread per distinct token, bound to
+    # whichever license claims it first — every callback on that bot
+    # from then on (including the OTHER license's own button taps) got
+    # handled under the FIRST license's context, so the second
+    # license's BID PC/PHONE failed with "Order not found" (looked up
+    # against the wrong license's load_store). This guard makes the
+    # exact mistake impossible to repeat through the normal API path.
+    enable_license()
+    other = "PARITY-OTHER-LICENSE"
+    license_db.add_license(other, label="other")
+    try:
+        try:
+            license_db.set_standalone_settings(other, bot_token=BOT)   # BOT already belongs to LK
+            assert False, "a dispatcher token already used by another license must be rejected"
+        except ValueError as e:
+            assert LK in str(e)
+        try:
+            license_db.set_standalone_settings(LK, driver_bot_token=BOT)
+            assert False, "collision check should fire before the same-as-dispatcher check, either way rejected"
+        except ValueError:
+            pass
+        license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
+        try:
+            license_db.set_standalone_settings(other, driver_bot_token=DTOKEN)  # DTOKEN already belongs to LK
+            assert False, "a driver token already used by another license must be rejected"
+        except ValueError as e:
+            assert LK in str(e)
+        # Genuinely distinct tokens for the other license are still fine.
+        license_db.set_standalone_settings(other, bot_token="555:other-dispatch", driver_bot_token="666:other-driver")
+        assert license_db.get_standalone_settings(other)["bot_token"] == "555:other-dispatch"
+    finally:
+        conn = sqlite3.connect(license_db.DB_PATH)
+        conn.execute("DELETE FROM licenses WHERE key=?", (other,))
+        conn.commit()
+        conn.close()
         cleanup_license()
 
 

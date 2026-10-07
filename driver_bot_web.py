@@ -54,7 +54,19 @@ _PENDING_LOCK = threading.Lock()
 # (bid_price.html), same web_app-in-a-private-chat mechanism the
 # dispatcher's BID PC/PHONE shortcuts already use (poller.py), just
 # with method=driver and a token tied to exactly one driver.
-WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
+#
+# Real bug, found live 2026-10-07: this used to be a plain module-level
+# constant, same pattern poller.py's own WEB_BASE_URL uses — but
+# poller.py imports driver_bot_web (line ~65) BEFORE it calls its own
+# _load_env_file() (line ~90), so driver_bot_web's module body ran
+# against an empty os.environ and permanently cached "". Exactly the
+# ordering trap map_token.py's _secret() already has a comment about
+# ("main.py imports this module BEFORE it calls its own
+# _load_env_file()") — missed applying the same fix here the first
+# time. Reading fresh on every call (cheap — a dict lookup) sidesteps
+# the ordering entirely, same as _secret() does.
+def _web_base_url() -> str:
+    return os.environ.get("WEB_BASE_URL", "").rstrip("/")
 
 
 def _web_app_ok(chat_id) -> bool:
@@ -65,10 +77,11 @@ def _web_app_ok(chat_id) -> bool:
 
 
 def _driver_bid_url(license_key: str, order_id: str, driver_name: str) -> Optional[str]:
-    if not WEB_BASE_URL:
+    base = _web_base_url()
+    if not base:
         return None
     tok = map_token.make_bid_token(license_key, order_id, driver_name=driver_name)
-    return f"{WEB_BASE_URL}/app/bid_price.html?t={tok}&method=driver"
+    return f"{base}/app/bid_price.html?t={tok}&method=driver"
 
 
 # ── Telegram plumbing (single choke point so tests can capture it) ────

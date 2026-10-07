@@ -246,6 +246,32 @@ DEFAULT_STANDALONE_BOT_TOKEN = "8989438062:AAHIR3wz04P76QnBAwAoLHQscB3I1RM0320" 
 DEFAULT_STANDALONE_DRIVER_BOT_TOKEN = ""
 
 
+def _token_used_by_another_license(token: str, exclude_key: str) -> str:
+    """The OTHER license's key already using this exact token as either
+    its dispatcher or driver bot token, or '' if none. Real bug, found
+    live 2026-10-07: a test license was manually configured (direct DB
+    write, bypassing this function) with the SAME dispatcher bot token
+    as a real production license. poller.py's _ensure_callback_listeners
+    starts exactly ONE long-poll thread per distinct token, permanently
+    bound to whichever license claimed it first — every callback on
+    that bot (button taps, including the OTHER license's) got handled
+    under the FIRST license's context, so the second license's own BID
+    PC/PHONE buttons failed with "Order not found" (looked up against
+    the wrong license's load_store). No real data got corrupted here
+    only because the lookup happened to fail cleanly every time, not
+    because anything about the collision was actually safe."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT key FROM licenses WHERE key != ? '
+            'AND (standalone_bot_token = ? OR standalone_driver_bot_token = ?) LIMIT 1',
+            (exclude_key, token, token)
+        ).fetchone()
+        return row[0] if row else ''
+    finally:
+        conn.close()
+
+
 def set_standalone_settings(key: str, **fields) -> bool:
     """Partial update — only columns present in `fields` are touched.
     Valid keys: allowed_vehicles, max_radius_miles, chat_ids, bot_token.
@@ -257,6 +283,14 @@ def set_standalone_settings(key: str, **fields) -> bool:
             "needs its own separate bot. Create a new bot via @BotFather "
             "and use that token here instead."
         )
+    if 'bot_token' in fields and fields['bot_token']:
+        collide = _token_used_by_another_license(fields['bot_token'].strip(), key)
+        if collide:
+            raise ValueError(
+                f"This bot token is already in use by another license ({collide}) — "
+                "each license needs its own separate bot. Create a new bot via "
+                "@BotFather and use that token here instead."
+            )
     if 'driver_bot_token' in fields and fields['driver_bot_token']:
         dt = fields['driver_bot_token'].strip()
         if is_known_desktop_driver_token(dt) or is_known_desktop_token(dt):
@@ -270,6 +304,13 @@ def set_standalone_settings(key: str, **fields) -> bool:
         if other and other.strip() == dt:
             raise ValueError(
                 "The driver bot token must be a DIFFERENT bot from the dispatcher bot token."
+            )
+        collide = _token_used_by_another_license(dt, key)
+        if collide:
+            raise ValueError(
+                f"This bot token is already in use by another license ({collide}) — "
+                "each license needs its own separate bot. Create a new bot via "
+                "@BotFather and use that token here instead."
             )
     if 'bot_token' in fields and fields['bot_token'] and is_known_desktop_driver_token(fields['bot_token']):
         raise ValueError(
