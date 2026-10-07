@@ -230,6 +230,49 @@ def parse(req: ParseRequest):
         raise HTTPException(status_code=500, detail="Internal parsing error")
 
 
+@app.post("/api/driver_bid_popup_url")
+def driver_bid_popup_url(req: dict):
+    """The desktop's OWN driver bot (client/driver_bot.py, @plutus_driver_bot)
+    needs the same signed bid_price.html popup link the web driver bot
+    already has (client, 2026-10-07: "driver bot (@plutus_driver_bot)
+    to be the same as the web version") — the desktop can't mint one
+    itself since map_token's signing secret never leaves the server.
+    dispatcher_bot_token/dispatcher_chat_ids/driver_bot_token/
+    driver_chat_id (all from driver_config.json, a file that lives
+    only on the dispatcher's own PC) ride along as signed claims on the
+    token so /api/web/bid_price/submit can relay the bid back through
+    THOSE bots/chats — see map_token.make_bid_token's desktop_relay."""
+    license_key = req.get("license_key", "")
+    machine_id  = req.get("machine_id", "")
+    order_id    = req.get("order_id", "")
+    driver_name = req.get("driver_name", "")
+    check = validate_license(license_key, machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    if not order_id or not driver_name:
+        raise HTTPException(status_code=400, detail="order_id and driver_name are required")
+
+    base = driver_bot_web._web_base_url()
+    if not base:
+        return {"success": False, "reason": "web base url not configured on the server"}
+
+    dispatcher_bot_token = req.get("dispatcher_bot_token") or ""
+    dispatcher_chat_ids  = req.get("dispatcher_chat_ids") or []
+    driver_bot_token     = req.get("driver_bot_token") or ""
+    driver_chat_id       = req.get("driver_chat_id")
+    desktop_relay = None
+    if dispatcher_bot_token and dispatcher_chat_ids and driver_bot_token and driver_chat_id:
+        desktop_relay = {
+            "dispatcher_bot_token": dispatcher_bot_token,
+            "dispatcher_chat_ids":  dispatcher_chat_ids,
+            "driver_bot_token":     driver_bot_token,
+            "driver_chat_id":       driver_chat_id,
+        }
+    tok = map_token.make_bid_token(license_key, order_id, driver_name=driver_name,
+                                   desktop_relay=desktop_relay)
+    return {"success": True, "url": f"{base}/app/bid_price.html?t={tok}&method=driver"}
+
+
 @app.post("/api/build_bid")
 def build_bid(req: dict):
     check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
@@ -989,14 +1032,32 @@ def web_bid_price_submit(req: dict):
         if not truck:
             raise HTTPException(status_code=404, detail="You're no longer matched to this load")
         rate_str = f"{price:g}"
-        driver_bot_web.forward_bid(license_key, driver_name, order_id, load, rate_str)
+        # desktop_relay (2026-10-07, client: "driver bot (@plutus_driver_bot)
+        # to be the same as the web version") — a desktop-minted token
+        # (see /api/driver_bid_popup_url) carries the desktop's OWN
+        # dispatcher_bot_token/chat_ids and driver_bot_token/chat_id
+        # (driver_config.json, a file that only exists on the
+        # dispatcher's PC) so this can relay through THOSE instead of
+        # license_db's web/standalone settings, which a desktop-only
+        # license never sets. None for the web driver bot's own links.
+        desktop_relay = None
+        tok = req.get("t")
+        if tok:
+            claims = map_token.verify_bid_token(tok)
+            desktop_relay = (claims or {}).get("desktop_relay")
+        driver_bot_web.forward_bid(license_key, driver_name, order_id, load, rate_str,
+                                   desktop_relay=desktop_relay)
         try:
-            settings = license_db.get_standalone_settings(license_key) or {}
-            dtoken = settings.get("driver_bot_token")
-            chat_id = next((t.get("telegram_chat_id") for t in fleet_store.list_trucks(license_key)
-                            if t.get("driver_name") == driver_name), None)
-            if dtoken and chat_id:
-                driver_bot_web._send(dtoken, chat_id, f"✅ Bid of ${rate_str} sent to dispatcher!\nOrder #{order_id}")
+            if desktop_relay and desktop_relay.get("driver_bot_token") and desktop_relay.get("driver_chat_id"):
+                driver_bot_web._send(desktop_relay["driver_bot_token"], desktop_relay["driver_chat_id"],
+                                     f"✅ Bid of ${rate_str} sent to dispatcher!\nOrder #{order_id}")
+            else:
+                settings = license_db.get_standalone_settings(license_key) or {}
+                dtoken = settings.get("driver_bot_token")
+                chat_id = next((t.get("telegram_chat_id") for t in fleet_store.list_trucks(license_key)
+                                if t.get("driver_name") == driver_name), None)
+                if dtoken and chat_id:
+                    driver_bot_web._send(dtoken, chat_id, f"✅ Bid of ${rate_str} sent to dispatcher!\nOrder #{order_id}")
         except Exception as e:
             logger.warning(f"[WEB] driver confirmation send failed (non-fatal): order={order_id} driver={driver_name}: {e}")
         logger.info(f"[WEB] bid_price submit: order={order_id} method=driver driver={driver_name} price={price}")

@@ -1154,7 +1154,7 @@ def _():
         assert url.startswith("https://plutus.example/app/bid_price.html?t=") and "&method=driver" in url
         tok = url.split("t=")[1].split("&")[0]
         claims = map_token.verify_bid_token(tok)
-        assert claims == {"license_key": LK, "order_id": "555", "driver_name": "ALEX"}
+        assert claims == {"license_key": LK, "order_id": "555", "driver_name": "ALEX", "desktop_relay": None}
 
         # The group-callback fallback path, found via the person who
         # actually pressed it (cq["from"]["id"] is always an individual
@@ -1253,6 +1253,63 @@ def _():
             assert dcap.sent()[0] == (111, "✅ Bid of $1400 sent to dispatcher!\nOrder #555", None)
     finally:
         cleanup_trucks()
+        cleanup_loads()
+        cleanup_license()
+
+
+@test("DESKTOP's own driver bot (@plutus_driver_bot): /api/driver_bid_popup_url mints a token carrying desktop_relay, and submit relays through THAT bot/chat, not license_db")
+def _():
+    # Client, 2026-10-07: "implement the new changes to desktop version
+    # as well... driver bot (@plutus_driver_bot) to be the same as the
+    # web version" — driver_config.json (the desktop's dispatcher_bot_
+    # token/chat_ids and driver_bot_token/driver chat_id) lives only on
+    # the dispatcher's own PC, invisible to license_db, so the signed
+    # token carries it instead (map_token.make_bid_token's desktop_relay).
+    from fastapi.testclient import TestClient
+    import main
+    dreset()
+    enable_license()   # standalone settings present but must NOT be used below
+    seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r",
+             all_trucks=[{"driver_name": "ALEX", "google_deadhead": 10, "deadhead_eta_minutes": 15,
+                          "truck_dimensions": "48x48x48"}])
+    orig = os.environ.get("WEB_BASE_URL")
+    os.environ["WEB_BASE_URL"] = "https://plutus.example"
+    try:
+        with TestClient(main.app) as c:
+            r = c.post("/api/driver_bid_popup_url", json={
+                "license_key": LK, "machine_id": "desktop-1", "order_id": "555", "driver_name": "ALEX",
+                "dispatcher_bot_token": "111:desktop-dispatch", "dispatcher_chat_ids": [777],
+                "driver_bot_token": "222:desktop-driver", "driver_chat_id": 333,
+            })
+            assert r.status_code == 200
+            data = r.json()
+            assert data["success"] and "&method=driver" in data["url"]
+            tok = data["url"].split("t=")[1].split("&")[0]
+
+            r2 = c.post("/api/web/bid_price/submit", json={"t": tok, "order_id": "555",
+                                                            "price": 1400, "method": "driver"})
+            assert r2.status_code == 200 and r2.json() == {"success": True}
+
+        assert not fwd, "must NOT forward through license_db's web/standalone settings"
+        desktop_sends = [call for call in dcap.calls if call[0] == "111:desktop-dispatch"]
+        assert len(desktop_sends) == 1
+        _, method, payload = desktop_sends[0]
+        assert method == "sendMessage" and payload["chat_id"] == 777
+        assert payload["text"] == "💰 ALEX — Rate: $1400\n" + "─" * 30 + "\n" + FORMATTED
+
+        driver_confirms = [call for call in dcap.calls if call[0] == "222:desktop-driver"]
+        assert len(driver_confirms) == 1
+        _, _, dpayload = driver_confirms[0]
+        assert dpayload["chat_id"] == 333
+        assert dpayload["text"] == "✅ Bid of $1400 sent to dispatcher!\nOrder #555"
+
+        b = bid_history.get_bids_for_order(LK, "555")[0]
+        assert b["bid_method"] == "driver_bot" and b["driver_name"] == "ALEX" and b["bid_amount"] == 1400.0
+    finally:
+        if orig is None:
+            os.environ.pop("WEB_BASE_URL", None)
+        else:
+            os.environ["WEB_BASE_URL"] = orig
         cleanup_loads()
         cleanup_license()
 

@@ -343,9 +343,21 @@ def handle_message(license_key: str, token: str, msg: dict):
                               f"Please contact dispatcher directly.")
 
 
-def forward_bid(license_key: str, driver_name: str, order_id: str, load_data: dict, rate_str: str):
+def forward_bid(license_key: str, driver_name: str, order_id: str, load_data: dict, rate_str: str,
+                desktop_relay: Optional[dict] = None):
     """Forward the driver's rate to the dispatcher chat(s) with the same
-    BID PC / BID PHONE / DRAFT buttons, and record the bid with its amount."""
+    BID PC / BID PHONE / DRAFT buttons, and record the bid with its amount.
+
+    desktop_relay (2026-10-07, client: "driver bot (@plutus_driver_bot)
+    to be the same as the web version") — {"dispatcher_bot_token",
+    "dispatcher_chat_ids", ...}, present only for a bid that came from
+    the DESKTOP's own driver bot's popup (see main.py's
+    /api/driver_bid_popup_url and /api/web/bid_price/submit). The
+    desktop's dispatcher bot/chat config lives only in
+    driver_config.json on the dispatcher's own PC, invisible to
+    license_db, so the signed token carries it instead of this
+    forwarding through the license's web/standalone settings, which a
+    desktop-only license never sets."""
     order_id = load_data.get("order", order_id)
     route_url = load_data.get("route_url", "")
     # Client, 2026-10-07: the Live Feed should hold this load back (set
@@ -369,8 +381,13 @@ def forward_bid(license_key: str, driver_name: str, order_id: str, load_data: di
     ]]
     if route_url:
         rows.append([{"text": "🚩 ROUTE 🚩", "url": route_url}])
-    # The desktop's driver forwards bypass its Telegram on/off flag.
-    tg_notify.send_to_license(license_key, full_msg, rows, respect_enabled=False)
+    if desktop_relay and desktop_relay.get("dispatcher_bot_token") and desktop_relay.get("dispatcher_chat_ids"):
+        keyboard = {"inline_keyboard": rows}
+        for cid in desktop_relay["dispatcher_chat_ids"]:
+            _send(desktop_relay["dispatcher_bot_token"], cid, full_msg, keyboard)
+    else:
+        # The desktop's driver forwards bypass its Telegram on/off flag.
+        tg_notify.send_to_license(license_key, full_msg, rows, respect_enabled=False)
     try:
         amount = float(rate_str.replace(",", ""))
     except ValueError:

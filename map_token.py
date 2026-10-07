@@ -40,7 +40,7 @@ def _secret() -> str:
 
 
 def make_bid_token(license_key: str, order_id: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS,
-                    driver_name: str = None) -> str:
+                    driver_name: str = None, desktop_relay: dict = None) -> str:
     payload = {"lk": license_key, "oid": order_id, "exp": int(time.time()) + ttl_seconds}
     # driver_name (2026-10-07, driver bot's own BID popup): ties this
     # link to exactly one driver, the same way the Telegram callback
@@ -50,21 +50,35 @@ def make_bid_token(license_key: str, order_id: str, ttl_seconds: int = _DEFAULT_
     # links, same as before this field existed.
     if driver_name:
         payload["drv"] = driver_name
+    # desktop_relay (2026-10-07, client: "implement the new changes to
+    # desktop version as well... driver bot (@plutus_driver_bot) to be
+    # the same as the web version") — the desktop's OWN dispatcher_bot_
+    # token/chat_ids and driver_bot_token/driver chat_id (client/
+    # driver_config.json, a file that lives only on the dispatcher's
+    # PC) ride along as signed claims so /api/web/bid_price/submit can
+    # relay the bid back through THOSE bots/chats instead of the
+    # license's web/standalone settings, which a desktop-only license
+    # never sets. Absent for the web driver bot and dispatcher PC/
+    # PHONE links, which keep forwarding through license_db as before.
+    if desktop_relay:
+        payload["dsk"] = desktop_relay
     return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
 def verify_bid_token(token: str):
-    """Returns {"license_key":..., "order_id":..., "driver_name":...}
-    or None (expired, tampered, or malformed — jose.jwt.decode checks
-    both the signature and "exp" itself). driver_name is None unless
-    this token was minted with one. Never raises."""
+    """Returns {"license_key":..., "order_id":..., "driver_name":...,
+    "desktop_relay":...} or None (expired, tampered, or malformed —
+    jose.jwt.decode checks both the signature and "exp" itself).
+    driver_name/desktop_relay are None unless this token was minted
+    with them. Never raises."""
     secret = _secret()
     if not secret or not token:
         return None
     try:
         claims = jwt.decode(token, secret, algorithms=[_ALGORITHM])
         return {"license_key": claims["lk"], "order_id": claims["oid"],
-                "driver_name": claims.get("drv")}
+                "driver_name": claims.get("drv"),
+                "desktop_relay": claims.get("dsk")}
     except (JWTError, KeyError):
         return None
 
