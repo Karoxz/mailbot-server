@@ -1262,7 +1262,25 @@ def extract_vehicle_required(t):
     # allowed_vehicles filter below is substring-based so a list still
     # matches correctly, and _vehicle_matches() is comma-list-aware for
     # the truck-matching step further down.
-    return _find(r"Vehicle\s*types\s*:\s*([^\n]+)", t)
+    vr = _find(r"Vehicle\s*types\s*:\s*([^\n]+)", t)
+    if vr:
+        return vr
+    # Sylectus "Alliance Lane Posting System" TL/LTL format (client,
+    # 2026-10-07) — e.g. "Equipment Needed:\nStraight Truck". A BARE
+    # "Straight Truck" here never says Large or Small, and
+    # _vehicle_matches()'s word-sequence-prefix comparison needs an
+    # EXACT match ("LARGE STRAIGHT" vs "STRAIGHT TRUCK" doesn't count as
+    # one) — client confirmed either fleet size should be considered
+    # eligible for this generic request, so it's normalized into the
+    # same comma-separated "list of acceptable types" ivia's format
+    # already produces above, reusing that OR-matching as-is rather
+    # than changing _vehicle_matches() itself.
+    vr = _find(r"Equipment\s*Needed\s*:\s*([^\n]+)", t)
+    if vr:
+        if vr.strip().upper() == "STRAIGHT TRUCK":
+            return "LARGE STRAIGHT, SMALL STRAIGHT"
+        return vr
+    return None
 
 
 def _bounded_section_window(text: str, label_regex: str,
@@ -1982,11 +2000,13 @@ _DELIVERY_STOP_PATS = [
     r"\bDelivery\s*:",
     r"\bConsignee\s*:",
     r"\bDrop\s*(?:Off\s*)?:",
+    r"\bDeliver\s+to\s*:",   # Sylectus "Alliance Lane" TL/LTL format
 ]
 _PICKUP_STOP_PATS = [
     r"(?m)^\s*Pick[\s\-]*[Uu]p\s*:?\s*$",
     r"\bPick[\s\-]*[Uu]p\s*:",
     r"\bShipper\s*:",
+    r"\bPick[\s\-]*[Uu]p\s+at\s*:",   # Sylectus "Alliance Lane" TL/LTL format
 ]
 
 
@@ -2018,7 +2038,18 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
     _PU_STRICT  = r"(?m)^\s*Pick[\s\-]*[Uu]p\s*:?\s*$"
     _DEL_STRICT = r"(?m)^\s*Delivery\s*:?\s*$"
     _pu_label   = _PU_STRICT  if re.search(_PU_STRICT,  t) else r"Pick\s*-?\s*Up"
-    _del_label  = _DEL_STRICT if re.search(_DEL_STRICT, t) else r"Delivery"
+    # Sylectus "Alliance Lane Posting System" TL/LTL format (client,
+    # 2026-10-07) labels the delivery LOCATION line "Deliver to:", not
+    # "Delivery:" — the bare r"Delivery" fallback never matched that
+    # (missing the "y"), so it fell through to the FIRST actual
+    # "Delivery" in the text, which is the "Delivery date (timezone):"
+    # line further down. extract_location_after_label only ever looks
+    # FORWARD from its match, so anchoring there skipped right over the
+    # real "Deliver to: <city, state>" line above it, silently finding
+    # no delivery location at all for this format. Still matches
+    # plain "Delivery" first when that's what's actually there (ivia/
+    # Sylectus's original format, unchanged).
+    _del_label  = _DEL_STRICT if re.search(_DEL_STRICT, t) else r"Deliver(?:y\b|\s+to\b)"
 
     pick_win = _bounded_section_window(t, _pu_label,
                                         stop_regexes=_DELIVERY_STOP_PATS, window=400)

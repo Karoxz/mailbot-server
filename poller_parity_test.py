@@ -1515,6 +1515,63 @@ def _():
         cleanup_loads()
 
 
+@test("Sylectus 'Alliance Lane Posting System' TL/LTL format: Pick-up at:/Deliver to:/Equipment Needed: parse and match a real sample email")
+def _():
+    # Client, 2026-10-07: "i also want both desktop and web versions of
+    # plutus be able to process TL/LTL format messages like this" —
+    # real sample email pasted verbatim. Two real parsing bugs fixed
+    # for this format: (1) the delivery LOCATION line is "Deliver to:",
+    # not "Delivery:" — the old r"Delivery" fallback skipped right over
+    # it to the LATER "Delivery date (timezone):" line, since
+    # extract_location_after_label only ever looks forward from its
+    # match; (2) "Equipment Needed:\nStraight Truck" was never
+    # recognized as a vehicle_required source at all (no "Vehicle
+    # required"/"Vehicle types" label here). A bare "Straight Truck"
+    # (no Large/Small) is normalized to "LARGE STRAIGHT, SMALL
+    # STRAIGHT" (client confirmed either fleet size is eligible),
+    # reusing the ivia-format comma-list OR-matching that already
+    # exists rather than changing _vehicle_matches() itself.
+    import parser_core
+    import load_store as _load_store
+    EMAIL = (
+        "TL/LTL Load Murphy, NC to Anoka, MN posted on Alliance Lane Posting System\n"
+        "External\nInbox\n\n"
+        "joshs@taimentransport.com; <systememail@sylectus.com>\n"
+        "3:50 AM (7 hours ago)\nto joshs\n\n"
+        "The following TL/LTL load has been posted on the Alliance Lane Posting System:\n\n"
+        "Pick-up at: Murphy, NC\n"
+        "Pick-up date (timezone): 10/08/2026 17:00 (Eastern (0))\n\n"
+        "Deliver to: Anoka, MN\n"
+        "Delivery date (timezone): 10/09/2026 21:00 (Central (-1))\n\n"
+        "Notes: x8@48x40x44 #4680 TEAM REQUIRED PU 10/8 AT 1700EST FIRM DEL NEXT DAY AT 2100CST FIRM\n\n\n"
+        "Equipment Needed:\nStraight Truck\n\n"
+        "Services Needed:\nTeam\n"
+    )
+    trucks = [{"driver_name": "Driver1", "vehicle": "LARGE STRAIGHT", "zip": "28801",
+              "radius_miles": 400, "telegram_chat_id": None}]
+    formatted, vehicle_required, order, _bid_url = parser_core.process_bid_email(
+        raw_text=EMAIL, allowed_vehicles=["LARGE STRAIGHT", "SMALL STRAIGHT"],
+        internal_date_ms=1791358417000, max_radius_miles=400,
+        original_msg_full={"id": "tlltl1", "threadId": "tlltl-th", "payload": {"headers": []}, "labelIds": []},
+        trucks=trucks, bid_template="Truck is {google_deadhead} out", license_key="",
+    )
+    try:
+        assert vehicle_required == "LARGE STRAIGHT, SMALL STRAIGHT"
+        assert formatted is not None, "should have matched Driver1, not been rejected"
+        load = _load_store.get_load("", order)
+        assert load["pickup_loc"] == "Murphy, NC"
+        assert load["delivery_loc"] == "Anoka, MN"
+        assert load["pickup_dt"] == "10/08/2026 17:00"
+        assert load["delivery_dt"] == "10/09/2026 21:00"
+        assert load["driver_name"] == "Driver1"
+        assert "TEAM REQUIRED" in formatted
+    finally:
+        conn = sqlite3.connect(_load_store.DB_PATH)
+        conn.execute("DELETE FROM loads WHERE license_key=? AND order_id=?", ("", order))
+        conn.commit()
+        conn.close()
+
+
 # ── run ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print()
