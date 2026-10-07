@@ -252,7 +252,8 @@ def handle_callback_query(license_key: str, token: str, cq: dict):
     if not data.startswith("driverbid:"):
         return
     cq_id = cq.get("id", "")
-    chat_id = (cq.get("from") or {}).get("id")
+    origin_chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+    presser_id = (cq.get("from") or {}).get("id")
     parts = data.split(":", 2)
     if len(parts) < 3:
         _answer_callback(token, cq_id, "Invalid data")
@@ -261,18 +262,26 @@ def handle_callback_query(license_key: str, token: str, cq: dict):
     # This card's own BID was a group callback (no web_app on the card
     # itself), but cq["from"]["id"] — whoever actually tapped it — is
     # always an individual user id, always eligible for a web_app
-    # button (2026-10-07) regardless of where the card was. Falls back
-    # to the old ForceReply text prompt only if WEB_BASE_URL isn't
-    # configured at all.
+    # button in principle (2026-10-07). BUT Telegram still refuses to
+    # let a bot DM a user who has never messaged that bot PRIVATELY
+    # first ("403: bot can't initiate conversation with a user") — real
+    # bug, found live 2026-10-07 testing drivers-as-groups: every DM
+    # attempt failed silently (logged, never surfaced), so the driver
+    # saw the "Enter your rate" toast and then nothing. If the DM
+    # fails, fall back to the ForceReply prompt in the SAME chat the
+    # card lives in (origin_chat_id) — that always works regardless of
+    # whether this user has ever privately started the bot.
     bid_url = _driver_bid_url(license_key, order_id, driver_name)
     if bid_url:
-        _answer_callback(token, cq_id, "💰 Enter your rate")
-        prompt_id = _send(token, chat_id, f"💰 Order #{order_id} — tap below to enter your rate:",
+        prompt_id = _send(token, presser_id, f"💰 Order #{order_id} — tap below to enter your rate:",
                           {"inline_keyboard": [[{"text": "💵 Enter price", "web_app": {"url": bid_url}}]]})
-        if not prompt_id:
-            logger.warning(f"[{license_key}] failed to send the rate popup prompt to {driver_name}")
-        return
+        if prompt_id:
+            _answer_callback(token, cq_id, "💰 Check your DM with the bot")
+            return
+        logger.warning(f"[{license_key}] rate popup DM failed for {driver_name} (hasn't started "
+                       f"a private chat with the bot?) — falling back to a reply prompt in this chat")
     _answer_callback(token, cq_id, "💰 Enter your rate below")
+    chat_id = origin_chat_id
     prompt_id = _send(token, chat_id,
                       f"💰 Order #{order_id}\nType your rate (numbers only):\nExample:  1400",
                       {"force_reply": True, "selective": True})

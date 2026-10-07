@@ -1101,7 +1101,8 @@ def _():
     dreset()
     seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r")
     try:
-        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"}}
+        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"},
+              "message": {"chat": {"id": 111}}}
         driver_bot_web.handle_callback_query(LK, DTOKEN, cq)
         ans = [p for _, m, p in dcap.calls if m == "answerCallbackQuery"][0]
         assert ans["text"] == "💰 Enter your rate below"
@@ -1161,7 +1162,8 @@ def _():
         # original card lived) — a 2nd message with an "Enter price"
         # popup button instead of the old ForceReply text prompt.
         dcap.calls.clear()
-        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"}}
+        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"},
+              "message": {"chat": {"id": 111}}}
         driver_bot_web.handle_callback_query(LK, DTOKEN, cq)
         chat2, text2, kb2 = dcap.sent()[0]
         assert chat2 == 111
@@ -1179,6 +1181,46 @@ def _():
         else:
             os.environ["WEB_BASE_URL"] = orig
         cleanup_trucks()
+
+
+@test("driver BID in a group whose presser never DM'd the bot privately: popup DM fails (403) -> falls back to a ForceReply prompt IN THE GROUP, not silently dropped")
+def _():
+    # Real bug, found live 2026-10-07 testing 20 drivers-as-groups: a
+    # web_app origin being configured doesn't guarantee the DM to
+    # cq["from"]["id"] will succeed — Telegram refuses "bot can't
+    # initiate conversation with a user" until that user has messaged
+    # the bot privately at least once, which group members who only
+    # ever tap buttons inside the group never do. The old code treated
+    # a configured web_app origin as a guarantee, sent the DM, and just
+    # logged a warning on failure — the driver saw the "Enter your
+    # rate" toast and then nothing, ever. Now a failed DM falls back to
+    # the ForceReply prompt in the SAME chat the card lives in (the
+    # group itself), which doesn't need a prior private DM at all.
+    dreset()
+    GROUP_CHAT, PRESSER_ID = -555666777, 111
+    orig = os.environ.get("WEB_BASE_URL")
+    os.environ["WEB_BASE_URL"] = "https://plutus.example"
+    try:
+        def flaky(token, method, payload, timeout=10):
+            if method == "sendMessage" and payload.get("chat_id") == PRESSER_ID:
+                return None     # simulates Telegram's 403: can't initiate conversation
+            return dcap(token, method, payload, timeout)
+        driver_bot_web._api = flaky
+        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": PRESSER_ID},
+              "message": {"chat": {"id": GROUP_CHAT}}}
+        driver_bot_web.handle_callback_query(LK, DTOKEN, cq)
+        chat, text, kb = dcap.sent()[0]
+        assert chat == GROUP_CHAT        # fell back to the group, not the presser's (failed) DM
+        assert text == "💰 Order #555\nType your rate (numbers only):\nExample:  1400"
+        assert json.loads(kb) == {"force_reply": True, "selective": True}
+        assert (DTOKEN, GROUP_CHAT, "555") in driver_bot_web._PENDING
+    finally:
+        driver_bot_web._api = dcap
+        if orig is None:
+            os.environ.pop("WEB_BASE_URL", None)
+        else:
+            os.environ["WEB_BASE_URL"] = orig
+        driver_bot_web._PENDING.pop((DTOKEN, GROUP_CHAT, "555"), None)
 
 
 @test("driver bot BID popup submit: forwards the price to the dispatcher (same as the text-reply path), records the bid, confirms the driver, no draft")
@@ -1220,7 +1262,8 @@ def _():
     dreset()
     seed_load("555", mid="mid9", formatted_message=FORMATTED)
     try:
-        driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:555:ALEX", "from": {"id": 111}})
+        driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:555:ALEX",
+                                                           "from": {"id": 111}, "message": {"chat": {"id": 111}}})
         driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "1400"})    # plain reply, no reply_to
         assert fwd and "Rate: $1400" in fwd[0][1] and FORMATTED in fwd[0][1]
     finally:
@@ -1230,7 +1273,8 @@ def _():
 @test("driver replies for a load we no longer have: told to contact the dispatcher; rate parsing variants")
 def _():
     dreset()
-    driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:999:ALEX", "from": {"id": 111}})
+    driver_bot_web.handle_callback_query(LK, DTOKEN, {"id": "q", "data": "driverbid:999:ALEX",
+                                                       "from": {"id": 111}, "message": {"chat": {"id": 111}}})
     dcap.calls.clear()
     driver_bot_web.handle_message(LK, DTOKEN, {"chat": {"id": 111}, "text": "1400"})
     assert "Load #999 data not found" in dcap.sent()[0][1] and not fwd
