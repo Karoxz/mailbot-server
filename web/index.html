@@ -250,7 +250,7 @@ function renderLoads(items) {
       // all because the driver already typed a rate on Telegram — show
       // it right on the card, same as a dispatcher-entered price would be.
       const driverBidLine = it.driver_bid_status === "bid" && it.driver_bid_amount != null
-        ? `<div class="meta">💰 <strong>${MB.esc(it.driver_bid_driver || "Driver")} bid: $${MB.esc(it.driver_bid_amount)}</strong></div>` : "";
+        ? `<div class="meta" style="color:var(--good);">💰 <strong>${MB.esc(it.driver_bid_driver || "Driver")} bid: $${MB.esc(it.driver_bid_amount)}</strong></div>` : "";
 
       const pickupLine = MB.esc(fmtDate("Pick-up", it.pickup_dt, it.pickup_asap, it.pickup_direct));
       const deliverLine = MB.esc(fmtDate("Deliver", it.delivery_dt, it.delivery_asap, it.deliver_direct));
