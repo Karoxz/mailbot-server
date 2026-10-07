@@ -200,9 +200,11 @@ main.content { animation: fadeIn .25s ease both; }
   padding: 9px 16px;
   border-radius: 8px;
   white-space: nowrap;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
 }
-.topnav a:hover { background: var(--bg-card); color: var(--text); }
-.topnav a.active { background: var(--accent-bg); color: var(--accent); }
+.topnav a:hover { background: var(--border); color: var(--text); }
+.topnav a.active { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
 .icon-btn {
   border: 1px solid var(--border);
   background: var(--bg-card);
@@ -219,7 +221,7 @@ main.content { animation: fadeIn .25s ease both; }
 .icon-btn { transition: border-color .15s ease, transform .08s ease; }
 .icon-btn:hover { border-color: var(--accent); }
 .icon-btn:active { transform: scale(.9); }
-.topnav a { transition: background .15s ease, color .15s ease; }
+.topnav a { transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-dim);
