@@ -1125,6 +1125,86 @@ def _():
         cleanup_loads()
 
 
+@test("driver's BID is a one-tap web_app popup (map+price, no ForceReply) when a driver bot web origin is configured")
+def _():
+    # Client, 2026-10-07: "when driver presses bid it should open map
+    # and bid amount just like in the bid phone in dispatcher version,
+    # without the draft aspects of course" — same web_app-in-a-private-
+    # chat mechanism poller.py's own BID PC/PHONE shortcuts use.
+    import map_token
+    dreset()
+    driver_fleet()
+    orig = driver_bot_web.WEB_BASE_URL
+    driver_bot_web.WEB_BASE_URL = "https://plutus.example"
+    try:
+        n = driver_bot_web.notify_drivers(LK, DTOKEN, "555", LOAD, FORMATTED)
+        assert n == 1
+        chat, text, kb = dcap.sent()[0]
+        bid_btn = json.loads(kb)["inline_keyboard"][0][0]
+        assert "callback_data" not in bid_btn
+        url = bid_btn["web_app"]["url"]
+        assert url.startswith("https://plutus.example/app/bid_price.html?t=") and "&method=driver" in url
+        tok = url.split("t=")[1].split("&")[0]
+        claims = map_token.verify_bid_token(tok)
+        assert claims == {"license_key": LK, "order_id": "555", "driver_name": "ALEX"}
+
+        # The group-callback fallback path, found via the person who
+        # actually pressed it (cq["from"]["id"] is always an individual
+        # user id, always web_app-eligible regardless of where the
+        # original card lived) — a 2nd message with an "Enter price"
+        # popup button instead of the old ForceReply text prompt.
+        dcap.calls.clear()
+        cq = {"id": "q1", "data": "driverbid:555:ALEX", "from": {"id": 111, "first_name": "Alex"}}
+        driver_bot_web.handle_callback_query(LK, DTOKEN, cq)
+        chat2, text2, kb2 = dcap.sent()[0]
+        assert chat2 == 111
+        price_btn = json.loads(kb2)["inline_keyboard"][0][0]
+        assert price_btn["text"] == "💵 Enter price"
+        assert "&method=driver" in price_btn["web_app"]["url"]
+        # notify_drivers() already registers a _PENDING entry for every
+        # card it sends (so a text reply recovers load_data across a
+        # restart) — the popup path just never advances its
+        # prompt_msg_id the way the old ForceReply branch does.
+        assert driver_bot_web._PENDING[(DTOKEN, 111, "555")]["prompt_msg_id"] is None
+    finally:
+        driver_bot_web.WEB_BASE_URL = orig
+        cleanup_trucks()
+
+
+@test("driver bot BID popup submit: forwards the price to the dispatcher (same as the text-reply path), records the bid, confirms the driver, no draft")
+def _():
+    import map_token as _mt
+    from fastapi.testclient import TestClient
+    import main
+    dreset()
+    enable_license()
+    license_db.set_standalone_settings(LK, driver_bot_token=DTOKEN)
+    driver_fleet()
+    seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r",
+             all_trucks=[{"driver_name": "ALEX", "google_deadhead": 10, "deadhead_eta_minutes": 15,
+                          "truck_dimensions": "48x48x48"}])
+    try:
+        tok = _mt.make_bid_token(LK, "555", driver_name="ALEX")
+        with TestClient(main.app) as c:
+            r = c.post("/api/web/bid_price/submit", json={"t": tok, "order_id": "555",
+                                                           "price": 1400, "method": "driver"})
+            assert r.status_code == 200
+            assert r.json() == {"success": True}   # no draft_id/bid_text — nothing for the driver to act on further
+            lk, ftext, rows, respect = fwd[0]
+            assert lk == LK and respect is False
+            assert ftext == "💰 ALEX — Rate: $1400\n" + "─" * 30 + "\n" + FORMATTED
+            assert [b["callback_data"] for b in rows[0]] == ["bid:555", "phone:555", "text:555"]
+            b = bid_history.get_bids_for_order(LK, "555")[0]
+            assert b["bid_method"] == "driver_bot" and b["driver_name"] == "ALEX" and b["bid_amount"] == 1400.0
+            # Durable confirmation in the driver's own chat, same text the
+            # old ForceReply text-reply path already sent.
+            assert dcap.sent()[0] == (111, "✅ Bid of $1400 sent to dispatcher!\nOrder #555", None)
+    finally:
+        cleanup_trucks()
+        cleanup_loads()
+        cleanup_license()
+
+
 @test("driver BID after a poller restart (no in-memory state): load + message come back from the persistent store")
 def _():
     dreset()

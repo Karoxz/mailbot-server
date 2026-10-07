@@ -124,10 +124,21 @@
 
 <div id="toast"></div>
 
+<!-- Telegram's own WebApp SDK (2026-10-07) — lets this page close
+     itself (Telegram.WebApp.close()) once a bid phone/driver submit is
+     done, instead of leaving the dispatcher/driver to dismiss the
+     popup manually. A no-op import outside Telegram (the dashboard
+     path never calls close()). -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="common.js"></script>
 <script>
 const MB = window.MailBot;
 MB.initTheme();
+
+function closeTelegramWebApp() {
+  try { window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.close(); } catch (e) {}
+}
+try { window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.ready(); } catch (e) {}
 
 function showToast(msg, isError) {
   const t = document.getElementById("toast");
@@ -155,9 +166,19 @@ const TRUCK = params.get("truck");
 // amount, just like the pc version" — same page, method=phone just
 // changes the title and what submit does with the confirmed price
 // (creates a real Gmail reply draft instead of only showing the text).
-const METHOD = params.get("method") === "phone" ? "phone" : "pc";
-document.title = METHOD === "phone" ? "Plutus Bot — Bid Phone" : "Plutus Bot — Bid";
-document.getElementById("page-title").textContent = METHOD === "phone" ? "Bid Phone" : "Bid";
+// method=driver (2026-10-07, client: "when driver presses bid it
+// should open map and bid amount just like in the bid phone in
+// dispatcher version, without the draft aspects") — same page again,
+// for the DRIVER's own BID popup: no draft, no bid-text-to-copy, just
+// the map/price UI and a submit that forwards their rate to the
+// dispatcher, then closes itself.
+const METHOD = ["phone", "driver"].includes(params.get("method")) ? params.get("method") : "pc";
+const _TITLES = { phone: "Bid Phone", driver: "Enter Your Rate", pc: "Bid" };
+document.title = `Plutus Bot — ${_TITLES[METHOD]}`;
+document.getElementById("page-title").textContent = _TITLES[METHOD];
+if (METHOD === "driver") {
+  document.getElementById("submit-btn").textContent = "💰 Submit Bid";
+}
 
 if (!TOKEN) {
   // No token — this is the dashboard path. Same as every other page.
@@ -277,6 +298,19 @@ async function submitBid() {
     const res = await bidFetch("POST", "/api/web/bid_price/submit", {
       order_id: ORDER.order_id, price, rate_per_mile: rate, method: METHOD,
     });
+
+    if (METHOD === "driver") {
+      // No draft, no bid text to copy — the driver's job here is just
+      // "tell the dispatcher my price", already done server-side
+      // (driver_bot_web.forward_bid). A brief confirmation, then the
+      // popup closes itself — client: "window should close immidietly
+      // automaticaly".
+      showToast(`Bid of $${price.toLocaleString()} sent to dispatcher`);
+      btn.textContent = "✅ Sent";
+      setTimeout(closeTelegramWebApp, 900);
+      return;
+    }
+
     const gmailUrl = MB.gmailSearchUrl(ORDER.order_id, res.broker_email, res.thread_id);
     const draftUrl = res.draft_id ? `https://mail.google.com/mail/u/0/#drafts/${res.draft_id}` : null;
     const resultGmail = document.getElementById("result-gmail");
@@ -299,6 +333,11 @@ async function submitBid() {
       document.getElementById("result-panel").style.display = "";
       showToast("Draft created — ready to send");
       btn.textContent = "✅ Draft created";
+      // Client, 2026-10-07: "in the dispatcher bid phone when user
+      // confirms the rate the window should close automatically
+      // without needing to press the close button" — brief pause so
+      // the confirmation above is actually visible first.
+      setTimeout(closeTelegramWebApp, 1400);
       return;
     }
     document.getElementById("result-copy").style.display = "";

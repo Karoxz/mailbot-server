@@ -25,6 +25,7 @@
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -38,6 +39,7 @@ import bid_history
 import fleet_store
 import license_db
 import load_store
+import map_token
 import tg_notify
 from parser_core import fmt_hours_minutes
 
@@ -45,6 +47,28 @@ logger = logging.getLogger("driver_bot_web")
 
 _PENDING = {}                    # (token, chat_id, order_id) -> {"order_id","load_data","driver_name","prompt_msg_id"}
 _PENDING_LOCK = threading.Lock()
+
+# Driver's own BID popup (2026-10-07, client: "when driver presses bid
+# it should open map and bid amount just like in the bid phone in
+# dispatcher version, without the draft aspects") — same page
+# (bid_price.html), same web_app-in-a-private-chat mechanism the
+# dispatcher's BID PC/PHONE shortcuts already use (poller.py), just
+# with method=driver and a token tied to exactly one driver.
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
+
+
+def _web_app_ok(chat_id) -> bool:
+    """Telegram only allows web_app buttons in PRIVATE chats (positive
+    ids); groups/channels get a plain callback instead — same rule
+    poller.py's own _web_app_ok enforces for the dispatcher's buttons."""
+    return isinstance(chat_id, int) and chat_id > 0
+
+
+def _driver_bid_url(license_key: str, order_id: str, driver_name: str) -> Optional[str]:
+    if not WEB_BASE_URL:
+        return None
+    tok = map_token.make_bid_token(license_key, order_id, driver_name=driver_name)
+    return f"{WEB_BASE_URL}/app/bid_price.html?t={tok}&method=driver"
 
 
 # ── Telegram plumbing (single choke point so tests can capture it) ────
@@ -185,8 +209,15 @@ def notify_drivers(license_key: str, token: str, order_id: str, load_data: dict,
             card = format_driver_summary(name, load_data, truck_entry)
         else:
             card = f"👤 {name}\n{'─' * 30}\n" + format_load_card(order_id, load_data, truck_entry)
+        # One-tap map+price popup in private chats (2026-10-07) — same
+        # web_app shortcut the dispatcher's BID PC/PHONE already use;
+        # groups keep the callback (Telegram platform limit, not
+        # something client-side code can route around).
+        bid_url = _driver_bid_url(license_key, order_id, name) if _web_app_ok(chat_id) else None
+        bid_button = ({"text": "💰 BID", "web_app": {"url": bid_url}} if bid_url
+                      else {"text": "💰 BID", "callback_data": f"driverbid:{order_id}:{name}"})
         keyboard = {"inline_keyboard": [[
-            {"text": "💰 BID", "callback_data": f"driverbid:{order_id}:{name}"},
+            bid_button,
             *([{"text": "🚩 ROUTE", "url": load_data["route_url"]}] if load_data.get("route_url") else []),
         ]]}
         msg_id = _send(token, chat_id, card, keyboard)
@@ -214,6 +245,20 @@ def handle_callback_query(license_key: str, token: str, cq: dict):
         _answer_callback(token, cq_id, "Invalid data")
         return
     order_id, driver_name = parts[1], parts[2]
+    # This card's own BID was a group callback (no web_app on the card
+    # itself), but cq["from"]["id"] — whoever actually tapped it — is
+    # always an individual user id, always eligible for a web_app
+    # button (2026-10-07) regardless of where the card was. Falls back
+    # to the old ForceReply text prompt only if WEB_BASE_URL isn't
+    # configured at all.
+    bid_url = _driver_bid_url(license_key, order_id, driver_name)
+    if bid_url:
+        _answer_callback(token, cq_id, "💰 Enter your rate")
+        prompt_id = _send(token, chat_id, f"💰 Order #{order_id} — tap below to enter your rate:",
+                          {"inline_keyboard": [[{"text": "💵 Enter price", "web_app": {"url": bid_url}}]]})
+        if not prompt_id:
+            logger.warning(f"[{license_key}] failed to send the rate popup prompt to {driver_name}")
+        return
     _answer_callback(token, cq_id, "💰 Enter your rate below")
     prompt_id = _send(token, chat_id,
                       f"💰 Order #{order_id}\nType your rate (numbers only):\nExample:  1400",

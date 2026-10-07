@@ -39,6 +39,7 @@ import route_calibration
 import zip_geocode
 import activity_log
 import tg_notify
+import driver_bot_web
 import truck_lines
 
 logging.basicConfig(level=logging.INFO)
@@ -868,15 +869,19 @@ def web_record_bid(req: WebRecordBidRequest):
 # go into a Telegram message) or from the dashboard's own Bid PC button
 # (already-authenticated via common.js's normal license_key flow).
 def _resolve_bid_price_auth(t: str, license_key: str, order_id: str = None):
-    """Returns (license_key, order_id), preferring the token when
-    present. Raises HTTPException on any auth/validation failure —
+    """Returns (license_key, order_id, driver_name), preferring the
+    token when present. driver_name is None except for a driver bot's
+    own BID popup link (2026-10-07), which ties the token to exactly
+    one driver. Raises HTTPException on any auth/validation failure —
     every /api/web/bid_price/* endpoint calls this first."""
+    driver_name = None
     if t:
         claims = map_token.verify_bid_token(t)
         if not claims:
             raise HTTPException(status_code=403, detail="This link has expired or is invalid — ask for a new one.")
         license_key = claims["license_key"]
         order_id = claims["order_id"]
+        driver_name = claims.get("driver_name")
     if not license_key:
         raise HTTPException(status_code=403, detail="Not authenticated")
     check = validate_license_key_only(license_key)
@@ -884,7 +889,7 @@ def _resolve_bid_price_auth(t: str, license_key: str, order_id: str = None):
         raise HTTPException(status_code=403, detail=check["reason"])
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
-    return license_key, order_id
+    return license_key, order_id, driver_name
 
 
 @app.get("/api/web/bid_price/context")
@@ -897,14 +902,16 @@ def web_bid_price_context(t: str = None, license_key: str = None, order_id: str 
     all_trucks when the dispatcher picked a specific driver in Telegram —
     the header then shows THAT truck's deadhead/driver and the total
     miles (loaded + that truck's deadhead) the rate/mile is computed
-    from, like the desktop's price dialog for a selected truck."""
-    license_key, order_id = _resolve_bid_price_auth(t, license_key, order_id)
+    from, like the desktop's price dialog for a selected truck.
+    A driver bot token (2026-10-07) resolves to THAT driver's own truck
+    by name instead - they never saw an index, just their own card."""
+    license_key, order_id, driver_name = _resolve_bid_price_auth(t, license_key, order_id)
     load = load_store.get_load(license_key, order_id)
     if not load:
         raise HTTPException(status_code=404, detail="Order not found in the current live feed")
     order = {k: v for k, v in load.items() if k != "original_msg_full"}
     order["order_id"] = order_id
-    sel = bid_actions.get_truck(load, truck)
+    sel = bid_actions.get_truck_by_name(load, driver_name) if driver_name else bid_actions.get_truck(load, truck)
     if sel:
         for k in ("driver_name", "google_deadhead", "deadhead_eta_minutes",
                   "truck_type", "truck_dimensions", "truck_equipment"):
@@ -925,6 +932,8 @@ def web_bid_price_route_map(req: dict):
                              req.get("frame_w"), req.get("frame_h"))
 
 
+
+
 @app.post("/api/web/bid_price/submit")
 def web_bid_price_submit(req: dict):
     """Builds the bid draft WITH the confirmed price via the shared
@@ -936,7 +945,7 @@ def web_bid_price_submit(req: dict):
     triggered path — see build_bid_reply_body's docstring); the
     frontend shows the built text to copy plus a link to the thread,
     same pattern loads.html's own bid modal already uses."""
-    license_key, order_id = _resolve_bid_price_auth(
+    license_key, order_id, driver_name = _resolve_bid_price_auth(
         req.get("t"), req.get("license_key"), req.get("order_id"))
 
     try:
@@ -946,18 +955,50 @@ def web_bid_price_submit(req: dict):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="A valid price is required")
 
+    method = req.get("method") or "pc"
+    if method not in ("pc", "phone", "driver"):
+        raise HTTPException(status_code=400, detail="method must be pc, phone, or driver")
+
+    load = load_store.get_load(license_key, order_id)
+    if not load:
+        raise HTTPException(status_code=404, detail="Order not found in the current live feed")
+
+    # method=driver (2026-10-07, client: "when driver presses bid it
+    # should open map and bid amount just like in the bid phone in
+    # dispatcher version, without the draft aspects of course") — a
+    # completely different flow from pc/phone below: no bid_history
+    # record-and-build-text, no Gmail draft (drivers don't have Gmail
+    # at all). Reuses driver_bot_web.forward_bid verbatim, the exact
+    # same function the old ForceReply-text path already called — same
+    # dispatcher forward, same bid_history row (bid_method="driver_bot"),
+    # same durable confirmation in the driver's own Telegram chat.
+    if method == "driver":
+        if not driver_name:
+            raise HTTPException(status_code=403, detail="This link isn't tied to a specific driver")
+        truck = bid_actions.get_truck_by_name(load, driver_name)
+        if not truck:
+            raise HTTPException(status_code=404, detail="You're no longer matched to this load")
+        rate_str = f"{price:g}"
+        driver_bot_web.forward_bid(license_key, driver_name, order_id, load, rate_str)
+        try:
+            settings = license_db.get_standalone_settings(license_key) or {}
+            dtoken = settings.get("driver_bot_token")
+            chat_id = next((t.get("telegram_chat_id") for t in fleet_store.list_trucks(license_key)
+                            if t.get("driver_name") == driver_name), None)
+            if dtoken and chat_id:
+                driver_bot_web._send(dtoken, chat_id, f"✅ Bid of ${rate_str} sent to dispatcher!\nOrder #{order_id}")
+        except Exception as e:
+            logger.warning(f"[WEB] driver confirmation send failed (non-fatal): order={order_id} driver={driver_name}: {e}")
+        logger.info(f"[WEB] bid_price submit: order={order_id} method=driver driver={driver_name} price={price}")
+        return {"success": True}
+
     rate_per_mile = req.get("rate_per_mile")
     try:
         rate_per_mile = float(rate_per_mile) if rate_per_mile is not None else None
     except (TypeError, ValueError):
         rate_per_mile = None
 
-    method = req.get("method") or "pc"
-    if method not in ("pc", "phone"):
-        raise HTTPException(status_code=400, detail="method must be pc or phone")
-
-    load = load_store.get_load(license_key, order_id)
-    sel = bid_actions.get_truck(load, req.get("truck")) if load else None
+    sel = bid_actions.get_truck(load, req.get("truck"))
     result = bid_actions.record_bid_and_build_text(license_key, order_id, method, price,
                                                     rate_per_mile, sel)
     if not result:

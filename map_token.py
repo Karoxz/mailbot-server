@@ -39,21 +39,32 @@ def _secret() -> str:
     return os.environ.get("MAP_TOKEN_SECRET", "")
 
 
-def make_bid_token(license_key: str, order_id: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> str:
+def make_bid_token(license_key: str, order_id: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+                    driver_name: str = None) -> str:
     payload = {"lk": license_key, "oid": order_id, "exp": int(time.time()) + ttl_seconds}
+    # driver_name (2026-10-07, driver bot's own BID popup): ties this
+    # link to exactly one driver, the same way the Telegram callback
+    # already carries their name in driverbid:{order_id}:{name} — lets
+    # bid_price.html's submit forward the right driver's bid without a
+    # second round of auth. Absent for the dispatcher's own PC/PHONE
+    # links, same as before this field existed.
+    if driver_name:
+        payload["drv"] = driver_name
     return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
 def verify_bid_token(token: str):
-    """Returns {"license_key":..., "order_id":...} or None (expired,
-    tampered, or malformed — jose.jwt.decode checks both the signature
-    and "exp" itself). Never raises."""
+    """Returns {"license_key":..., "order_id":..., "driver_name":...}
+    or None (expired, tampered, or malformed — jose.jwt.decode checks
+    both the signature and "exp" itself). driver_name is None unless
+    this token was minted with one. Never raises."""
     secret = _secret()
     if not secret or not token:
         return None
     try:
         claims = jwt.decode(token, secret, algorithms=[_ALGORITHM])
-        return {"license_key": claims["lk"], "order_id": claims["oid"]}
+        return {"license_key": claims["lk"], "order_id": claims["oid"],
+                "driver_name": claims.get("drv")}
     except (JWTError, KeyError):
         return None
 

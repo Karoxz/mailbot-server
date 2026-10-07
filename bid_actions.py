@@ -88,6 +88,20 @@ def get_truck(load: dict, truck_idx) -> Optional[dict]:
     return verify_truck(load, trucks[idx]) if 0 <= idx < len(trucks) else None
 
 
+def get_truck_by_name(load: dict, driver_name: str) -> Optional[dict]:
+    """Same as get_truck, keyed by driver_name instead of an index — for
+    the driver bot's own BID popup (2026-10-07), which always knows
+    exactly which driver from the signed token, never an index into a
+    list it never saw. None if that driver isn't (or no longer is) a
+    real match for this load."""
+    if not driver_name:
+        return None
+    for t in (load or {}).get("all_trucks") or []:
+        if t.get("driver_name") == driver_name:
+            return verify_truck(load, t)
+    return None
+
+
 def build_bid_text(load: dict, order_id: str, license_key: str,
                    truck: Optional[dict] = None,
                    price: Optional[float] = None,
