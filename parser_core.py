@@ -2775,6 +2775,21 @@ def parse_email_for_api(request_data: dict) -> dict:
     if order:
         ld = load_store.get_load(license_key, order)
         if ld:
+            # Real bug, found live 2026-10-07: a desktop driver's popup-
+            # submitted bid relays through the SERVER's driver_bot_web.
+            # forward_bid, which builds the dispatcher message from
+            # load_store's own formatted_message — but this field was
+            # only ever written post-hoc by poller.py's own
+            # _notify_drivers_async (web/standalone path), never by
+            # /api/parse itself (the desktop's path). A desktop-sourced
+            # load's formatted_message was simply never in load_store at
+            # all, so the forwarded message came through as just the
+            # driver name + rate line with nothing else. Syncing it here
+            # — the one place both callers' loads pass through — fixes
+            # it for both, not just the desktop.
+            if formatted and ld.get('formatted_message') != formatted:
+                ld['formatted_message'] = formatted
+                load_store.put_load(license_key, order, ld)
             result['route_url'] = ld.get('route_url', '')
             result['load_data'] = {k: v for k, v in ld.items()
                                     if k != 'original_msg_full'}

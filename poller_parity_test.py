@@ -1314,6 +1314,59 @@ def _():
         cleanup_license()
 
 
+@test("DESKTOP's own BID PHONE: /api/phone_bid_popup_url mints a token carrying desktop_relay, and submit relays the confirmed price through Telegram instead of a server-side Gmail draft")
+def _():
+    # Client, 2026-10-07: "when i pressed bid phone, it opened normal
+    # map on pc, it should be phone map on telegram just like in the
+    # web version" — BID PHONE now opens the SAME bid_price.html popup
+    # the web version uses, but the server has no Gmail access for a
+    # desktop-only license at all (its OAuth token is local to that
+    # PC), so the confirmed price relays back through Telegram (the
+    # "##PHONEBID##" marker, parsed by main copy.py's own poll loop)
+    # instead of main.py trying (and failing) to build a real draft.
+    from fastapi.testclient import TestClient
+    import main
+    dreset()
+    enable_license()
+    seed_load("555", mid="mid9", formatted_message=FORMATTED, route_url="https://maps.example/r",
+             all_trucks=[{"driver_name": "ALEX", "google_deadhead": 10, "deadhead_eta_minutes": 15,
+                          "truck_dimensions": "48x48x48"}])
+    orig = os.environ.get("WEB_BASE_URL")
+    os.environ["WEB_BASE_URL"] = "https://plutus.example"
+    try:
+        with TestClient(main.app) as c:
+            r = c.post("/api/phone_bid_popup_url", json={
+                "license_key": LK, "machine_id": "desktop-1", "order_id": "555",
+                "dispatcher_bot_token": "111:desktop-dispatch", "dispatcher_chat_ids": [777],
+            })
+            assert r.status_code == 200
+            data = r.json()
+            assert data["success"] and "&method=phone" in data["url"] and "&driver_name" not in data["url"]
+            tok = data["url"].split("t=")[1].split("&")[0]
+
+            r2 = c.post("/api/web/bid_price/submit", json={"t": tok, "order_id": "555",
+                                                            "price": 1400, "method": "phone"})
+            assert r2.status_code == 200
+            body = r2.json()
+            assert body["success"] and body["draft_id"] is None   # no server-side Gmail draft for desktop_relay
+
+        relay_sends = [call for call in dcap.calls if call[0] == "111:desktop-dispatch"]
+        assert len(relay_sends) == 1
+        _, method, payload = relay_sends[0]
+        assert method == "sendMessage" and payload["chat_id"] == 777
+        assert payload["text"] == "##PHONEBID## 555 - 1400 -"
+
+        b = bid_history.get_bids_for_order(LK, "555")[0]
+        assert b["bid_method"] == "phone" and b["bid_amount"] == 1400.0
+    finally:
+        if orig is None:
+            os.environ.pop("WEB_BASE_URL", None)
+        else:
+            os.environ["WEB_BASE_URL"] = orig
+        cleanup_loads()
+        cleanup_license()
+
+
 @test("web Live Feed: driver-bot-active load is hidden until the driver bids, then reappears WITH the rate")
 def _():
     # Client, 2026-10-07: "in the web it should be same driver bot logic,
@@ -1570,6 +1623,49 @@ def _():
         conn.execute("DELETE FROM loads WHERE license_key=? AND order_id=?", ("", order))
         conn.commit()
         conn.close()
+
+
+@test("parse_email_for_api (the desktop's /api/parse) persists formatted_message into load_store, not just the response")
+def _():
+    # Real bug, found live 2026-10-07 testing the desktop's driver bot
+    # popup: a desktop driver's bid relays through the SERVER's
+    # driver_bot_web.forward_bid, which builds the dispatcher message
+    # from load_store's OWN formatted_message field — but that field
+    # was only ever written post-hoc by poller.py's _notify_drivers_
+    # async (the web/standalone path), never by parse_email_for_api
+    # itself (the desktop's path, called via /api/parse). A desktop-
+    # sourced load's formatted_message was simply never in load_store
+    # at all, so the forwarded dispatcher message came through as just
+    # "{driver} — Rate: $X" with nothing else (client screenshot:
+    # "Michael Brown — Rate: $200" and nothing below it).
+    import parser_core
+    import load_store as _load_store
+    dreset()
+    enable_license()
+    try:
+        result = parser_core.parse_email_for_api({
+            "license_key": LK, "machine_id": "desktop-1",
+            "email_body": "Bid on Order #918273\nVehicle required: LARGE STRAIGHT\n"
+                          "Pick-Up:\nColumbus, OH 43215\n01/15/2026 08:00 AM EST\n"
+                          "Delivery:\nDetroit, MI 48201\n01/15/2026 14:00 PM EST\n"
+                          "Weight: 10000 lbs\nBroker Name: John Broker\n",
+            "internal_date_ms": 1791358417000,
+            "allowed_vehicles": ["LARGE STRAIGHT"], "max_radius_miles": 300,
+            "bid_template": "Truck is {google_deadhead} out",
+            "trucks": [{"vehicle": "LARGE STRAIGHT", "driver_name": "Michael Brown",
+                       "dimensions": "", "zip_location": "43215"}],
+        })
+        assert result["success"] and result["order_id"] == "918273"
+        assert result["formatted"]
+        assert result["load_data"]["formatted_message"] == result["formatted"]
+        stored = _load_store.get_load(LK, "918273")
+        assert stored["formatted_message"] == result["formatted"]
+    finally:
+        conn = sqlite3.connect(_load_store.DB_PATH)
+        conn.execute("DELETE FROM loads WHERE license_key=? AND order_id=?", (LK, "918273"))
+        conn.commit()
+        conn.close()
+        cleanup_license()
 
 
 # ── run ────────────────────────────────────────────────────────────────

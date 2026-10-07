@@ -273,6 +273,51 @@ def driver_bid_popup_url(req: dict):
     return {"success": True, "url": f"{base}/app/bid_price.html?t={tok}&method=driver"}
 
 
+@app.post("/api/phone_bid_popup_url")
+def phone_bid_popup_url(req: dict):
+    """The desktop's own BID PHONE (client, 2026-10-07: "when i pressed
+    bid phone, it opened normal map on pc, it should be phone map on
+    telegram just like in the web version") — mints a signed
+    bid_price.html link for the DISPATCHER'S OWN bid (no driver_name),
+    same page/popup the web version's BID PHONE already opens on
+    whatever device the dispatcher's Telegram happens to be on.
+
+    Unlike BID PC (plain clipboard copy, no server involvement) this
+    page normally creates a REAL Gmail draft server-side — but the
+    server has no Gmail access for a desktop-only license at all (the
+    desktop's OAuth token is local to its own PC, never uploaded), so
+    dispatcher_bot_token/dispatcher_chat_ids ride along as a
+    desktop_relay claim: /api/web/bid_price/submit relays the confirmed
+    price back through Telegram instead of trying to create the draft
+    itself, and the desktop's own long-poll loop (already watching that
+    same bot/chat) picks it up and creates the real draft locally."""
+    license_key = req.get("license_key", "")
+    machine_id  = req.get("machine_id", "")
+    order_id    = req.get("order_id", "")
+    check = validate_license(license_key, machine_id)
+    if not check["valid"]:
+        raise HTTPException(status_code=403, detail=check["reason"])
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+
+    base = driver_bot_web._web_base_url()
+    if not base:
+        return {"success": False, "reason": "web base url not configured on the server"}
+
+    dispatcher_bot_token = req.get("dispatcher_bot_token") or ""
+    dispatcher_chat_ids  = req.get("dispatcher_chat_ids") or []
+    desktop_relay = None
+    if dispatcher_bot_token and dispatcher_chat_ids:
+        desktop_relay = {"dispatcher_bot_token": dispatcher_bot_token,
+                         "dispatcher_chat_ids":  dispatcher_chat_ids}
+    tok = map_token.make_bid_token(license_key, order_id, desktop_relay=desktop_relay)
+    url = f"{base}/app/bid_price.html?t={tok}&method=phone"
+    truck_idx = req.get("truck")
+    if truck_idx not in (None, ""):
+        url += f"&truck={truck_idx}"
+    return {"success": True, "url": url}
+
+
 @app.post("/api/build_bid")
 def build_bid(req: dict):
     check = validate_license(req.get("license_key", ""), req.get("machine_id", ""))
@@ -1081,16 +1126,43 @@ def web_bid_price_submit(req: dict):
     # as PC, just without the draft field.
     draft_id = None
     if method == "phone":
-        try:
-            msg_id = (load.get("original_msg_full") or {}).get("id") or ""
-            if not msg_id:
-                raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
-            service = gmail_client.build_service(license_key)
-            headers = gmail_client.get_message_headers(service, msg_id)
-            draft = gmail_client.create_reply_draft(service, headers, body=result["bid_text"])
-            draft_id = draft.get("id") or None
-        except Exception as e:
-            logger.warning(f"[WEB] bid_price phone draft failed (non-fatal): order={order_id}: {e}")
+        desktop_relay = None
+        tok = req.get("t")
+        if tok:
+            claims = map_token.verify_bid_token(tok)
+            desktop_relay = (claims or {}).get("desktop_relay")
+        if desktop_relay and desktop_relay.get("dispatcher_bot_token") and desktop_relay.get("dispatcher_chat_ids"):
+            # Desktop-only license (client, 2026-10-07: "it should be
+            # phone map on telegram just like in the web version") — the
+            # server has no Gmail access for this account at all (the
+            # desktop's OAuth token lives only on its own PC, never
+            # uploaded), so a real draft can't be created here. Relay
+            # the confirmed price back through Telegram to the SAME
+            # bot/chat the desktop is already long-polling instead —
+            # its own handle_bid_callbacks picks this marker message up
+            # and creates the real draft locally, same as the old
+            # ForceReply-text flow did, just triggered by this popup
+            # instead of a typed reply.
+            try:
+                truck_param = req.get("truck")
+                marker = (f"##PHONEBID## {order_id} "
+                         f"{truck_param if truck_param not in (None, '') else '-'} "
+                         f"{price:g} {rate_per_mile if rate_per_mile else '-'}")
+                for cid in desktop_relay["dispatcher_chat_ids"]:
+                    driver_bot_web._send(desktop_relay["dispatcher_bot_token"], cid, marker)
+            except Exception as e:
+                logger.warning(f"[WEB] bid_price phone relay failed (non-fatal): order={order_id}: {e}")
+        else:
+            try:
+                msg_id = (load.get("original_msg_full") or {}).get("id") or ""
+                if not msg_id:
+                    raise RuntimeError("original message unavailable (this load didn't come from the web engine)")
+                service = gmail_client.build_service(license_key)
+                headers = gmail_client.get_message_headers(service, msg_id)
+                draft = gmail_client.create_reply_draft(service, headers, body=result["bid_text"])
+                draft_id = draft.get("id") or None
+            except Exception as e:
+                logger.warning(f"[WEB] bid_price phone draft failed (non-fatal): order={order_id}: {e}")
 
     # Desktop parity: after a confirmed BID PC price the desktop sends
     # "📋 Bid text copied — $X ($Y/mi). Press Reply and paste (Ctrl+V)."
