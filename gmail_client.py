@@ -15,11 +15,14 @@
 # =============================================================
 
 import base64
+import html
 import json
 import os
 import string
 import time
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 from random import SystemRandom
 from typing import Optional
@@ -298,6 +301,27 @@ def get_message_headers(service, message_id: str) -> dict:
     return headers
 
 
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "plutus_logo_light.png")
+
+
+def _html_body_with_logo(body_text: str, logo_cid: str) -> str:
+    """Same look as the desktop's own build_bid_reply_html, minus a
+    hardcoded per-client signature block — this server serves multiple
+    licenses, so whatever contact/signature text a draft needs already
+    comes from that license's own bid_template, inside body_text itself."""
+    body_html = "<br>".join(html.escape(body_text).splitlines())
+    return (
+        '<html><body style="font-family:Arial,sans-serif;font-size:12px;'
+        'font-weight:700;color:#222;line-height:1.45;margin:0;padding:0;">'
+        f'<div>{body_html}</div>'
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0">'
+        '<tr><td style="padding-top:18px;">'
+        f'<img src="cid:{logo_cid}" width="120" style="display:block;border:0;height:auto;">'
+        '</td></tr></table>'
+        '</body></html>'
+    )
+
+
 def create_reply_draft(service, original: dict, retries: int = 3, body: str = "") -> dict:
     """original: {"from", "subject", "message-id", "references", "_thread_id"}
     (from get_message_headers). Returns Gmail's draft resource ({"id":...}).
@@ -317,7 +341,26 @@ def create_reply_draft(service, original: dict, retries: int = 3, body: str = ""
     references = (original.get("references") or "").strip()
     if not subject.lower().startswith("re:"):
         subject = "Re: " + subject
-    mime = MIMEText(body, "plain", "utf-8")
+
+    # Client, 2026-10-09: "use the logos i attached (dark and light
+    # versions), for both desktop and web" — same inline-logo approach
+    # the desktop's own create_reply_draft already has. Only when there's
+    # a real body to show it alongside — an empty draft (the plain DRAFT
+    # button's blank starting point) stays exactly as before.
+    if body and os.path.exists(_LOGO_PATH):
+        mime = MIMEMultipart("related")
+        alt = MIMEMultipart("alternative")
+        mime.attach(alt)
+        logo_cid = "companylogo"
+        alt.attach(MIMEText(body, "plain", "utf-8"))
+        alt.attach(MIMEText(_html_body_with_logo(body, logo_cid), "html", "utf-8"))
+        with open(_LOGO_PATH, "rb") as f:
+            img = MIMEImage(f.read(), _subtype="png")
+        img.add_header("Content-ID", f"<{logo_cid}>")
+        img.add_header("Content-Disposition", "inline", filename=os.path.basename(_LOGO_PATH))
+        mime.attach(img)
+    else:
+        mime = MIMEText(body, "plain", "utf-8")
     mime["To"] = to_addr
     mime["Subject"] = subject
     if message_id:

@@ -683,7 +683,16 @@ def _():
             # substring-matching the outer (also-base64) raw message.
             import email
             parsed = email.message_from_string(raw)
-            assert parsed.get_payload(decode=True).decode() == "Truck T2 is 33 miles out"
+            # Client, 2026-10-09: "use the logos i attached... for both
+            # desktop and web" — a real body now makes this a multipart
+            # message (plain + html + inline logo), not a bare MIMEText,
+            # so the plain-text part has to be found rather than read
+            # off the top-level payload directly.
+            assert parsed.is_multipart()
+            plain_part = next(p for p in parsed.walk() if p.get_content_type() == "text/plain")
+            assert plain_part.get_payload(decode=True).decode() == "Truck T2 is 33 miles out"
+            logo_parts = [p for p in parsed.walk() if p.get_content_type() == "image/png"]
+            assert len(logo_parts) == 1 and logo_parts[0].get("Content-ID") == "<companylogo>"
             bids = bid_history.get_bids_for_order(LK, "777")
             assert len(bids) == 1 and bids[0]["bid_method"] == "phone" and bids[0]["driver_name"] == "T2"
             assert bids[0]["bid_amount"] == 692 and bids[0]["deadhead_miles"] == 33
