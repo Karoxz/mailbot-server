@@ -49,13 +49,16 @@
   }
 
   // ── Theme ──────────────────────────────────────────────────────────
-  // Single transparent-background icon (2026-10-02 redesign) — the old
-  // gold-on-black/gold-on-white JPG pair is gone; this cutout drops
-  // cleanly onto either theme with no mismatched box around it, so
-  // there's no longer a theme-dependent file to pick between. `theme`
-  // kept as a no-op param so existing callers don't need to change.
+  // Client, 2026-10-09: new combined icon+wordmark logo (replaces the
+  // transparent icon-only cutout from the 2026-10-02 redesign, paired
+  // with the separately-styled gold-foil-text .brand-title — that text
+  // span is gone now, this image already has "PLUTUS BOT" baked in).
+  // Back to a theme-dependent file: unlike the old cutout, this one has
+  // its own solid background (black/white), so picking the version
+  // that matches the current theme is what keeps it from showing as a
+  // mismatched box the way a single fixed-theme image would.
   function logoSrc(theme) {
-    return "assets/plutus_logo_icon.png";
+    return theme === "light" ? "assets/plutus_logo_light.png" : "assets/plutus_logo_dark.png";
   }
   function applyTheme(theme) {
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
@@ -483,8 +486,7 @@
     mount.innerHTML = `
       <nav class="topnav">${links}</nav>
       <a href="index.html" class="brand">
-        <img src="${logoSrc(currentTheme)}" alt="" class="brand-logo">
-        <span class="brand-title">Plutus Bot</span>
+        <img src="${logoSrc(currentTheme)}" alt="Plutus Bot" class="brand-logo">
       </a>
       <div class="topbar-actions">
         <button id="bot-chip" class="bot-chip" type="button" title="Web bot (the server-side version of the desktop's START/STOP)">

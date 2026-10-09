@@ -88,14 +88,14 @@ main.content { animation: fadeIn .25s ease both; }
   padding: 32px 28px;
   box-shadow: var(--shadow);
 }
-.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.login-brand { display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
 /* Circle, not rounded-square — client, 2026-10-01: "make the logo
    circle shape". */
 /* object-fit:contain, no border-radius crop (2026-10-02) — the new icon
    is a non-square transparent cutout with its own circular ring built
    into the artwork, not a square photo to crop into a circle; cover+
    radius would clip it asymmetrically. */
-.login-logo { width: 72px; height: 72px; object-fit: contain; }
+.login-logo { width: 140px; height: 140px; object-fit: contain; }
 .login-card h1 { font-size: 1.6rem; text-transform: uppercase; letter-spacing: .5px; }
 .login-card .subtitle { color: var(--text-dim); font-size: .9rem; margin-bottom: 20px; }
 .login-card input {
@@ -164,31 +164,13 @@ main.content { animation: fadeIn .25s ease both; }
   color: var(--text);
   text-decoration: none;
 }
-/* Big, transparent-background icon — client, 2026-10-02: "the logo...
-   be big and in the middle". object-fit:contain (not cover) since the
-   source is a non-square cutout on a transparent background, not a
-   photo to crop into a circle. */
-.brand-logo { width: 112px; height: 112px; object-fit: contain; }
-/* Gold-foil title — client: "the text should have golden texture",
-   given an actual photo of brushed gold foil to use (not a flat color
-   or a CSS-gradient approximation): the image is applied as the text's
-   own fill via background-clip, so the letters show real photographed
-   gold rather than a simulated one. */
-.brand-title {
-  font-weight: 800;
-  font-size: 1.7rem;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  margin-top: 2px;
-  background-image: url("assets/plutus_gold_texture.jpg");
-  background-size: 340px 320px;
-  background-position: -30px -90px;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .35));
-}
-:root:not([data-theme="dark"]) .brand-title { filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .15)); }
+/* Big, centered logo — client, 2026-10-02: "the logo... be big and in
+   the middle". 2026-10-09: now a combined icon+wordmark image (the
+   separately-styled gold-foil .brand-title text is gone — this image
+   already has "PLUTUS BOT" baked in), sized up from the old icon-only
+   112px so the wordmark stays legible. object-fit:contain so nothing
+   crops regardless of the source image's own aspect ratio. */
+.brand-logo { width: 160px; height: 160px; object-fit: contain; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; justify-self: end; }
 
 .topnav { display: flex; align-items: center; gap: 4px; justify-self: start; overflow-x: auto; }
@@ -692,8 +674,7 @@ tr.skeleton-row td { padding: 12px 18px; }
      — scaled down but keeps the same centered layout (the grid's two
      1fr side columns still center it even with .topnav hidden/empty). */
   .topbar { padding: 8px 14px; gap: 8px; }
-  .brand-logo { width: 44px; height: 44px; }
-  .brand-title { font-size: 1rem; letter-spacing: 1px; background-size: 160px 150px; background-position: -14px -40px; }
+  .brand-logo { width: 72px; height: 72px; }
   /* Phone width: the chip collapses to just its colored dot (state is
      still in its tooltip and the Settings page) so the bar stays on one row. */
   .bot-chip { padding: 8px; }
