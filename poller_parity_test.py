@@ -282,6 +282,35 @@ def _():
     assert len(tg.sends()) == 1, "cooldown should suppress the second ping"
 
 
+@test("broker reply whose subject has NO 'RE:' prefix still routes to the labeled-thread ping, via In-Reply-To/References headers")
+def _():
+    # Real bug, client-reported 2026-10-09: "RE message wasn't
+    # processed... in both web and desktop versions" — is_freight_
+    # subject already excludes a subject that literally starts with
+    # "RE:"/"FW:"/"FWD:", but Gmail doesn't guarantee a genuine reply's
+    # Subject HEADER actually carries that prefix (confirmed live: a
+    # real broker reply came through with no "RE:" on its own header,
+    # got parsed as a FRESH load posting instead, and was silently
+    # skipped as "0 candidates"). In-Reply-To/References are standard
+    # headers (RFC 5322) set on every genuine reply regardless of
+    # subject text.
+    stub_parse()
+    msg = {
+        "id": "m1", "threadId": "tt", "labelIds": ["INBOX", "UNREAD"], "internalDate": "1790000000000",
+        "payload": {"headers": [
+            {"name": "Subject", "value": "LARGE STRAIGHT from Chicago, IL to Clinton Township, MI"},
+            {"name": "In-Reply-To", "value": "<original-msg-id@broker.example>"},
+        ], "mimeType": "text/plain", "body": {"data": _b64("sounds good")}},
+    }
+    g = setup([msg])
+    g.thread_labels["tt"] = ["Label_1"]
+    g.thread_subject["tt"] = "LARGE STRAIGHT from Chicago, IL to Clinton Township, MI"
+    lm = {"Label_1": "bid"}
+    assert poller._process_message(fresh_ctx(), g, lm, "m1") == "labeled_thread"
+    sent = tg.sends()
+    assert len(sent) == 1 and "📌 Label:  bid" in sent[0]["text"]
+
+
 @test("freight email inside a labeled thread: parsed+sent, then left as-is (unread) with the ping (desktop _safe_mark_read)")
 def _():
     stub_parse()
@@ -1652,6 +1681,14 @@ def _():
         assert load["delivery_dt"] == "10/09/2026 21:00"
         assert load["driver_name"] == "Driver1"
         assert "TEAM REQUIRED" in formatted
+        # Client, 2026-10-09: this format never states pickup->delivery
+        # distance itself (unlike some other broker formats) — a real
+        # live load matched fine but came through with no Loaded Miles/
+        # Total Miles at all. Routed fallback (same GraphHopper call
+        # already used for deadhead) fills it in from the now-geocoded
+        # pickup/delivery, instead of leaving it text-extraction-only.
+        assert load["loaded_miles"] is not None and load["loaded_miles"] > 0
+        assert "Loaded Miles:" in formatted and "Total Miles:" in formatted
     finally:
         conn = sqlite3.connect(_load_store.DB_PATH)
         conn.execute("DELETE FROM loads WHERE license_key=? AND order_id=?", ("", order))

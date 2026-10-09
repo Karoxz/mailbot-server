@@ -1020,8 +1020,21 @@ def compute_route_view(encoded_polyline: str, map_width_px: int, map_height_px: 
     lons = [p[1] for p in points]
     min_lat, max_lat = min(lats), max(lats)
     min_lon, max_lon = min(lons), max(lons)
-    lat_pad = (max_lat - min_lat) * pad_fraction or 0.05
-    lon_pad = (max_lon - min_lon) * pad_fraction or 0.05
+    # Client, 2026-10-09: "the map is too far away for this load, it
+    # needs to be closer so dispatcher can see the road" — a flat
+    # pad_fraction (200% of the route's OWN span, on every side) looks
+    # right on a short route (a 50mi route gets ~100mi of visible
+    # surrounding context) but scales with the route itself, so a
+    # cross-country one (1264mi, Rancho Santa Margarita CA -> Redmond
+    # WA) ballooned into a whole-Pacific/Iceland/Japan view — nothing
+    # useful to actually look at. Capped in ABSOLUTE degrees instead of
+    # letting the percentage compound on long routes: short routes
+    # still get their full proportional padding (well under the cap),
+    # long ones get a flat ~2 degrees (~140mi at US latitudes) of
+    # surrounding context instead of 200% of a huge span.
+    MAX_PAD_DEGREES = 2.0
+    lat_pad = min((max_lat - min_lat) * pad_fraction, MAX_PAD_DEGREES) or 0.05
+    lon_pad = min((max_lon - min_lon) * pad_fraction, MAX_PAD_DEGREES) or 0.05
     min_lat -= lat_pad
     max_lat += lat_pad
     min_lon -= lon_pad
@@ -2161,6 +2174,22 @@ def process_bid_email(raw_text, allowed_vehicles, internal_date_ms,
                 pass
 
     estimated_miles_from_email = extract_estimated_miles_from_email(t)
+    # Fallback: real routed pickup->delivery distance when the broker's
+    # own email never states one at all (client, 2026-10-09: a TL/LTL
+    # "Alliance Lane" load processed fine — matched a truck, computed a
+    # real deadhead — but came through with no Loaded Miles/Total Miles
+    # whatsoever, since this format never states distance the way some
+    # other broker formats do, and there was previously no fallback to
+    # the SAME routing already used for deadhead a few lines down).
+    # Best-effort: only when both ends already geocoded successfully,
+    # never blocks the load on a routing failure.
+    if estimated_miles_from_email is None and _pu_coords[0] and _dl_coords[0]:
+        try:
+            _routed_loaded = compute_route(_pu_coords[0], _dl_coords[0])
+            if _routed_loaded and _routed_loaded.get("miles"):
+                estimated_miles_from_email = round(_routed_loaded["miles"])
+        except Exception as e:
+            print(f"[LOADED-MILES] routing fallback failed: {e}", flush=True)
 
     best_truck, deadhead_miles, reject_reason, per_truck_log = None, None, None, []
     deadhead_eta = None

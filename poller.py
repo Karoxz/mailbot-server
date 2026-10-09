@@ -870,7 +870,21 @@ def _process_message(ctx: dict, service, label_map: dict, msg_id: str) -> str:
     # 4. reply / freight detection
     subject = _header(full, "subject")
     thread_id = full.get("threadId", "")
-    is_freight = desktop_parity.is_freight_subject(subject)
+    # Real bug, client-reported 2026-10-09 ("RE message wasn't
+    # processed... in both web and desktop versions"): is_freight_
+    # subject already excludes a subject that literally starts with
+    # "RE:"/"FW:"/"FWD:", but Gmail doesn't guarantee a reply's actual
+    # Subject HEADER carries that prefix — some mail clients/relays
+    # omit it even though the message is genuinely a reply within an
+    # existing thread (confirmed live: a broker's real reply came
+    # through with no "RE:" on its own header, got treated as a FRESH
+    # load posting, and was silently skipped as "0 candidates" instead
+    # of ever reaching the labeled-thread reply path). In-Reply-To/
+    # References are standard headers (RFC 5322) set on every genuine
+    # reply regardless of subject text — a structural signal subject
+    # text can't fake or omit.
+    has_reply_headers = bool(_header(full, "in-reply-to") or _header(full, "references"))
+    is_freight = desktop_parity.is_freight_subject(subject) and not has_reply_headers
 
     # 5. thread-label guard — a non-freight message in a labeled thread
     # (typically a broker reply) never reaches the parser; it gets the
