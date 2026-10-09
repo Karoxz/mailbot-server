@@ -13,6 +13,15 @@
   --bad:       #dc2626;
   --warn:      #d97706;
   --shadow:    0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  /* Client, 2026-10-09: "make the background match the logos
+     background" — the new logo images are solid-fill PNGs (measured
+     exactly #000000 dark / #fefefe~white light), not transparent
+     cutouts like the old icon was, so anywhere the logo sits (topbar,
+     login card) needs its OWN pixel-matched background instead of
+     reusing --bg-panel (#ffffff here already matches closely, but
+     --bg-panel is also used by plenty of other cards/panels this
+     shouldn't be coupled to). */
+  --logo-bg: #ffffff;
 }
 
 [data-theme="dark"] {
@@ -28,6 +37,10 @@
   --bad:       #f87171;
   --warn:      #fbbf24;
   --shadow:    0 1px 3px rgba(0,0,0,.4), 0 1px 2px rgba(0,0,0,.3);
+  /* --bg-panel (#0d0d0f) is near-black but NOT pure black, which left
+     a visible edge around the dark logo's own true-#000000 background
+     — this matches it exactly instead. */
+  --logo-bg: #000000;
 }
 
 html, body {
@@ -82,7 +95,7 @@ main.content { animation: fadeIn .25s ease both; }
 .login-card {
   width: 100%;
   max-width: 360px;
-  background: var(--bg-panel);
+  background: var(--logo-bg);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 32px 28px;
@@ -149,7 +162,7 @@ main.content { animation: fadeIn .25s ease both; }
   gap: 16px;
   padding: 10px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
+  background: var(--logo-bg);
   position: sticky;
   top: 0;
   z-index: 10;
